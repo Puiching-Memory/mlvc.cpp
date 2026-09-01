@@ -1,0 +1,29 @@
+# Build artifacts
+build/
+build-*/
+cmake-build-*/
+*.o
+*.obj
+*.a
+*.so
+*.so.*
+
+# Third-party fetched at build time
+third_party/json/
+third_party/onnxruntime/
+
+# Model & media artifacts
+*.onnx
+*.mlvc
+*.yuv
+*.npy
+
+# IDE
+.vscode/
+.idea/
+.vs/
+*.user
+
+# OS
+.DS_Store
+Thumbs.db

@@ -11,6 +11,8 @@ cmake-build-*/
 # Third-party fetched at build time
 third_party/json/
 third_party/onnxruntime/
+third_party/libtorch/
+third_party/tensorrt/
 
 # Model & media artifacts
 *.onnx

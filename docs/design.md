@@ -1,4 +1,4 @@
-# MLVC ONNX + C++ Runtime pipeline — design notes
+# MLVC C++ runtime pipeline — design notes
 
 Reference: microsoft/mlvc `video/conversion` split-model deployment path
 (`dmc61sbr_e1d1`, model `dmc61sbr_reglu`, weights `mlvc-psnr-v1`).
@@ -134,11 +134,27 @@ Reference: `FrameLoop` (`video/conversion/_frame_loop.py`) with model defaults:
   (2x2 average downsample) → x255 → bytes.
 - `pixel_range=1.0`, so the graph works directly in [0,1].
 
-## 7. Implementation plan
+## 7. Inference backends
+
+Three interchangeable backends implement `mlvc::InferenceBackend`
+(`include/mlvc/backend.hpp`), selected at runtime via `--backend` and compiled
+in via `MLVC_WITH_*` CMake options:
+
+| Backend | Model artifacts | Execution | Notes |
+|---|---|---|---|
+| `onnxruntime` | `MLVC{Encoder,Decoder}.onnx` | CPU / CUDA EP | Reference path, mirrors the official deployment |
+| `libtorch` | `MLVC{Encoder,Decoder}.ts` | CPU / CUDA | Needs TorchScript exports (converter emits ONNX only); libtorch >= 2.13 requires C++20 |
+| `tensorrt` | `MLVC{Encoder,Decoder}.onnx` | CUDA | Engines built at load time via nvonnxparser (TensorRT 10 API, fp16 enabled) |
+
+Host-side tensors crossing the backend boundary are fp32; the MLVC graphs are
+fp16, so each backend adds dtype conversion when the pipeline lands.
+
+## 8. Implementation plan
 
 - [ ] `src/pmf.{h,cpp}` — PMF JSON loading + rANS encoder/decoder wrappers
 - [ ] `src/scales.{h,cpp}` — dual-prior scale extraction + masks
 - [ ] `src/yuv.{h,cpp}` — YUV420 IO, padding, color conversion
-- [ ] `src/pipeline.{h,cpp}` — ONNX sessions, DPB, encode/decode loop
+- [ ] `src/pipeline.{h,cpp}` — backend sessions, DPB, encode/decode loop
 - [ ] `src/main.cpp` — CLI (`encode` / `decode` / `transcode` / `bench`)
+- [ ] Backend parity test: same inputs → bit-exact latents across backends
 - [ ] Cross-validation against python reference (`validate_conversion` outputs)

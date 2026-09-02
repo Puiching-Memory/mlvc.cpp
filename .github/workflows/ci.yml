@@ -6,27 +6,62 @@ on:
   pull_request:
     branches: [main]
 
+# TensorRT is not covered: NVIDIA distributes it behind a login, so it cannot
+# be fetched in CI. All other backends build from pinned, checksum-verified
+# packages (see scripts/fetch_*.sh).
+
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: ${{ matrix.os }} / ${{ matrix.backend }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        backend: [onnxruntime]
+        include:
+          # CPU libtorch, built together with the onnxruntime backend
+          - os: ubuntu-latest
+            backend: libtorch
+    defaults:
+      run:
+        shell: bash
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y cmake ninja-build g++ curl
+      - name: Cache inference SDKs
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/onnxruntime
+            third_party/libtorch
+          key: sdk-${{ runner.os }}-${{ hashFiles('scripts/fetch_onnxruntime.sh', 'scripts/fetch_libtorch.sh') }}
 
-      - name: Fetch ONNX Runtime (CPU)
+      - name: Fetch ONNX Runtime
         run: bash scripts/fetch_onnxruntime.sh
 
+      - name: Fetch libtorch (CPU)
+        if: matrix.backend == 'libtorch'
+        run: bash scripts/fetch_libtorch.sh
+
       - name: Configure
-        run: >
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-          -DONNXRUNTIME_ROOT="$PWD/third_party/onnxruntime/onnxruntime-linux-x64-1.19.2"
+        run: |
+          EXTRA=()
+          if [[ "${{ matrix.backend }}" == "libtorch" ]]; then
+            EXTRA=(-DMLVC_WITH_LIBTORCH=ON
+                   -DLIBTORCH_ROOT="$(bash scripts/fetch_libtorch.sh --print-dir)")
+          fi
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
+            -DONNXRUNTIME_ROOT="$(bash scripts/fetch_onnxruntime.sh --print-dir)" \
+            "${EXTRA[@]}"
 
       - name: Build
-        run: cmake --build build
+        run: cmake --build build --config Release --parallel 2
 
       - name: Smoke test
-        run: ./build/mlvc_demo
+        run: |
+          BIN=build/mlvc_demo
+          [[ -f "$BIN" ]] || BIN=build/Release/mlvc_demo.exe
+          "$BIN" --list-backends
+          "$BIN" --help

@@ -15,26 +15,40 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 option(MLVC_ENABLE_IPO "Enable interprocedural optimization in Release builds" ON)
+option(MLVC_DRIVER_CUBIN_ONLY
+    "Build the CUDA Runtime-free driver-cubin backend and its probe" OFF)
+set(MLVC_TEST_ASSETS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/model-assets" CACHE PATH
+    "Optional local MLVC model/reference assets used by GPU conformance tests")
+set(MLVC_TEST_ENGINE_CACHE_DIR "" CACHE PATH
+    "Optional TensorRT engine-cache root used by codec conformance tests")
+
+if(MLVC_DRIVER_CUBIN_ONLY)
+    set(MLVC_BACKEND "driver_cubin" CACHE STRING "Inference backend" FORCE)
+endif()
 
 # A release contains exactly one inference backend.  Keeping the variants
 # separate avoids loading mutually incompatible CUDA/cuDNN copies and makes
 # the dependency boundary of each package explicit.
 set(MLVC_BACKEND "onnxruntime" CACHE STRING
-    "Inference backend: onnxruntime, libtorch, or tensorrt")
-set_property(CACHE MLVC_BACKEND PROPERTY STRINGS onnxruntime libtorch tensorrt)
+    "Inference backend: onnxruntime, libtorch, tensorrt, or driver_cubin")
+set_property(CACHE MLVC_BACKEND PROPERTY STRINGS
+    onnxruntime libtorch tensorrt driver_cubin)
 
 set(MLVC_WITH_ONNXRUNTIME OFF)
 set(MLVC_WITH_LIBTORCH OFF)
 set(MLVC_WITH_TENSORRT OFF)
+set(MLVC_WITH_DRIVER_CUBIN OFF)
 if(MLVC_BACKEND STREQUAL "onnxruntime")
     set(MLVC_WITH_ONNXRUNTIME ON)
 elseif(MLVC_BACKEND STREQUAL "libtorch")
     set(MLVC_WITH_LIBTORCH ON)
 elseif(MLVC_BACKEND STREQUAL "tensorrt")
     set(MLVC_WITH_TENSORRT ON)
+elseif(MLVC_BACKEND STREQUAL "driver_cubin")
+    set(MLVC_WITH_DRIVER_CUBIN ON)
 else()
     message(FATAL_ERROR
-        "MLVC_BACKEND must be one of: onnxruntime, libtorch, tensorrt")
+        "MLVC_BACKEND must be one of: onnxruntime, libtorch, tensorrt, driver_cubin")
 endif()
 
 message(STATUS "MLVC release backend: ${MLVC_BACKEND}")
@@ -146,34 +160,139 @@ if(MLVC_WITH_TENSORRT)
     message(STATUS "Backend tensorrt 11.2: ${NVINFER_LIBRARY}")
 endif()
 
-set(MLVC_DEMO_SOURCES
-    src/main.cpp
-)
-if(MLVC_WITH_ONNXRUNTIME)
-    list(APPEND MLVC_DEMO_SOURCES src/backends/onnxruntime_backend.cpp)
-elseif(MLVC_WITH_LIBTORCH)
-    list(APPEND MLVC_DEMO_SOURCES src/backends/libtorch_backend.cpp)
-else()
-    list(APPEND MLVC_DEMO_SOURCES src/backends/tensorrt_backend.cpp)
+# Driver-cubin embeds the complete fixed-shape MLVC operator module. The CUDA
+# Toolkit supplies headers and the libcuda link stub only; deployed binaries
+# do not depend on cudart, cuDNN, TensorRT, ONNX Runtime, or libtorch.
+if(MLVC_WITH_DRIVER_CUBIN)
+    include(cmake/DriverCubinTargets.cmake)
+    list(APPEND MLVC_BACKEND_LIBS
+        mlvc_driver mlvc_driver_kernels nlohmann_json::nlohmann_json)
 endif()
 
-add_executable(mlvc_demo ${MLVC_DEMO_SOURCES})
+if(MLVC_WITH_ONNXRUNTIME)
+    set(MLVC_BACKEND_SOURCE src/backends/onnxruntime_backend.cpp)
+elseif(MLVC_WITH_LIBTORCH)
+    set(MLVC_BACKEND_SOURCE src/backends/libtorch_backend.cpp)
+elseif(MLVC_WITH_TENSORRT)
+    set(MLVC_BACKEND_SOURCE src/backends/tensorrt_backend.cpp)
+else()
+    set(MLVC_BACKEND_SOURCE src/backends/driver_cubin_backend.cpp)
+endif()
+
+add_library(mlvc_backend STATIC ${MLVC_BACKEND_SOURCE})
+target_include_directories(mlvc_backend
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
+    PRIVATE ${MLVC_BACKEND_INCLUDES}
+)
+target_link_libraries(mlvc_backend PUBLIC ${MLVC_BACKEND_LIBS})
+
+add_library(mlvc_codec STATIC
+    src/bitstream.cpp
+    src/entropy.cpp
+    src/model.cpp
+    src/pipeline.cpp
+    src/scales.cpp
+    src/yuv.cpp
+)
+target_include_directories(mlvc_codec PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+)
+target_link_libraries(mlvc_codec PUBLIC
+    mlvc_backend
+    msrtc_rans
+    nlohmann_json::nlohmann_json
+)
+
+add_executable(mlvc_demo src/main.cpp)
+add_executable(mlvc_backend_bench src/backend_bench.cpp)
+
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(mlvc_codec_tests tests/codec_tests.cpp)
+    target_link_libraries(mlvc_codec_tests PRIVATE mlvc_codec)
+    if(EXISTS "${MLVC_TEST_ASSETS_DIR}/benchmarks/gray-q21/encoder/case.json"
+       AND EXISTS "${MLVC_TEST_ASSETS_DIR}/models/mlvc-psnr-v1/canonical/640x368/metadata.json")
+        add_test(NAME mlvc_codec_reference
+            COMMAND mlvc_codec_tests ${MLVC_TEST_ASSETS_DIR})
+    else()
+        message(STATUS
+            "Portable codec fixtures not found under ${MLVC_TEST_ASSETS_DIR}; "
+            "mlvc_codec_reference will not be registered")
+    endif()
+
+    set(_mlvc_conformance_script
+        "${CMAKE_CURRENT_SOURCE_DIR}/tests/run_codec_conformance.py")
+    if(EXISTS "${MLVC_TEST_ASSETS_DIR}/references/mlvc-psnr-v1/gray-q21-2f/reference.json"
+       AND EXISTS "${MLVC_TEST_ASSETS_DIR}/references/mlvc-s-psnr-v1/gray-q21-2f/reference.json")
+        find_package(Python3 COMPONENTS Interpreter REQUIRED)
+        foreach(_mlvc_profile mlvc-psnr-v1 mlvc-s-psnr-v1)
+            set(_mlvc_model_dir
+                "${MLVC_TEST_ASSETS_DIR}/models/${_mlvc_profile}/canonical/640x368")
+            set(_mlvc_reference_dir
+                "${MLVC_TEST_ASSETS_DIR}/references/${_mlvc_profile}/gray-q21-2f")
+            set(_mlvc_conformance_args
+                --binary $<TARGET_FILE:mlvc_demo>
+                --model-dir "${_mlvc_model_dir}"
+                --reference-dir "${_mlvc_reference_dir}")
+            if(MLVC_WITH_TENSORRT AND MLVC_TEST_ENGINE_CACHE_DIR)
+                set(_mlvc_profile_cache "${MLVC_TEST_ENGINE_CACHE_DIR}")
+                if(_mlvc_profile STREQUAL "mlvc-s-psnr-v1")
+                    set(_mlvc_profile_cache "${_mlvc_profile_cache}/mlvc-s")
+                endif()
+                list(APPEND _mlvc_conformance_args
+                    --engine-cache-dir "${_mlvc_profile_cache}")
+            endif()
+            add_test(NAME "mlvc_codec_conformance_${_mlvc_profile}"
+                COMMAND "${Python3_EXECUTABLE}" "${_mlvc_conformance_script}"
+                        ${_mlvc_conformance_args})
+            set_tests_properties("mlvc_codec_conformance_${_mlvc_profile}"
+                PROPERTIES LABELS "gpu;conformance" TIMEOUT 300)
+        endforeach()
+        add_custom_target(mlvc_codec_compatibility
+            COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure -L conformance
+            DEPENDS mlvc_demo
+            USES_TERMINAL
+            COMMENT "Checking both MLVC profiles against official Python codec references")
+    else()
+        message(STATUS
+            "Codec conformance references not found under ${MLVC_TEST_ASSETS_DIR}; "
+            "only portable codec tests will be registered")
+        add_custom_target(mlvc_codec_compatibility
+            COMMAND "${CMAKE_COMMAND}" -E echo
+                "Missing MLVC and MLVC-S references under ${MLVC_TEST_ASSETS_DIR}"
+            COMMAND "${CMAKE_COMMAND}" -E false
+            USES_TERMINAL
+            COMMENT "Codec compatibility references are required")
+    endif()
+endif()
 
 target_include_directories(mlvc_demo PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party
-    ${MLVC_BACKEND_INCLUDES}
+)
+target_include_directories(mlvc_backend_bench PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
 target_link_libraries(mlvc_demo PRIVATE
-    msrtc_rans
-    nlohmann_json::nlohmann_json
-    ${MLVC_BACKEND_LIBS}
+    mlvc_codec
 )
-target_link_options(mlvc_demo PRIVATE "LINKER:--disable-new-dtags")
+target_link_libraries(mlvc_backend_bench PRIVATE
+    mlvc_backend
+    nlohmann_json::nlohmann_json
+)
+
+foreach(_mlvc_executable mlvc_demo mlvc_backend_bench)
+    target_link_options(${_mlvc_executable} PRIVATE "LINKER:--disable-new-dtags")
+endforeach()
+if(BUILD_TESTING)
+    target_link_options(mlvc_codec_tests PRIVATE "LINKER:--disable-new-dtags")
+endif()
 if(MLVC_WITH_LIBTORCH)
-    target_link_options(mlvc_demo PRIVATE
-        "LINKER:-rpath-link,${LIBTORCH_ROOT}/lib")
+    foreach(_mlvc_executable mlvc_demo mlvc_backend_bench)
+        target_link_options(${_mlvc_executable} PRIVATE
+            "LINKER:-rpath-link,${LIBTORCH_ROOT}/lib")
+    endforeach()
 endif()
 
 if(MLVC_ENABLE_IPO)
@@ -181,8 +300,12 @@ if(MLVC_ENABLE_IPO)
     check_ipo_supported(LANGUAGES CXX
         RESULT MLVC_IPO_SUPPORTED OUTPUT MLVC_IPO_ERROR)
     if(MLVC_IPO_SUPPORTED)
-        set_property(TARGET mlvc_demo msrtc_rans PROPERTY
+        set_property(TARGET mlvc_backend mlvc_codec mlvc_demo mlvc_backend_bench msrtc_rans PROPERTY
             INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+        if(BUILD_TESTING)
+            set_property(TARGET mlvc_codec_tests PROPERTY
+                INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
+        endif()
     else()
         message(WARNING "IPO is unavailable: ${MLVC_IPO_ERROR}")
     endif()
@@ -193,12 +316,14 @@ endif()
 # runtime libraries to lib/, found via $ORIGIN/../lib (no LD_LIBRARY_PATH).
 # ---------------------------------------------------------------------------
 set(MLVC_LIB_DEST "lib")
-set_target_properties(mlvc_demo PROPERTIES
-    BUILD_RPATH "\$ORIGIN"
-    INSTALL_RPATH "\$ORIGIN/../lib"
-)
+foreach(_mlvc_executable mlvc_demo mlvc_backend_bench)
+    set_target_properties(${_mlvc_executable} PROPERTIES
+        BUILD_RPATH "\$ORIGIN"
+        INSTALL_RPATH "\$ORIGIN/../lib"
+    )
+endforeach()
 
-install(TARGETS mlvc_demo RUNTIME DESTINATION bin)
+install(TARGETS mlvc_demo mlvc_backend_bench RUNTIME DESTINATION bin)
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
     DESTINATION "share/licenses/mlvc_cpp")
 

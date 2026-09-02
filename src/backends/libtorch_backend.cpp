@@ -22,7 +22,6 @@ namespace {
 at::ScalarType torch_data_type(TensorDataType type)
 {
     switch (type) {
-    case TensorDataType::kFloat32: return at::kFloat;
     case TensorDataType::kFloat16: return at::kHalf;
     case TensorDataType::kInt32:   return at::kInt;
     }
@@ -33,11 +32,6 @@ TensorStorage copy_from_torch(const at::Tensor& host)
 {
     const auto count = static_cast<std::size_t>(host.numel());
     switch (host.scalar_type()) {
-    case at::kFloat: {
-        std::vector<float> values(count);
-        std::memcpy(values.data(), host.data_ptr(), values.size() * sizeof(float));
-        return values;
-    }
     case at::kHalf: {
         std::vector<Float16Storage> values(count);
         std::memcpy(values.data(), host.data_ptr(),
@@ -63,8 +57,8 @@ public:
             throw std::runtime_error("libtorch: CUDA is not available");
         device_ = torch::Device(torch::kCUDA, options_.device_id);
         at::globalContext().setBenchmarkCuDNN(true);
-        at::globalContext().setAllowTF32CuDNN(options_.allow_tf32);
-        at::globalContext().setAllowTF32CuBLAS(options_.allow_tf32);
+        at::globalContext().setAllowTF32CuDNN(false);
+        at::globalContext().setAllowTF32CuBLAS(false);
     }
 
     std::string_view name() const noexcept override { return "libtorch"; }
@@ -77,6 +71,7 @@ public:
         } catch (const c10::Error& e) {
             throw std::runtime_error("libtorch: failed to load " + path + ": " + e.what());
         }
+        module_->to(device_, at::kHalf);
         module_->eval();
     }
 

@@ -2,35 +2,35 @@
 // Inference backend abstraction.
 //
 // The MLVC neural parts (MLVCEncoder / MLVCDecoder graphs, see docs/design.md)
-// are packaged in three separate NVIDIA GPU builds:
+// are packaged in four separate NVIDIA GPU builds:
 //
 //   - onnxruntime: ONNX graphs via ONNX Runtime CUDA EP
 //   - libtorch:    TorchScript exports via libtorch (requires the converter to
 //                  export TorchScript in addition to ONNX)
 //   - tensorrt:    ONNX graphs parsed and built into TensorRT engines (NVIDIA)
+//   - driver_cubin: fixed-shape AOT graph dispatched through the CUDA Driver API
 //
 // Each release compiles exactly one backend (see MLVC_BACKEND in CMake).
-// Tensor storage preserves the graph dtype so fp16 activations and int32
-// control inputs are never accidentally presented to a runtime as fp32.
+// Floating-point model tensors are always fp16. Int32 remains available for
+// control inputs such as q_index_shifted.
 
 #include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
 #include <string_view>
-#include <type_traits>
 #include <variant>
 #include <vector>
 
 namespace mlvc {
 
-enum class TensorDataType { kFloat32, kFloat16, kInt32 };
+enum class TensorDataType { kFloat16, kInt32 };
 
 // IEEE-754 binary16 is stored as its raw 16-bit representation. Backends pass
-// these bits directly to ONNX Runtime, libtorch, or TensorRT.
+// these bits directly to the selected backend.
 using Float16Storage = std::uint16_t;
 using TensorStorage = std::variant<
-    std::vector<float>, std::vector<Float16Storage>, std::vector<std::int32_t>>;
+    std::vector<Float16Storage>, std::vector<std::int32_t>>;
 
 // Single dense tensor in host memory, row-major.
 struct Tensor {
@@ -40,8 +40,6 @@ struct Tensor {
 
     TensorDataType data_type() const noexcept
     {
-        if (std::holds_alternative<std::vector<float>>(data))
-            return TensorDataType::kFloat32;
         if (std::holds_alternative<std::vector<Float16Storage>>(data))
             return TensorDataType::kFloat16;
         return TensorDataType::kInt32;
@@ -71,7 +69,6 @@ struct Tensor {
 struct BackendOptions {
     std::string model_dir;
     int device_id = 0;
-    bool allow_tf32 = true;
     std::size_t workspace_size = std::size_t{4} << 30;
     std::string engine_cache_dir;
 };

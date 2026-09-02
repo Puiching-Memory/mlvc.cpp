@@ -62,7 +62,6 @@ std::size_t element_count(const nvinfer1::Dims& dims)
 std::size_t data_type_size(nvinfer1::DataType type)
 {
     switch (type) {
-    case nvinfer1::DataType::kFLOAT: return sizeof(float);
     case nvinfer1::DataType::kHALF:  return sizeof(Float16Storage);
     case nvinfer1::DataType::kINT32: return sizeof(std::int32_t);
     default: throw std::runtime_error("tensorrt: unsupported tensor dtype");
@@ -72,7 +71,6 @@ std::size_t data_type_size(nvinfer1::DataType type)
 TensorDataType tensor_data_type(nvinfer1::DataType type)
 {
     switch (type) {
-    case nvinfer1::DataType::kFLOAT: return TensorDataType::kFloat32;
     case nvinfer1::DataType::kHALF:  return TensorDataType::kFloat16;
     case nvinfer1::DataType::kINT32: return TensorDataType::kInt32;
     default: throw std::runtime_error("tensorrt: unsupported tensor dtype");
@@ -82,7 +80,6 @@ TensorDataType tensor_data_type(nvinfer1::DataType type)
 TensorStorage allocate_storage(nvinfer1::DataType type, std::size_t count)
 {
     switch (type) {
-    case nvinfer1::DataType::kFLOAT: return std::vector<float>(count);
     case nvinfer1::DataType::kHALF:  return std::vector<Float16Storage>(count);
     case nvinfer1::DataType::kINT32: return std::vector<std::int32_t>(count);
     default: throw std::runtime_error("tensorrt: unsupported output dtype");
@@ -183,8 +180,15 @@ public:
         buffers_.reserve(engine_->getNbIOTensors());
         for (int i = 0; i < engine_->getNbIOTensors(); ++i) {
             const char* name = engine_->getIOTensorName(i);
+            const auto type = engine_->getTensorDataType(name);
+            if (type != nvinfer1::DataType::kHALF &&
+                type != nvinfer1::DataType::kINT32) {
+                throw std::runtime_error(
+                    std::string("tensorrt: tensor ") + name +
+                    " is not fp16/int32; mlvc.cpp accepts FP16 models only");
+            }
             buffers_.emplace_back(
-                name, engine_->getTensorDataType(name), engine_->getTensorShape(name),
+                name, type, engine_->getTensorShape(name),
                 engine_->getTensorIOMode(name) == nvinfer1::TensorIOMode::kINPUT);
         }
     }
@@ -259,7 +263,7 @@ private:
              std::to_string(NV_TENSORRT_MINOR) + ".sm" +
              std::to_string(properties.major) + std::to_string(properties.minor) +
              ".ws" + std::to_string(options_.workspace_size >> 20) +
-             (options_.allow_tf32 ? ".tf32" : ".no-tf32") +
+             ".fp16" +
              ".engine");
     }
 
@@ -319,10 +323,7 @@ private:
         config->setBuilderOptimizationLevel(5);
         config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE,
                                    options_.workspace_size);
-        if (options_.allow_tf32)
-            config->setFlag(nvinfer1::BuilderFlag::kTF32);
-        else
-            config->clearFlag(nvinfer1::BuilderFlag::kTF32);
+        config->clearFlag(nvinfer1::BuilderFlag::kTF32);
 
         TrtPtr<nvinfer1::IHostMemory> plan(
             builder->buildSerializedNetwork(*network, *config));

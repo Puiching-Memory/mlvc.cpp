@@ -14,7 +14,6 @@ namespace {
 ONNXTensorElementDataType ort_data_type(TensorDataType type)
 {
     switch (type) {
-    case TensorDataType::kFloat32: return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
     case TensorDataType::kFloat16: return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
     case TensorDataType::kInt32:   return ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32;
     }
@@ -24,8 +23,6 @@ ONNXTensorElementDataType ort_data_type(TensorDataType type)
 TensorStorage allocate_storage(ONNXTensorElementDataType type, std::size_t count)
 {
     switch (type) {
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
-        return std::vector<float>(count);
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
         return std::vector<Float16Storage>(count);
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
@@ -65,6 +62,15 @@ public:
             input_names_.push_back(session_.GetInputNameAllocated(i, allocator));
         for (size_t i = 0; i < session_.GetOutputCount(); ++i)
             output_names_.push_back(session_.GetOutputNameAllocated(i, allocator));
+
+        for (size_t i = 0; i < session_.GetInputCount(); ++i) {
+            validate_model_type(session_.GetInputTypeInfo(i), input_names_[i].get(),
+                                "input");
+        }
+        for (size_t i = 0; i < session_.GetOutputCount(); ++i) {
+            validate_model_type(session_.GetOutputTypeInfo(i), output_names_[i].get(),
+                                "output");
+        }
     }
 
     std::vector<Tensor> run(const std::vector<Tensor>& inputs) override
@@ -109,6 +115,18 @@ public:
     }
 
 private:
+    static void validate_model_type(const Ort::TypeInfo& type_info,
+                                    const char* tensor_name, const char* direction)
+    {
+        const auto type = type_info.GetTensorTypeAndShapeInfo().GetElementType();
+        if (type != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16 &&
+            type != ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32) {
+            throw std::runtime_error(
+                std::string("onnxruntime: ") + direction + " " + tensor_name +
+                " is not fp16/int32; mlvc.cpp accepts FP16 models only");
+        }
+    }
+
     BackendOptions options_;
     Ort::Env env_{ORT_LOGGING_LEVEL_WARNING, "mlvc"};
     Ort::SessionOptions session_options_;

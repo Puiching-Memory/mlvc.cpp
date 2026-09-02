@@ -1,15 +1,10 @@
-// mlvc.cpp: NVIDIA GPU MLVC (DMC-6.1sb) encode/decode scaffold.
-//
-// Placeholder entry point; the pipeline implementation (see docs/design.md)
-// will land in subsequent commits.
-
 #include "mlvc/backend.hpp"
+#include "mlvc/pipeline.hpp"
 
 #include <cstdio>
 #include <cstring>
 #include <exception>
 #include <limits>
-#include <memory>
 #include <stdexcept>
 #include <string>
 
@@ -18,22 +13,27 @@ namespace {
 void print_usage(const char* argv0)
 {
     std::fprintf(stderr,
-        "usage: %s [--device-id N] [--model-dir DIR] [--engine-cache-dir DIR]\n"
-        "           [--workspace-mib N] [--no-tf32] [--backend-name]\n",
-        argv0);
+        "usage:\n"
+        "  %s --backend-name\n"
+        "  %s encode --input IN.yuv --output OUT.mlvc --width W --height H\n"
+        "       --model-dir DIR [--frames N] [--q-index N] [--device-id N]\n"
+        "  %s decode --input IN.mlvc --output OUT.yuv --width W --height H\n"
+        "       --model-dir DIR [--frames N] [--device-id N]\n"
+        "  common: [--engine-cache-dir DIR] [--workspace-mib N] [--debug-dir DIR]\n",
+        argv0, argv0, argv0);
 }
 
-int parse_device_id(const char* text)
+int parse_integer(const char* text, const char* option, bool allow_zero)
 {
     try {
         std::size_t parsed = 0;
         const long value = std::stol(text, &parsed);
-        if (text[parsed] == '\0' && value >= 0 &&
+        if (text[parsed] == '\0' && (allow_zero ? value >= 0 : value > 0) &&
             value <= std::numeric_limits<int>::max())
             return static_cast<int>(value);
     } catch (const std::exception&) {
     }
-    throw std::runtime_error("--device-id must be a non-negative integer");
+    throw std::runtime_error(std::string(option) + " has an invalid value");
 }
 
 std::size_t parse_workspace_size(const char* text)
@@ -53,47 +53,69 @@ std::size_t parse_workspace_size(const char* text)
 
 int main(int argc, char** argv)
 {
-    mlvc::BackendOptions options;
-    bool print_backend_name = false;
-
     try {
-        for (int i = 1; i < argc; ++i) {
-            if (std::strcmp(argv[i], "--device-id") == 0 && i + 1 < argc) {
-                options.device_id = parse_device_id(argv[++i]);
-            } else if (std::strcmp(argv[i], "--model-dir") == 0 && i + 1 < argc) {
-                options.model_dir = argv[++i];
-            } else if (std::strcmp(argv[i], "--engine-cache-dir") == 0 && i + 1 < argc) {
-                options.engine_cache_dir = argv[++i];
-            } else if (std::strcmp(argv[i], "--workspace-mib") == 0 && i + 1 < argc) {
-                options.workspace_size = parse_workspace_size(argv[++i]);
-            } else if (std::strcmp(argv[i], "--no-tf32") == 0) {
-                options.allow_tf32 = false;
-            } else if (std::strcmp(argv[i], "--backend-name") == 0) {
-                print_backend_name = true;
-            } else if (std::strcmp(argv[i], "--help") == 0) {
-                print_usage(argv[0]);
-                return 0;
-            } else {
-                std::fprintf(stderr, "unknown argument: %s\n", argv[i]);
-                print_usage(argv[0]);
-                return 2;
-            }
-        }
-
-        if (print_backend_name) {
+        if (argc == 2 && std::strcmp(argv[1], "--backend-name") == 0) {
             std::printf("%.*s\n", static_cast<int>(mlvc::compiled_backend_name().size()),
                         mlvc::compiled_backend_name().data());
             return 0;
         }
+        if (argc < 2 || std::strcmp(argv[1], "--help") == 0) {
+            print_usage(argv[0]);
+            return argc < 2 ? 2 : 0;
+        }
+        const std::string command = argv[1];
+        if (command != "encode" && command != "decode")
+            throw std::runtime_error("command must be encode or decode");
 
-        std::unique_ptr<mlvc::InferenceBackend> backend = mlvc::create_backend(options);
-        std::printf("mlvc.cpp (scaffold): backend '%.*s' ready on CUDA device %d; "
-                    "pipeline implementation is under construction\n",
-                    static_cast<int>(backend->name().size()), backend->name().data(),
-                    options.device_id);
-    } catch (const std::exception& e) {
-        std::fprintf(stderr, "error: %s\n", e.what());
+        mlvc::CodecOptions options;
+        for (int i = 2; i < argc; ++i) {
+            auto value = [&]() -> const char* {
+                if (i + 1 >= argc)
+                    throw std::runtime_error(std::string(argv[i]) + " requires a value");
+                return argv[++i];
+            };
+            if (std::strcmp(argv[i], "--device-id") == 0) {
+                options.device_id = parse_integer(value(), "--device-id", true);
+            } else if (std::strcmp(argv[i], "--model-dir") == 0) {
+                options.model_dir = value();
+            } else if (std::strcmp(argv[i], "--engine-cache-dir") == 0) {
+                options.engine_cache_dir = value();
+            } else if (std::strcmp(argv[i], "--debug-dir") == 0) {
+                options.debug_dir = value();
+            } else if (std::strcmp(argv[i], "--workspace-mib") == 0) {
+                options.workspace_size = parse_workspace_size(value());
+            } else if (std::strcmp(argv[i], "--input") == 0) {
+                options.input_path = value();
+            } else if (std::strcmp(argv[i], "--output") == 0) {
+                options.output_path = value();
+            } else if (std::strcmp(argv[i], "--width") == 0) {
+                options.width = parse_integer(value(), "--width", false);
+            } else if (std::strcmp(argv[i], "--height") == 0) {
+                options.height = parse_integer(value(), "--height", false);
+            } else if (std::strcmp(argv[i], "--frames") == 0) {
+                options.frames = parse_integer(value(), "--frames", true);
+            } else if (std::strcmp(argv[i], "--q-index") == 0) {
+                options.q_index = parse_integer(value(), "--q-index", true);
+            } else if (std::strcmp(argv[i], "--help") == 0) {
+                print_usage(argv[0]);
+                return 0;
+            } else {
+                throw std::runtime_error("unknown argument: " + std::string(argv[i]));
+            }
+        }
+
+        const mlvc::CodecStats stats = command == "encode"
+            ? mlvc::encode_video(options) : mlvc::decode_video(options);
+        const double fps = stats.elapsed_seconds > 0.0
+            ? static_cast<double>(stats.frames) / stats.elapsed_seconds : 0.0;
+        std::printf("%s complete: backend=%.*s frames=%d input=%zu output=%zu "
+                    "elapsed=%.3f s throughput=%.2f fps\n",
+                    command.c_str(), static_cast<int>(mlvc::compiled_backend_name().size()),
+                    mlvc::compiled_backend_name().data(), stats.frames,
+                    stats.input_bytes, stats.output_bytes, stats.elapsed_seconds, fps);
+        return 0;
+    } catch (const std::exception& error) {
+        std::fprintf(stderr, "error: %s\n", error.what());
         return 1;
     }
-    return 0;
 }

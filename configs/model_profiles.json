@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "profiles": {
+    "mlvc-psnr-v1": {
+      "model_version": "dmc61sbr_reglu",
+      "weights_version": "mlvc-psnr-v1",
+      "weights_sha256": "834adaab680837c4106a9bb62e5778b3f13729b4fe6f751797e0747214f5cca1",
+      "iframe_period": 64,
+      "reset_period": null,
+      "split_type": "dmc61sbr_e1d1",
+      "params": {
+        "disable_feature_reset": true,
+        "depth_conv_block_params": {
+          "activation": "LeakyReLU",
+          "zero_init_residual": true,
+          "chunk_mode": "gated",
+          "ffn_gate_activation": "ReLU1"
+        },
+        "feature_channels": 128,
+        "spatial_prior_channels": 256,
+        "input_offset": -0.5,
+        "memory_activation": "identity",
+        "chain_feature_adaptors": true
+      }
+    },
+    "mlvc-s-psnr-v1": {
+      "model_version": "dmc61sbr_mini_reglu",
+      "weights_version": "mlvc-s-psnr-v1",
+      "weights_sha256": "1b86b757ddb115342293efb57719d6216c6ee2e459ae796ec41723b5c05ca896",
+      "iframe_period": 64,
+      "reset_period": null,
+      "split_type": "dmc61sbr_e1d1",
+      "params": {
+        "disable_feature_reset": true,
+        "depth_conv_block_params": {
+          "activation": "LeakyReLU",
+          "zero_init_residual": true,
+          "chunk_mode": "gated",
+          "ffn_gate_activation": "ReLU1"
+        },
+        "feature_channels": 48,
+        "spatial_prior_channels": 128,
+        "input_offset": -0.5,
+        "memory_activation": "identity",
+        "recon_channels": 192,
+        "hidden_channels": 192,
+        "hyperprior_num_blocks": 2,
+        "y_scale_repeat": 4,
+        "z_channels": 48,
+        "y_channels": 48,
+        "chain_feature_adaptors": true,
+        "hyperprior_variant": "mini",
+        "feature_extractor_num_conv1_layers": 1,
+        "feature_extractor_num_conv2_layers": 1
+      }
+    }
+  }
+}

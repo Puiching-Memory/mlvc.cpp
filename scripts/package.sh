@@ -187,13 +187,25 @@ package_backend() {
 
     local binary="$prefix/bin/mlvc_demo"
     [[ -x "$binary" ]] || { echo "error: packaged binary is missing: $binary" >&2; return 1; }
+    local benchmark_binary="$prefix/bin/mlvc_backend_bench"
+    [[ -x "$benchmark_binary" ]] || {
+        echo "error: packaged benchmark binary is missing: $benchmark_binary" >&2
+        return 1
+    }
     local backend_list
     backend_list="$(env -u LD_LIBRARY_PATH "$binary" --backend-name)"
     [[ "$backend_list" == "$backend" ]] || {
         echo "error: backend isolation check failed: $backend_list" >&2
         return 1
     }
+    local benchmark_backend
+    benchmark_backend="$(env -u LD_LIBRARY_PATH "$benchmark_binary" --backend-name)"
+    [[ "$benchmark_backend" == "$backend" ]] || {
+        echo "error: benchmark backend isolation check failed: $benchmark_backend" >&2
+        return 1
+    }
     audit_linkage "$binary"
+    audit_linkage "$benchmark_binary"
     local probe_pattern
     case "$backend" in
         onnxruntime) probe_pattern='libonnxruntime_providers_cuda.so*' ;;

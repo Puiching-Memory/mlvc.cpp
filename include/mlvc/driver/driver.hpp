@@ -1,0 +1,105 @@
+#pragma once
+
+#include "mlvc/driver/abi.hpp"
+
+#include <cstddef>
+#include <memory>
+#include <span>
+#include <string>
+#include <string_view>
+
+namespace mlvc::driver {
+
+struct Dim3 {
+    unsigned int x = 1;
+    unsigned int y = 1;
+    unsigned int z = 1;
+};
+
+struct DeviceInfo {
+    int ordinal = 0;
+    int driver_version = 0;
+    int compute_major = 0;
+    int compute_minor = 0;
+    std::string name;
+};
+
+class DriverState;
+
+class DeviceBuffer final {
+public:
+    DeviceBuffer() = default;
+    ~DeviceBuffer();
+
+    DeviceBuffer(const DeviceBuffer&) = delete;
+    DeviceBuffer& operator=(const DeviceBuffer&) = delete;
+    DeviceBuffer(DeviceBuffer&& other) noexcept;
+    DeviceBuffer& operator=(DeviceBuffer&& other) noexcept;
+
+    abi::DeviceAddress address() const noexcept { return address_; }
+    std::size_t size() const noexcept { return size_; }
+    explicit operator bool() const noexcept { return address_ != 0; }
+
+private:
+    friend class Driver;
+    DeviceBuffer(std::shared_ptr<DriverState> state,
+                 abi::DeviceAddress address, std::size_t size);
+    void reset() noexcept;
+
+    std::shared_ptr<DriverState> state_;
+    abi::DeviceAddress address_ = 0;
+    std::size_t size_ = 0;
+};
+
+class Module final {
+public:
+    Module() = default;
+    ~Module();
+
+    Module(const Module&) = delete;
+    Module& operator=(const Module&) = delete;
+    Module(Module&& other) noexcept;
+    Module& operator=(Module&& other) noexcept;
+
+    abi::Function function(std::string_view name) const;
+    explicit operator bool() const noexcept { return module_ != nullptr; }
+
+private:
+    friend class Driver;
+    Module(std::shared_ptr<DriverState> state, abi::Module module);
+    void reset() noexcept;
+
+    std::shared_ptr<DriverState> state_;
+    abi::Module module_ = nullptr;
+};
+
+class Driver final {
+public:
+    explicit Driver(int device_ordinal = 0);
+
+    Driver(const Driver&) = delete;
+    Driver& operator=(const Driver&) = delete;
+    Driver(Driver&&) noexcept = default;
+    Driver& operator=(Driver&&) noexcept = default;
+
+    const DeviceInfo& device_info() const noexcept;
+
+    DeviceBuffer allocate(std::size_t bytes) const;
+    Module load_module(std::span<const std::byte> image) const;
+
+    void upload_async(const DeviceBuffer& destination,
+                      const void* source, std::size_t bytes) const;
+    void download_async(void* destination, const DeviceBuffer& source,
+                        std::size_t bytes) const;
+    void download_async(void* destination, abi::DeviceAddress source,
+                        std::size_t bytes) const;
+    void launch(abi::Function function, Dim3 grid, Dim3 block,
+                unsigned int shared_memory_bytes,
+                std::span<void*> parameters) const;
+    void synchronize() const;
+
+private:
+    std::shared_ptr<DriverState> state_;
+};
+
+}  // namespace mlvc::driver

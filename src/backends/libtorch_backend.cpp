@@ -6,36 +6,68 @@
 
 #include "mlvc/backend.hpp"
 
-#ifdef MLVC_WITH_LIBTORCH
-
 #include <torch/script.h>
 #include <torch/cuda.h>
 #include <ATen/Parallel.h>
+#include <ATen/Context.h>
+#include <c10/core/InferenceMode.h>
 
+#include <cstring>
 #include <stdexcept>
 #include <utility>
 
 namespace mlvc {
 namespace {
 
+at::ScalarType torch_data_type(TensorDataType type)
+{
+    switch (type) {
+    case TensorDataType::kFloat32: return at::kFloat;
+    case TensorDataType::kFloat16: return at::kHalf;
+    case TensorDataType::kInt32:   return at::kInt;
+    }
+    throw std::runtime_error("libtorch: unsupported tensor dtype");
+}
+
+TensorStorage copy_from_torch(const at::Tensor& host)
+{
+    const auto count = static_cast<std::size_t>(host.numel());
+    switch (host.scalar_type()) {
+    case at::kFloat: {
+        std::vector<float> values(count);
+        std::memcpy(values.data(), host.data_ptr(), values.size() * sizeof(float));
+        return values;
+    }
+    case at::kHalf: {
+        std::vector<Float16Storage> values(count);
+        std::memcpy(values.data(), host.data_ptr(),
+                    values.size() * sizeof(Float16Storage));
+        return values;
+    }
+    case at::kInt: {
+        std::vector<std::int32_t> values(count);
+        std::memcpy(values.data(), host.data_ptr(),
+                    values.size() * sizeof(std::int32_t));
+        return values;
+    }
+    default:
+        throw std::runtime_error("libtorch: unsupported output dtype");
+    }
+}
+
 class LibTorchBackend final : public InferenceBackend {
 public:
     explicit LibTorchBackend(BackendOptions options) : options_(std::move(options))
     {
-        if (options_.device == "cuda") {
-            if (!torch::cuda::is_available())
-                throw std::runtime_error("libtorch: CUDA requested but not available");
-            device_ = torch::Device(torch::kCUDA);
-        } else if (options_.device == "cpu") {
-            device_ = torch::Device(torch::kCPU);
-        } else {
-            throw std::runtime_error("libtorch: unsupported device " + options_.device);
-        }
-        if (options_.intra_op_threads > 0)
-            at::set_num_threads(options_.intra_op_threads);
+        if (!torch::cuda::is_available())
+            throw std::runtime_error("libtorch: CUDA is not available");
+        device_ = torch::Device(torch::kCUDA, options_.device_id);
+        at::globalContext().setBenchmarkCuDNN(true);
+        at::globalContext().setAllowTF32CuDNN(options_.allow_tf32);
+        at::globalContext().setAllowTF32CuBLAS(options_.allow_tf32);
     }
 
-    BackendKind kind() const noexcept override { return BackendKind::kLibTorch; }
+    std::string_view name() const noexcept override { return "libtorch"; }
 
     void load(const std::string& model_name) override
     {
@@ -59,14 +91,14 @@ public:
         ivalue_inputs.reserve(inputs.size());
         for (const Tensor& t : inputs) {
             at::Tensor at = at::from_blob(
-                                const_cast<float*>(t.data.data()), t.shape,
-                                at::TensorOptions().dtype(at::kFloat))
+                                const_cast<void*>(t.raw_data()), t.shape,
+                                at::TensorOptions().dtype(torch_data_type(t.data_type())))
                                 .to(device_);
             keep_alive.push_back(at);
             ivalue_inputs.emplace_back(at);
         }
 
-        torch::NoGradGuard no_grad;
+        c10::InferenceMode inference_mode;
         torch::IValue output = module_->forward(std::move(ivalue_inputs));
 
         std::vector<at::Tensor> at_outputs;
@@ -84,11 +116,10 @@ public:
         std::vector<Tensor> result;
         result.reserve(at_outputs.size());
         for (at::Tensor& at : at_outputs) {
-            at::Tensor host = at.to(torch::kCPU, at::kFloat).contiguous();
+            at::Tensor host = at.to(torch::kCPU).contiguous();
             Tensor t;
             t.shape.assign(host.sizes().begin(), host.sizes().end());
-            const float* src = host.data_ptr<float>();
-            t.data.assign(src, src + host.numel());
+            t.data = copy_from_torch(host);
             result.push_back(std::move(t));
         }
         return result;
@@ -102,24 +133,14 @@ private:
 
 }  // namespace
 
-std::unique_ptr<InferenceBackend> create_libtorch_backend(const BackendOptions& options)
+std::string_view compiled_backend_name() noexcept
+{
+    return "libtorch";
+}
+
+std::unique_ptr<InferenceBackend> create_backend(const BackendOptions& options)
 {
     return std::make_unique<LibTorchBackend>(options);
 }
 
 }  // namespace mlvc
-
-#else  // MLVC_WITH_LIBTORCH
-
-#include <stdexcept>
-
-namespace mlvc {
-
-std::unique_ptr<InferenceBackend> create_libtorch_backend(const BackendOptions&)
-{
-    throw std::runtime_error("libtorch backend not compiled in (MLVC_WITH_LIBTORCH=OFF)");
-}
-
-}  // namespace mlvc
-
-#endif  // MLVC_WITH_LIBTORCH

@@ -2,54 +2,85 @@
 // Inference backend abstraction.
 //
 // The MLVC neural parts (MLVCEncoder / MLVCDecoder graphs, see docs/design.md)
-// can be executed by any of three interchangeable backends:
+// are packaged in three separate NVIDIA GPU builds:
 //
-//   - onnxruntime: ONNX graphs via ONNX Runtime (CPU / CUDA EP)
+//   - onnxruntime: ONNX graphs via ONNX Runtime CUDA EP
 //   - libtorch:    TorchScript exports via libtorch (requires the converter to
 //                  export TorchScript in addition to ONNX)
 //   - tensorrt:    ONNX graphs parsed and built into TensorRT engines (NVIDIA)
 //
-// Backends are compiled in per build (see MLVC_WITH_* CMake options) and
-// selected at runtime. Host-side tensor buffers are fp32; each backend
-// converts to the model's native dtype (fp16 for MLVC exports) internally.
+// Each release compiles exactly one backend (see MLVC_BACKEND in CMake).
+// Tensor storage preserves the graph dtype so fp16 activations and int32
+// control inputs are never accidentally presented to a runtime as fp32.
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <string_view>
+#include <type_traits>
+#include <variant>
 #include <vector>
 
 namespace mlvc {
 
-enum class BackendKind { kOnnxRuntime, kLibTorch, kTensorRt };
+enum class TensorDataType { kFloat32, kFloat16, kInt32 };
 
-inline const char* to_string(BackendKind kind) noexcept
-{
-    switch (kind) {
-    case BackendKind::kOnnxRuntime: return "onnxruntime";
-    case BackendKind::kLibTorch:    return "libtorch";
-    case BackendKind::kTensorRt:    return "tensorrt";
-    }
-    return "unknown";
-}
+// IEEE-754 binary16 is stored as its raw 16-bit representation. Backends pass
+// these bits directly to ONNX Runtime, libtorch, or TensorRT.
+using Float16Storage = std::uint16_t;
+using TensorStorage = std::variant<
+    std::vector<float>, std::vector<Float16Storage>, std::vector<std::int32_t>>;
 
-// Single dense fp32 tensor in host memory, row-major.
+// Single dense tensor in host memory, row-major.
 struct Tensor {
     std::string name;
     std::vector<int64_t> shape;
-    std::vector<float> data;
+    TensorStorage data;
+
+    TensorDataType data_type() const noexcept
+    {
+        if (std::holds_alternative<std::vector<float>>(data))
+            return TensorDataType::kFloat32;
+        if (std::holds_alternative<std::vector<Float16Storage>>(data))
+            return TensorDataType::kFloat16;
+        return TensorDataType::kInt32;
+    }
+
+    std::size_t element_count() const noexcept
+    {
+        return std::visit([](const auto& values) { return values.size(); }, data);
+    }
+
+    std::size_t byte_size() const noexcept
+    {
+        return std::visit([](const auto& values) {
+            using Value = typename std::decay_t<decltype(values)>::value_type;
+            return values.size() * sizeof(Value);
+        }, data);
+    }
+
+    const void* raw_data() const noexcept
+    {
+        return std::visit([](const auto& values) -> const void* {
+            return values.data();
+        }, data);
+    }
 };
 
 struct BackendOptions {
     std::string model_dir;
-    std::string device = "cpu";  // "cpu" or "cuda"
-    int intra_op_threads = 0;    // 0 = library default
+    int device_id = 0;
+    bool allow_tf32 = true;
+    std::size_t workspace_size = std::size_t{4} << 30;
+    std::string engine_cache_dir;
 };
 
 class InferenceBackend {
 public:
     virtual ~InferenceBackend() = default;
 
-    virtual BackendKind kind() const noexcept = 0;
+    virtual std::string_view name() const noexcept = 0;
 
     // Loads one split-model graph by name, e.g. "MLVCEncoder" or "MLVCDecoder".
     virtual void load(const std::string& model_name) = 0;
@@ -58,11 +89,8 @@ public:
     virtual std::vector<Tensor> run(const std::vector<Tensor>& inputs) = 0;
 };
 
-// Backends compiled into this binary.
-std::vector<BackendKind> available_backends();
-
-// Creates a backend; throws std::runtime_error if the kind was not compiled in.
-std::unique_ptr<InferenceBackend> create_backend(BackendKind kind, const BackendOptions& options);
-std::unique_ptr<InferenceBackend> create_backend(const std::string& name, const BackendOptions& options);
+// Exactly one implementation of these symbols is linked into each release.
+std::string_view compiled_backend_name() noexcept;
+std::unique_ptr<InferenceBackend> create_backend(const BackendOptions& options);
 
 }  // namespace mlvc

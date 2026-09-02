@@ -24,13 +24,13 @@ python video/convert.py export \
 
 Outputs (per input size, here `640x368`):
 
-| File | Role |
-|---|---|
-| `MLVCEncoder.onnx` | Encoder graph |
-| `MLVCDecoder.onnx` | Decoder graph |
-| `gaussian_pmf.json` | Quantized Gaussian PMF tables (y coding) |
+| File                     | Role                                          |
+| ------------------------ | --------------------------------------------- |
+| `MLVCEncoder.onnx`       | Encoder graph                                 |
+| `MLVCDecoder.onnx`       | Decoder graph                                 |
+| `gaussian_pmf.json`      | Quantized Gaussian PMF tables (y coding)      |
 | `bit_estimator_pmf.json` | Quantized bit-estimator PMF tables (z coding) |
-| `metadata.json` | Model params (dims, GOP, scales, ...) |
+| `metadata.json`          | Model params (dims, GOP, scales, ...)         |
 
 ### ONNX IO (verified, `opset 18`, FP16 weights)
 
@@ -136,18 +136,19 @@ Reference: `FrameLoop` (`video/conversion/_frame_loop.py`) with model defaults:
 
 ## 7. Inference backends
 
-Three interchangeable backends implement `mlvc::InferenceBackend`
-(`include/mlvc/backend.hpp`), selected at runtime via `--backend` and compiled
-in via `MLVC_WITH_*` CMake options:
+Three separate GPU backends implement `mlvc::InferenceBackend`
+(`include/mlvc/backend.hpp`). A release compiles exactly one via the
+`MLVC_BACKEND` CMake setting:
 
-| Backend | Model artifacts | Execution | Notes |
-|---|---|---|---|
-| `onnxruntime` | `MLVC{Encoder,Decoder}.onnx` | CPU / CUDA EP | Reference path, mirrors the official deployment |
-| `libtorch` | `MLVC{Encoder,Decoder}.ts` | CPU / CUDA | Needs TorchScript exports (converter emits ONNX only); libtorch >= 2.13 requires C++20 |
-| `tensorrt` | `MLVC{Encoder,Decoder}.onnx` | CUDA | Engines built at load time via nvonnxparser (TensorRT 10 API, fp16 enabled) |
+| Backend       | Model artifacts              | Execution     | Notes                                                                                  |
+| ------------- | ---------------------------- | ------------- | -------------------------------------------------------------------------------------- |
+| `onnxruntime` | `MLVC{Encoder,Decoder}.onnx` | CUDA 13 EP | ONNX Runtime 1.26.0                                                |
+| `libtorch`    | `MLVC{Encoder,Decoder}.ts`   | CUDA 13    | libtorch 2.13.0 cu130; needs separate TorchScript exports              |
+| `tensorrt`    | `MLVC{Encoder,Decoder}.onnx` | CUDA 13    | TensorRT 11.2; hardware-specific engines are cached per GPU             |
 
-Host-side tensors crossing the backend boundary are fp32; the MLVC graphs are
-fp16, so each backend adds dtype conversion when the pipeline lands.
+Host-side tensors preserve fp32, fp16, or int32 storage across the backend
+boundary. This is required for the fp16 graph activations and the int32
+`q_index_shifted` input.
 
 ## 8. Implementation plan
 
@@ -158,3 +159,20 @@ fp16, so each backend adds dtype conversion when the pipeline lands.
 - [ ] `src/main.cpp` — CLI (`encode` / `decode` / `transcode` / `bench`)
 - [ ] Backend parity test: same inputs → bit-exact latents across backends
 - [ ] Cross-validation against python reference (`validate_conversion` outputs)
+
+## 9. Maximum-performance path
+
+Removing the CUDA runtime is a deployment choice, not automatically a speed
+optimization. The highest-value optimization for the three supported backends
+is a device-resident pipeline:
+
+1. Keep reconstructed features/DPB tensors on the GPU between frames.
+2. Run YUV conversion, padding, scale extraction, and suitable quantization
+   kernels on the same stream; transfer only data consumed by CPU rANS.
+3. Use ONNX Runtime I/O binding, native CUDA libtorch tensors, and direct
+   TensorRT device addresses instead of round-tripping every tensor through
+   host memory.
+4. Capture fixed-shape frame execution with CUDA Graphs after warm-up and use
+   per-device engine/timing caches.
+5. Benchmark fp16 and TF32 against codec parity requirements before enabling
+   reduced-precision behavior in a release.

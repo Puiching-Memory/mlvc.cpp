@@ -2,32 +2,56 @@
 
 #include "mlvc/backend.hpp"
 
-#ifdef MLVC_WITH_ONNXRUNTIME
-
 #include <onnxruntime_cxx_api.h>
 
+#include <cstring>
 #include <stdexcept>
 #include <utility>
 
 namespace mlvc {
 namespace {
 
+ONNXTensorElementDataType ort_data_type(TensorDataType type)
+{
+    switch (type) {
+    case TensorDataType::kFloat32: return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT;
+    case TensorDataType::kFloat16: return ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16;
+    case TensorDataType::kInt32:   return ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32;
+    }
+    throw std::runtime_error("onnxruntime: unsupported tensor dtype");
+}
+
+TensorStorage allocate_storage(ONNXTensorElementDataType type, std::size_t count)
+{
+    switch (type) {
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT:
+        return std::vector<float>(count);
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
+        return std::vector<Float16Storage>(count);
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32:
+        return std::vector<std::int32_t>(count);
+    default:
+        throw std::runtime_error("onnxruntime: unsupported output dtype");
+    }
+}
+
 class OnnxRuntimeBackend final : public InferenceBackend {
 public:
     explicit OnnxRuntimeBackend(BackendOptions options) : options_(std::move(options))
     {
         session_options_.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
-        if (options_.intra_op_threads > 0)
-            session_options_.SetIntraOpNumThreads(options_.intra_op_threads);
-        if (options_.device == "cuda") {
-            OrtCUDAProviderOptions cuda_options{};
-            session_options_.AppendExecutionProvider_CUDA(cuda_options);
-        } else if (options_.device != "cpu") {
-            throw std::runtime_error("onnxruntime: unsupported device " + options_.device);
-        }
+        OrtCUDAProviderOptions cuda_options{};
+        cuda_options.device_id = options_.device_id;
+        cuda_options.cudnn_conv_algo_search = OrtCudnnConvAlgoSearchExhaustive;
+        cuda_options.gpu_mem_limit = SIZE_MAX;
+        cuda_options.arena_extend_strategy = 0;
+        cuda_options.do_copy_in_default_stream = 1;
+        cuda_options.tunable_op_enable = true;
+        cuda_options.tunable_op_tuning_enable = true;
+        session_options_.AppendExecutionProvider_CUDA(cuda_options);
     }
 
-    BackendKind kind() const noexcept override { return BackendKind::kOnnxRuntime; }
+    std::string_view name() const noexcept override { return "onnxruntime"; }
 
     void load(const std::string& model_name) override
     {
@@ -53,9 +77,9 @@ public:
         std::vector<Ort::Value> values;
         values.reserve(inputs.size());
         for (const Tensor& t : inputs) {
-            values.push_back(Ort::Value::CreateTensor<float>(
-                memory_info_, const_cast<float*>(t.data.data()), t.data.size(),
-                t.shape.data(), t.shape.size()));
+            values.push_back(Ort::Value::CreateTensor(
+                memory_info_, const_cast<void*>(t.raw_data()), t.byte_size(),
+                t.shape.data(), t.shape.size(), ort_data_type(t.data_type())));
         }
 
         std::vector<const char*> input_names, output_names;
@@ -70,14 +94,15 @@ public:
         result.reserve(outputs.size());
         for (size_t i = 0; i < outputs.size(); ++i) {
             auto info = outputs[i].GetTensorTypeAndShapeInfo();
-            if (info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT)
-                throw std::runtime_error("onnxruntime: non-fp32 output (dtype conversion pending)");
             Tensor t;
             t.name = output_names_[i].get();
             t.shape = info.GetShape();
             const size_t count = static_cast<size_t>(info.GetElementCount());
-            const float* src = outputs[i].GetTensorData<float>();
-            t.data.assign(src, src + count);
+            t.data = allocate_storage(info.GetElementType(), count);
+            std::visit([&](auto& values) {
+                std::memcpy(values.data(), outputs[i].GetTensorRawData(),
+                            values.size() * sizeof(typename std::decay_t<decltype(values)>::value_type));
+            }, t.data);
             result.push_back(std::move(t));
         }
         return result;
@@ -96,24 +121,14 @@ private:
 
 }  // namespace
 
-std::unique_ptr<InferenceBackend> create_onnxruntime_backend(const BackendOptions& options)
+std::string_view compiled_backend_name() noexcept
+{
+    return "onnxruntime";
+}
+
+std::unique_ptr<InferenceBackend> create_backend(const BackendOptions& options)
 {
     return std::make_unique<OnnxRuntimeBackend>(options);
 }
 
 }  // namespace mlvc
-
-#else  // MLVC_WITH_ONNXRUNTIME
-
-#include <stdexcept>
-
-namespace mlvc {
-
-std::unique_ptr<InferenceBackend> create_onnxruntime_backend(const BackendOptions&)
-{
-    throw std::runtime_error("onnxruntime backend not compiled in (MLVC_WITH_ONNXRUNTIME=OFF)");
-}
-
-}  // namespace mlvc
-
-#endif  // MLVC_WITH_ONNXRUNTIME

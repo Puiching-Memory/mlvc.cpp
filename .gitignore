@@ -8,11 +8,14 @@ cmake-build-*/
 *.so
 *.so.*
 
-# Third-party fetched at build time
-third_party/json/
+# Portable package outputs (scripts/package.sh)
+dist/
+packages/
+*.tar.gz
+
+# Prebuilt SDK caches (source dependencies are Git submodules)
 third_party/onnxruntime/
 third_party/libtorch/
-third_party/tensorrt/
 
 # Model & media artifacts
 *.onnx

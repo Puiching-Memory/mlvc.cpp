@@ -107,6 +107,9 @@ public:
     const DeviceInfo& device_info() const noexcept;
 
     DeviceBuffer allocate(std::size_t bytes) const;
+    void* allocate_host_pinned(std::size_t bytes) const;
+    void free_host_pinned(void* pointer) const;
+    bool pin_host(const void* host_pointer, std::size_t bytes) const;
     Module load_module(std::span<const std::byte> image) const;
 
     void upload_async(const DeviceBuffer& destination,

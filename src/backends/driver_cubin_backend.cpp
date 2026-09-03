@@ -118,8 +118,8 @@ struct Value {
 
 class AotGraph final {
 public:
-    AotGraph(const std::filesystem::path& model_dir, const std::string& model_name,
-             driver::Driver& driver, const driver::Module& module)
+    explicit AotGraph(const std::filesystem::path& model_dir, const std::string& model_name,
+                      driver::Driver& driver, const driver::Module& module)
         : driver_(driver), module_(module)
     {
         const std::filesystem::path graph_dir = model_dir / "aot" / model_name;
@@ -494,6 +494,7 @@ public:
             if (inputs[i].shape != expected.shape ||
                 inputs[i].data_type() != public_dtype(expected.dtype))
                 throw std::runtime_error("driver-cubin: graph input shape or dtype mismatch");
+            pin_host_memory(inputs[i].raw_data(), inputs[i].byte_size());
             driver_.upload_async(input_buffers_[i], inputs[i].raw_data(),
                                  inputs[i].byte_size());
         }
@@ -511,9 +512,18 @@ public:
             driver_.launch_graph(executable_graph_);
         }
 
+        ensure_output_staging();
+
         std::vector<Tensor> outputs;
         outputs.reserve(output_names_.size());
-        for (const std::string& name : output_names_) {
+        struct StagedCopy {
+            void* destination;
+            void* source;
+            std::size_t bytes;
+        };
+        std::vector<StagedCopy> staged_copies;
+        for (std::size_t index = 0; index < output_names_.size(); ++index) {
+            const std::string& name = output_names_[index];
             const Value& result = value(name);
             Tensor tensor;
             tensor.name = name;
@@ -526,16 +536,52 @@ public:
                 throw std::runtime_error("driver-cubin: unsupported graph output dtype");
             }
             std::visit([&](auto& storage) {
-                driver_.download_async(storage.data(), result.address,
-                                       storage.size() * sizeof(typename std::decay_t<decltype(storage)>::value_type));
+                const std::size_t bytes =
+                    storage.size() *
+                    sizeof(typename std::decay_t<decltype(storage)>::value_type);
+                if (output_staging_[index] != nullptr) {
+                    driver_.download_async(output_staging_[index], result.address,
+                                           bytes);
+                    staged_copies.push_back(
+                        {storage.data(), output_staging_[index], bytes});
+                } else {
+                    driver_.download_async(storage.data(), result.address, bytes);
+                }
             }, tensor.data);
             outputs.push_back(std::move(tensor));
         }
         driver_.synchronize();
+        for (const StagedCopy& copy : staged_copies)
+            std::memcpy(copy.destination, copy.source, copy.bytes);
         return outputs;
     }
 
 private:
+    void pin_host_memory(const void* pointer, std::size_t bytes)
+    {
+        if (!pointer ||
+            std::find(pinned_input_pointers_.begin(), pinned_input_pointers_.end(),
+                      pointer) != pinned_input_pointers_.end())
+            return;
+        // Remember the attempt regardless of success: failed registrations stay
+        // pageable (graceful fallback) and are not retried every iteration.
+        pinned_input_pointers_.push_back(pointer);
+        driver_.pin_host(pointer, bytes);
+    }
+
+    void ensure_output_staging()
+    {
+        if (!output_staging_.empty())
+            return;
+        output_staging_.resize(output_names_.size(), nullptr);
+        for (std::size_t index = 0; index < output_names_.size(); ++index) {
+            const Value& result = value(output_names_[index]);
+            const std::size_t element_bytes = result.dtype == "fp16" ? 2 : 4;
+            const std::size_t bytes =
+                element_count(result.shape) * element_bytes;
+            output_staging_[index] = driver_.allocate_host_pinned(bytes);
+        }
+    }
     const Value& value(const std::string& name) const
     {
         const auto found = values_.find(name);
@@ -1005,10 +1051,8 @@ private:
             second_slice.at("outputs").get<std::vector<std::string>>();
         const auto clip_inputs = clip.at("inputs").get<std::vector<std::string>>();
         const auto clip_outputs = clip.at("outputs").get<std::vector<std::string>>();
-        const auto multiply_inputs =
-            multiply.at("inputs").get<std::vector<std::string>>();
-        const auto multiply_outputs =
-            multiply.at("outputs").get<std::vector<std::string>>();
+        const auto multiply_inputs = multiply.at("inputs").get<std::vector<std::string>>();
+        const auto multiply_outputs = multiply.at("outputs").get<std::vector<std::string>>();
         if (convolution_inputs.size() < 2 || convolution_outputs.size() != 1 ||
             first_inputs.empty() || second_inputs.empty() ||
             first_inputs[0] != convolution_outputs[0] ||
@@ -1474,6 +1518,8 @@ private:
     std::vector<std::size_t> aliased_input_slices_;
     std::vector<std::string> direct_concat_values_;
     std::vector<std::string> output_names_;
+    std::vector<const void*> pinned_input_pointers_;
+    std::vector<void*> output_staging_;
     std::unordered_map<std::string, Value> values_;
     driver::abi::Function binary_ = nullptr;
     driver::abi::Function binary_contiguous_ = nullptr;
@@ -1521,6 +1567,13 @@ private:
     driver::abi::Function space_to_depth_ = nullptr;
     bool cutlass_parameters_ready_ = false;
     driver::ExecutableGraph executable_graph_;
+
+public:
+    ~AotGraph()
+    {
+        for (void* pointer : output_staging_)
+            driver_.free_host_pinned(pointer);
+    }
 };
 
 class DriverCubinBackend final : public InferenceBackend {

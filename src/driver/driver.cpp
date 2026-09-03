@@ -373,4 +373,34 @@ void Driver::synchronize() const
                        "cuStreamSynchronize");
 }
 
+void* Driver::allocate_host_pinned(std::size_t bytes) const
+{
+    if (bytes == 0)
+        return nullptr;
+    state_->make_current();
+    void* pointer = nullptr;
+    CUresult result = cuMemHostAlloc(&pointer, bytes, CU_MEMHOSTALLOC_PORTABLE);
+    return result == CUDA_SUCCESS ? pointer : nullptr;
+}
+
+void Driver::free_host_pinned(void* pointer) const
+{
+    if (!pointer)
+        return;
+    state_->make_current();
+    cuMemFreeHost(pointer);
+}
+
+bool Driver::pin_host(const void* host_pointer, std::size_t bytes) const
+{
+    if (!host_pointer || bytes == 0)
+        return true;
+    state_->make_current();
+    CUresult result = cuMemHostRegister(
+        const_cast<void*>(host_pointer), bytes,
+        CU_MEMHOSTREGISTER_PORTABLE | CU_MEMHOSTREGISTER_DEVICEMAP);
+    return result == CUDA_SUCCESS ||
+           result == CUDA_ERROR_HOST_MEMORY_ALREADY_REGISTERED;
+}
+
 }  // namespace mlvc::driver

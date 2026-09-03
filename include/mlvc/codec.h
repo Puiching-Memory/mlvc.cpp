@@ -2,9 +2,9 @@
 
 // Stable C ABI for the portable MLVC codec library.
 //
-// The encoder and decoder are intentionally separate entry points.  Each call
-// creates its own TensorRT backend on options->device_id, so applications can
-// run one encoder on one GPU and one decoder on another GPU in parallel.
+// The encoder and decoder are intentionally separate entry points. Each call
+// creates its selected backend on options->device_id, so applications can run
+// one encoder on one GPU and one decoder on another GPU in parallel.
 
 #include <stddef.h>
 #include <stdint.h>
@@ -43,8 +43,10 @@ typedef struct mlvc_codec_stats {
     double elapsed_seconds;
 } mlvc_codec_stats;
 
-// Fill an options struct with the same defaults as the CLI.  Path pointers
-// remain null and must be supplied by the caller.
+// Fill an options struct with the same defaults as the CLI. Input/output path
+// pointers remain null and must be supplied by the caller. The driver-cubin
+// release uses its embedded mlvc-psnr-v1 model when model_dir remains null;
+// "embedded:<profile>" selects another embedded profile.
 MLVC_CODEC_API void mlvc_codec_options_init(mlvc_codec_options* options);
 
 // Returns the backend compiled into this package ("tensorrt" for the

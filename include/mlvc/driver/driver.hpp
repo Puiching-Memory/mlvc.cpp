@@ -114,10 +114,18 @@ public:
 
     void upload_async(const DeviceBuffer& destination,
                       const void* source, std::size_t bytes) const;
+    void zero_async(const DeviceBuffer& destination) const;
     void download_async(void* destination, const DeviceBuffer& source,
                         std::size_t bytes) const;
     void download_async(void* destination, abi::DeviceAddress source,
                         std::size_t bytes) const;
+
+    // Synchronous transfers for host memory that cuMemHostRegister rejected
+    // (e.g. not page-aligned); async copies require pinned host memory.
+    void upload(const DeviceBuffer& destination,
+                const void* source, std::size_t bytes) const;
+    void download(void* destination, abi::DeviceAddress source,
+                  std::size_t bytes) const;
     void launch(abi::Function function, Dim3 grid, Dim3 block,
                 unsigned int shared_memory_bytes,
                 std::span<void*> parameters) const;

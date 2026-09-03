@@ -22,6 +22,8 @@ option(MLVC_DRIVER_CUBIN_ONLY
     "Build the CUDA Runtime-free driver-cubin backend and its probe" OFF)
 set(MLVC_TEST_ASSETS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/model-assets" CACHE PATH
     "Optional local MLVC model/reference assets used by GPU conformance tests")
+set(MLVC_EMBEDDED_MODEL_ROOT "${MLVC_TEST_ASSETS_DIR}/models" CACHE PATH
+    "Canonical model bundles embedded by the driver-cubin backend")
 set(MLVC_TEST_ENGINE_CACHE_DIR "" CACHE PATH
     "Optional TensorRT engine-cache root used by codec conformance tests")
 
@@ -168,6 +170,43 @@ endif()
 # do not depend on cudart, cuDNN, TensorRT, ONNX Runtime, or libtorch.
 if(MLVC_WITH_DRIVER_CUBIN)
     include(cmake/DriverCubinTargets.cmake)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    enable_language(ASM)
+    file(GLOB_RECURSE MLVC_EMBEDDED_MODEL_INPUTS CONFIGURE_DEPENDS
+        LIST_DIRECTORIES false "${MLVC_EMBEDDED_MODEL_ROOT}/*")
+    if(NOT MLVC_EMBEDDED_MODEL_INPUTS)
+        message(FATAL_ERROR
+            "No model bundles found below ${MLVC_EMBEDDED_MODEL_ROOT}")
+    endif()
+    set(MLVC_EMBEDDED_MODELS_DIR
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/embedded-models")
+    set(MLVC_EMBEDDED_MODELS_BINARY
+        "${MLVC_EMBEDDED_MODELS_DIR}/mlvc_driver_models.bin")
+    set(MLVC_EMBEDDED_MODELS_INDEX
+        "${MLVC_EMBEDDED_MODELS_DIR}/mlvc_embedded_models_index.inc")
+    set(MLVC_EMBEDDED_MODELS_ASSEMBLY
+        "${MLVC_EMBEDDED_MODELS_DIR}/mlvc_embedded_models.S")
+    file(MAKE_DIRECTORY "${MLVC_EMBEDDED_MODELS_DIR}")
+    configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/EmbedModelData.S.in"
+        "${MLVC_EMBEDDED_MODELS_ASSEMBLY}" @ONLY)
+    add_custom_command(
+        OUTPUT
+            "${MLVC_EMBEDDED_MODELS_BINARY}"
+            "${MLVC_EMBEDDED_MODELS_INDEX}"
+        COMMAND "${Python3_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/scripts/build_embedded_models.py"
+            --model-root "${MLVC_EMBEDDED_MODEL_ROOT}"
+            --output-data "${MLVC_EMBEDDED_MODELS_BINARY}"
+            --output-index "${MLVC_EMBEDDED_MODELS_INDEX}"
+        DEPENDS
+            ${MLVC_EMBEDDED_MODEL_INPUTS}
+            "${CMAKE_CURRENT_SOURCE_DIR}/configs/model_profiles.json"
+            "${CMAKE_CURRENT_SOURCE_DIR}/scripts/assemble_model_package.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/scripts/build_embedded_models.py"
+            "${CMAKE_CURRENT_SOURCE_DIR}/scripts/package_model_bundles.py"
+        COMMENT "Embedding validated driver-cubin model bundles"
+        VERBATIM)
     list(APPEND MLVC_BACKEND_LIBS
         mlvc_driver mlvc_driver_kernels nlohmann_json::nlohmann_json)
 endif()
@@ -182,15 +221,36 @@ else()
     set(MLVC_BACKEND_SOURCE src/backends/driver_cubin_backend.cpp)
 endif()
 
-add_library(mlvc_backend STATIC ${MLVC_BACKEND_SOURCE})
+add_library(mlvc_backend STATIC
+    ${MLVC_BACKEND_SOURCE}
+    src/model_assets.cpp
+)
+if(MLVC_WITH_DRIVER_CUBIN)
+    set_source_files_properties("${MLVC_EMBEDDED_MODELS_INDEX}" PROPERTIES
+        GENERATED TRUE
+        HEADER_FILE_ONLY TRUE)
+    set_source_files_properties("${MLVC_EMBEDDED_MODELS_ASSEMBLY}" PROPERTIES
+        OBJECT_DEPENDS "${MLVC_EMBEDDED_MODELS_BINARY}")
+    set_source_files_properties(src/model_assets.cpp PROPERTIES
+        OBJECT_DEPENDS "${MLVC_EMBEDDED_MODELS_INDEX}")
+    target_sources(mlvc_backend PRIVATE
+        "${MLVC_EMBEDDED_MODELS_INDEX}"
+        "${MLVC_EMBEDDED_MODELS_ASSEMBLY}")
+    target_compile_definitions(mlvc_backend PRIVATE MLVC_HAS_EMBEDDED_MODELS=1)
+endif()
 set_target_properties(mlvc_backend PROPERTIES
     POSITION_INDEPENDENT_CODE ON
 )
 target_include_directories(mlvc_backend
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${MLVC_BACKEND_INCLUDES}
+            "${CMAKE_CURRENT_SOURCE_DIR}/src"
             "${NLOHMANN_JSON_DIR}/single_include"
 )
+if(MLVC_WITH_DRIVER_CUBIN)
+    target_include_directories(mlvc_backend PRIVATE
+        "${MLVC_EMBEDDED_MODELS_DIR}")
+endif()
 target_link_libraries(mlvc_backend PUBLIC ${MLVC_BACKEND_LIBS})
 
 add_library(mlvc_codec SHARED
@@ -250,10 +310,18 @@ if(BUILD_TESTING)
                 "${MLVC_TEST_ASSETS_DIR}/models/${_mlvc_profile}/canonical/640x368")
             set(_mlvc_reference_dir
                 "${MLVC_TEST_ASSETS_DIR}/references/${_mlvc_profile}/gray-q21-2f")
-            set(_mlvc_conformance_args
-                --binary $<TARGET_FILE:mlvc_demo>
-                --model-dir "${_mlvc_model_dir}"
-                --reference-dir "${_mlvc_reference_dir}")
+            if(MLVC_WITH_DRIVER_CUBIN)
+                set(_mlvc_conformance_args
+                    --binary $<TARGET_FILE:mlvc_demo>
+                    --model-dir "embedded:${_mlvc_profile}"
+                    --bundle-dir "${_mlvc_model_dir}"
+                    --reference-dir "${_mlvc_reference_dir}")
+            else()
+                set(_mlvc_conformance_args
+                    --binary $<TARGET_FILE:mlvc_demo>
+                    --model-dir "${_mlvc_model_dir}"
+                    --reference-dir "${_mlvc_reference_dir}")
+            endif()
             if(MLVC_WITH_TENSORRT AND MLVC_TEST_ENGINE_CACHE_DIR)
                 list(APPEND _mlvc_conformance_args
                     --engine-cache-dir "${MLVC_TEST_ENGINE_CACHE_DIR}")
@@ -293,10 +361,15 @@ target_include_directories(mlvc_backend_bench PRIVATE
 target_link_libraries(mlvc_demo PRIVATE
     mlvc_codec
 )
-target_link_libraries(mlvc_backend_bench PRIVATE
-    mlvc_backend
-    nlohmann_json::nlohmann_json
-)
+if(MLVC_WITH_DRIVER_CUBIN)
+    target_link_libraries(mlvc_backend_bench PRIVATE
+        mlvc_codec
+        nlohmann_json::nlohmann_json)
+else()
+    target_link_libraries(mlvc_backend_bench PRIVATE
+        mlvc_backend
+        nlohmann_json::nlohmann_json)
+endif()
 
 foreach(_mlvc_executable mlvc_demo mlvc_backend_bench)
     target_link_options(${_mlvc_executable} PRIVATE "LINKER:--disable-new-dtags")

@@ -276,6 +276,17 @@ void Driver::upload_async(const DeviceBuffer& destination,
         "cuMemcpyHtoDAsync");
 }
 
+void Driver::zero_async(const DeviceBuffer& destination) const
+{
+    if (!destination)
+        throw std::runtime_error("driver-cubin: invalid device memset");
+    state_->make_current();
+    DriverState::check(
+        cuMemsetD8Async(destination.address(), 0, destination.size(),
+                       state_->stream),
+        "cuMemsetD8Async");
+}
+
 void Driver::download_async(void* destination, const DeviceBuffer& source,
                             std::size_t bytes) const
 {
@@ -293,6 +304,32 @@ void Driver::download_async(void* destination, abi::DeviceAddress source,
     DriverState::check(
         cuMemcpyDtoHAsync(destination, source, bytes, state_->stream),
         "cuMemcpyDtoHAsync");
+}
+
+void Driver::upload(const DeviceBuffer& destination, const void* source,
+                    std::size_t bytes) const
+{
+    if (!source || bytes > destination.size())
+        throw std::runtime_error("driver-cubin: invalid host-to-device copy");
+    state_->make_current();
+    DriverState::check(cuStreamSynchronize(state_->stream),
+                       "cuStreamSynchronize");
+    DriverState::check(
+        cuMemcpyHtoD(destination.address(), source, bytes),
+        "cuMemcpyHtoD");
+}
+
+void Driver::download(void* destination, abi::DeviceAddress source,
+                      std::size_t bytes) const
+{
+    if (!destination || !source)
+        throw std::runtime_error("driver-cubin: invalid device-to-host copy");
+    state_->make_current();
+    DriverState::check(cuStreamSynchronize(state_->stream),
+                       "cuStreamSynchronize");
+    DriverState::check(
+        cuMemcpyDtoH(destination, source, bytes),
+        "cuMemcpyDtoH");
 }
 
 void Driver::launch(abi::Function function, Dim3 grid, Dim3 block,

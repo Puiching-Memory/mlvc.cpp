@@ -2,12 +2,14 @@
 # Build isolated NVIDIA GPU releases for ONNX Runtime, libtorch, and TensorRT.
 #
 # Usage: ./scripts/package.sh [--backend all|onnxruntime|libtorch|tensorrt]
-#          [--build-root DIR] [--output-dir DIR] [--jobs N] [--no-tar]
+#          [--build-root DIR] [--output-dir DIR] [--model-root DIR]
+#          [--jobs N] [--no-tar]
 set -euo pipefail
 
 BACKEND="all"
 BUILD_ROOT="build-release"
 OUTPUT_DIR="packages"
+MODEL_ROOT="model-assets/models"
 BUILD_TYPE="Release"
 JOBS=""
 NO_TAR=0
@@ -21,6 +23,7 @@ while [[ $# -gt 0 ]]; do
         --backend) BACKEND="${2:?--backend needs a value}"; shift 2 ;;
         --build-root) BUILD_ROOT="${2:?--build-root needs a value}"; shift 2 ;;
         --output-dir) OUTPUT_DIR="${2:?--output-dir needs a value}"; shift 2 ;;
+        --model-root) MODEL_ROOT="${2:?--model-root needs a value}"; shift 2 ;;
         --jobs) JOBS="${2:?--jobs needs a value}"; shift 2 ;;
         --no-tar) NO_TAR=1; shift ;;
         -h|--help) usage; exit 0 ;;
@@ -39,6 +42,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/scripts/dependencies.env"
 [[ "$BUILD_ROOT" = /* ]] || BUILD_ROOT="$ROOT/$BUILD_ROOT"
 [[ "$OUTPUT_DIR" = /* ]] || OUTPUT_DIR="$ROOT/$OUTPUT_DIR"
+[[ "$MODEL_ROOT" = /* ]] || MODEL_ROOT="$ROOT/$MODEL_ROOT"
 
 if [[ -z "$JOBS" ]]; then
     JOBS="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)"
@@ -52,7 +56,7 @@ fi
 command -v cmake >/dev/null || { echo "error: cmake is required" >&2; exit 1; }
 command -v nvcc >/dev/null || { echo "error: CUDA 13.3 toolkit is required" >&2; exit 1; }
 command -v nvidia-smi >/dev/null || { echo "error: nvidia-smi is required" >&2; exit 1; }
-for tool in ldd sha256sum tar; do
+for tool in ldd python3 sha256sum tar; do
     command -v "$tool" >/dev/null || { echo "error: $tool is required" >&2; exit 1; }
 done
 nvidia-smi -L >/dev/null || { echo "error: no usable NVIDIA GPU was detected" >&2; exit 1; }
@@ -91,6 +95,14 @@ resolve_cudart() {
         return 0
     fi
     return 1
+}
+
+resolve_cuda_eula() {
+    local nvcc_real toolkit_root
+    nvcc_real="$(readlink -f "$(command -v nvcc)")"
+    toolkit_root="$(dirname "$(dirname "$nvcc_real")")"
+    [[ -f "$toolkit_root/EULA.txt" ]] || return 1
+    printf '%s\n' "$toolkit_root/EULA.txt"
 }
 
 ONNXRUNTIME_SDK="$("$ROOT/scripts/fetch_onnxruntime.sh" --print-dir 2>/dev/null || true)"
@@ -160,6 +172,21 @@ audit_linkage() {
     fi
 }
 
+audit_bundled_cudart() {
+    local target="$1"
+    local package_lib="$2"
+    local report actual expected
+    report="$(LD_LIBRARY_PATH="$package_lib" ldd "$target")"
+    actual="$(awk '$1 == "libcudart.so.13" && $2 == "=>" {print $3; exit}' \
+        <<<"$report")"
+    expected="$(readlink -f "$package_lib/libcudart.so.13")"
+    if [[ -z "$actual" || "$(readlink -f "$actual")" != "$expected" ]]; then
+        echo "error: $target does not resolve libcudart.so.13 from $package_lib" >&2
+        echo "$report" >&2
+        return 1
+    fi
+}
+
 package_backend() {
     local backend="$1"
     local build_dir="$BUILD_ROOT/$backend"
@@ -168,6 +195,7 @@ package_backend() {
     local prefix
     local sdk_root
     local sdk_label
+    local bundled_models=""
     local -a configure_args
 
     case "$backend" in
@@ -212,11 +240,29 @@ package_backend() {
     cmake --install "$build_dir" --config "$BUILD_TYPE" --prefix "$prefix"
 
     echo "==> bundling CUDA runtime"
+    local cudart_so
     if ! cudart_so="$(resolve_cudart)"; then
         echo "error: CUDA runtime libcudart.so.13 not found on the build host" >&2
         return 1
     fi
     cp -L "$cudart_so" "$prefix/lib/libcudart.so.13"
+    local cuda_eula
+    if ! cuda_eula="$(resolve_cuda_eula)"; then
+        echo "error: CUDA EULA.txt not found beside the active toolkit" >&2
+        return 1
+    fi
+    mkdir -p "$prefix/share/licenses/cuda"
+    cp "$cuda_eula" "$prefix/share/licenses/cuda/EULA.txt"
+
+    if [[ "$backend" == "tensorrt" ]]; then
+        echo "==> bundling TensorRT models"
+        python3 "$ROOT/scripts/package_model_bundles.py" \
+            --backend tensorrt \
+            --model-root "$MODEL_ROOT" \
+            --output-root "$prefix/share/mlvc/models"
+        bundled_models="$(find "$prefix/share/mlvc/models" -mindepth 2 -maxdepth 2 \
+            -type d -printf '%P\n' | LC_ALL=C sort | paste -sd ',' -)"
+    fi
 
     local binary="$prefix/bin/mlvc_demo"
     [[ -x "$binary" ]] || { echo "error: packaged binary is missing: $binary" >&2; return 1; }
@@ -246,6 +292,9 @@ package_backend() {
     audit_linkage "$binary"
     audit_linkage "$benchmark_binary"
     audit_linkage "$codec_library" "$prefix/lib"
+    if [[ "$backend" == "tensorrt" ]]; then
+        audit_bundled_cudart "$codec_library" "$prefix/lib"
+    fi
     local probe_pattern
     case "$backend" in
         onnxruntime) probe_pattern='libonnxruntime_providers_cuda.so*' ;;
@@ -274,6 +323,11 @@ package_backend() {
         printf 'build_gpu=%s\n' "$GPU_NAMES"
         printf 'sdk=%s\n' "$sdk_label"
         printf 'bundled_cuda_runtime=%s\n' "libcudart.so.13"
+        printf 'cuda_runtime_license=%s\n' "share/licenses/cuda/EULA.txt"
+        if [[ "$backend" == "tensorrt" ]]; then
+            printf 'model_root=share/mlvc/models\n'
+            printf 'bundled_models=%s\n' "$bundled_models"
+        fi
     } > "$prefix/BUILD-MANIFEST.txt"
     (
         cd "$prefix"

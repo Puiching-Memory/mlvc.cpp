@@ -39,5 +39,6 @@ struct ModelConfig {
 };
 
 ModelConfig load_model_config(const std::filesystem::path& model_dir);
+std::vector<std::string> embedded_model_profiles();
 
 }  // namespace mlvc

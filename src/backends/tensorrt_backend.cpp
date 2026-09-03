@@ -152,12 +152,15 @@ public:
 
     std::string_view name() const noexcept override { return "tensorrt"; }
 
-    void load(const std::string& model_name) override
+    void load(const std::string& model_name,
+              const ModelExecutionConfig& config) override
     {
         const std::filesystem::path onnx_path =
             std::filesystem::path(options_.model_dir) / (model_name + ".onnx");
 
         buffers_.clear();
+        state_bindings_.clear();
+        state_initialized_ = false;
         context_.reset();
         engine_.reset();
         runtime_.reset(nvinfer1::createInferRuntime(logger_));
@@ -194,26 +197,49 @@ public:
                 name, type, engine_->getTensorShape(name),
                 engine_->getTensorIOMode(name) == nvinfer1::TensorIOMode::kINPUT);
         }
+        configure_state(config);
+    }
+
+    void reset_state() override
+    {
+        if (!context_)
+            throw std::runtime_error("tensorrt: load() must be called first");
+        for (const StateBinding& binding : state_bindings_) {
+            Buffer& input = buffers_.at(binding.input_buffer_index);
+            check_cuda(cudaMemsetAsync(input.device_ptr, 0, input.bytes, stream_),
+                       "cudaMemsetAsync state");
+        }
+        state_initialized_ = true;
     }
 
     std::vector<Tensor> run(const std::vector<Tensor>& inputs) override
     {
         if (!context_)
             throw std::runtime_error("tensorrt: load() must be called first");
+        if (!state_bindings_.empty() && !state_initialized_)
+            throw std::runtime_error(
+                "tensorrt: reset_state() must be called before run()");
 
-        for (Buffer& buffer : buffers_) {
+        const std::size_t graph_input_count = static_cast<std::size_t>(
+            std::count_if(buffers_.begin(), buffers_.end(),
+                          [](const Buffer& buffer) { return buffer.is_input; }));
+        if (inputs.size() + state_bindings_.size() != graph_input_count)
+            throw std::runtime_error("tensorrt: graph input count mismatch");
+        std::size_t external_index = 0;
+        for (std::size_t buffer_index = 0; buffer_index < buffers_.size();
+             ++buffer_index) {
+            Buffer& buffer = buffers_[buffer_index];
             if (!buffer.is_input)
                 continue;
-            auto input = std::find_if(inputs.begin(), inputs.end(),
-                [&](const Tensor& tensor) { return tensor.name == buffer.name; });
-            if (input == inputs.end())
-                throw std::runtime_error("tensorrt: missing input " + buffer.name);
-            if (input->data_type() != tensor_data_type(buffer.type))
+            if (is_state_input(buffer_index))
+                continue;
+            const Tensor& input = inputs.at(external_index++);
+            if (input.data_type() != tensor_data_type(buffer.type))
                 throw std::runtime_error("tensorrt: input dtype mismatch for " + buffer.name);
-            if (input->byte_size() != buffer.bytes)
+            if (input.byte_size() != buffer.bytes)
                 throw std::runtime_error("tensorrt: input size mismatch for " + buffer.name);
 
-            std::memcpy(buffer.host_ptr, input->raw_data(), buffer.bytes);
+            std::memcpy(buffer.host_ptr, input.raw_data(), buffer.bytes);
             check_cuda(cudaMemcpyAsync(buffer.device_ptr, buffer.host_ptr, buffer.bytes,
                                        cudaMemcpyHostToDevice, stream_),
                        "cudaMemcpyAsync host-to-device");
@@ -227,17 +253,26 @@ public:
         if (!context_->enqueueV3(stream_))
             throw std::runtime_error("tensorrt: enqueueV3 failed");
 
-        for (Buffer& buffer : buffers_) {
-            if (!buffer.is_input)
+        for (std::size_t index = 0; index < buffers_.size(); ++index) {
+            Buffer& buffer = buffers_[index];
+            if (!buffer.is_input && !is_state_output(index))
                 check_cuda(cudaMemcpyAsync(buffer.host_ptr, buffer.device_ptr, buffer.bytes,
                                            cudaMemcpyDeviceToHost, stream_),
                            "cudaMemcpyAsync device-to-host");
         }
+        // The just-produced output becomes the next invocation's input. The
+        // old input allocation becomes the next output target, avoiding both
+        // host traffic and a device-to-device copy.
+        for (const StateBinding& binding : state_bindings_) {
+            std::swap(buffers_[binding.input_buffer_index].device_ptr,
+                      buffers_[binding.output_buffer_index].device_ptr);
+        }
         check_cuda(cudaStreamSynchronize(stream_), "cudaStreamSynchronize");
 
         std::vector<Tensor> result;
-        for (Buffer& buffer : buffers_) {
-            if (buffer.is_input)
+        for (std::size_t index = 0; index < buffers_.size(); ++index) {
+            Buffer& buffer = buffers_[index];
+            if (buffer.is_input || is_state_output(index))
                 continue;
             Tensor tensor;
             tensor.name = buffer.name;
@@ -253,6 +288,65 @@ public:
     }
 
 private:
+    struct StateBinding {
+        std::size_t input_buffer_index;
+        std::size_t output_buffer_index;
+    };
+
+    void configure_state(const ModelExecutionConfig& config)
+    {
+        std::vector<std::size_t> input_indices;
+        std::vector<std::size_t> output_indices;
+        for (std::size_t index = 0; index < buffers_.size(); ++index) {
+            (buffers_[index].is_input ? input_indices : output_indices)
+                .push_back(index);
+        }
+        for (const StateTensorBinding& requested : config.state_bindings) {
+            if (requested.input_index >= input_indices.size() ||
+                requested.output_index >= output_indices.size()) {
+                throw std::runtime_error(
+                    "tensorrt: state tensor index is out of range");
+            }
+            const std::size_t input_index = input_indices[requested.input_index];
+            const std::size_t output_index = output_indices[requested.output_index];
+            if (is_state_input(input_index) || is_state_output(output_index))
+                throw std::runtime_error("tensorrt: duplicate state tensor binding");
+
+            const Buffer& input = buffers_[input_index];
+            const Buffer& output = buffers_[output_index];
+            std::vector<int64_t> shape;
+            shape.reserve(static_cast<std::size_t>(input.dims.nbDims));
+            for (int i = 0; i < input.dims.nbDims; ++i)
+                shape.push_back(input.dims.d[i]);
+            if (input.type != output.type || input.bytes != output.bytes ||
+                input.dims.nbDims != output.dims.nbDims ||
+                !std::equal(input.dims.d, input.dims.d + input.dims.nbDims,
+                            output.dims.d) ||
+                requested.data_type != tensor_data_type(input.type) ||
+                requested.shape != shape) {
+                throw std::runtime_error(
+                    "tensorrt: state tensor shape or dtype mismatch");
+            }
+            state_bindings_.push_back({input_index, output_index});
+        }
+    }
+
+    bool is_state_input(std::size_t index) const
+    {
+        return std::any_of(state_bindings_.begin(), state_bindings_.end(),
+            [&](const StateBinding& binding) {
+                return binding.input_buffer_index == index;
+            });
+    }
+
+    bool is_state_output(std::size_t index) const
+    {
+        return std::any_of(state_bindings_.begin(), state_bindings_.end(),
+            [&](const StateBinding& binding) {
+                return binding.output_buffer_index == index;
+            });
+    }
+
     std::filesystem::path cache_path(const std::string& model_name) const
     {
         cudaDeviceProp properties{};
@@ -392,6 +486,8 @@ private:
     TrtPtr<nvinfer1::ICudaEngine> engine_;
     TrtPtr<nvinfer1::IExecutionContext> context_;
     std::vector<Buffer> buffers_;
+    std::vector<StateBinding> state_bindings_;
+    bool state_initialized_ = false;
 };
 
 }  // namespace

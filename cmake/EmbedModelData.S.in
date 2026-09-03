@@ -1,0 +1,13 @@
+.section .rodata.mlvc_embedded_models,"a",@progbits
+.balign 16
+.global mlvc_embedded_models_start
+.hidden mlvc_embedded_models_start
+.type mlvc_embedded_models_start, @object
+mlvc_embedded_models_start:
+.incbin "@MLVC_EMBEDDED_MODELS_BINARY@"
+.global mlvc_embedded_models_end
+.hidden mlvc_embedded_models_end
+mlvc_embedded_models_end:
+.size mlvc_embedded_models_start, .-mlvc_embedded_models_start
+
+.section .note.GNU-stack,"",@progbits

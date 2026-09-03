@@ -31,7 +31,8 @@ The equivalent deployment boundary is:
 1. Use CUDA Toolkit, CUTLASS/CuTe, and model conversion tools only on the build
    host.
 2. Produce architecture-specific cubins plus a PTX forward-compatibility image.
-3. Embed the fatbin and FP16 weights in the executable or model package.
+3. Embed the fatbin, graph schedules, PMFs, metadata, and FP16 weights in the
+   ELF shared library, matching the DLL's monolithic deployment boundary.
 4. Link only NVIDIA's official CUDA Driver API.
 5. Load modules with `cuModuleLoadData`, resolve entries with
    `cuModuleGetFunction`, and dispatch with `cuLaunchKernel`.

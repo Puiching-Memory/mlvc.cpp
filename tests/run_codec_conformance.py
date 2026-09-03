@@ -21,7 +21,12 @@ def sha256(path: Path) -> str:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, required=True)
-    parser.add_argument("--model-dir", type=Path, required=True)
+    parser.add_argument("--model-dir", required=True)
+    parser.add_argument(
+        "--bundle-dir",
+        type=Path,
+        help="filesystem bundle used to verify an embedded model",
+    )
     parser.add_argument("--reference-dir", type=Path, required=True)
     parser.add_argument("--engine-cache-dir", type=Path)
     parser.add_argument("--result", type=Path)
@@ -57,7 +62,11 @@ def run_codec(
         "--frames",
         str(manifest["frames"]),
         "--model-dir",
-        str(args.model_dir.resolve()),
+        (
+            args.model_dir
+            if args.model_dir.startswith("embedded:")
+            else str(Path(args.model_dir).resolve())
+        ),
     ]
     if command == "encode":
         cmd.extend(["--q-index", str(manifest["q_index"])])
@@ -235,8 +244,14 @@ def main() -> None:
     )
     if manifest.get("schema_version") != 1:
         raise AssertionError("unsupported codec reference schema")
+    if args.model_dir.startswith("embedded:"):
+        if args.bundle_dir is None:
+            raise ValueError("--bundle-dir is required for an embedded model")
+        bundle_dir = args.bundle_dir.resolve()
+    else:
+        bundle_dir = Path(args.model_dir).resolve()
     bundle = json.loads(
-        (args.model_dir / "model_bundle.json").read_text(encoding="utf-8")
+        (bundle_dir / "model_bundle.json").read_text(encoding="utf-8")
     )
     if (
         bundle.get("profile") != manifest["profile"]
@@ -245,12 +260,12 @@ def main() -> None:
     ):
         raise AssertionError("model bundle does not match codec reference")
     for name, record in bundle["artifacts"].items():
-        artifact = args.model_dir / record["path"]
+        artifact = bundle_dir / record["path"]
         if not artifact.is_file() or artifact.stat().st_size != record["bytes"]:
             raise AssertionError(f"model bundle artifact missing or truncated: {name}")
         if sha256(artifact) != record["sha256"]:
             raise AssertionError(f"model bundle artifact hash mismatch: {name}")
-    if sha256(args.model_dir / "metadata.json") != manifest["model_metadata_sha256"]:
+    if sha256(bundle_dir / "metadata.json") != manifest["model_metadata_sha256"]:
         raise AssertionError("model metadata does not match codec reference")
     if sha256(args.reference_dir / manifest["input"]["path"]) != manifest["input"]["sha256"]:
         raise AssertionError("reference input hash mismatch")

@@ -1,8 +1,9 @@
 #include "mlvc/model.hpp"
 
+#include "model_assets.hpp"
+
 #include <nlohmann/json.hpp>
 
-#include <fstream>
 #include <stdexcept>
 
 namespace mlvc {
@@ -24,14 +25,10 @@ void validate_bundle_manifest(const std::filesystem::path& model_dir,
                               const nlohmann::json& metadata)
 {
     const auto manifest_path = model_dir / "model_bundle.json";
-    if (!std::filesystem::exists(manifest_path))
+    if (!detail::model_asset_exists(model_dir, "model_bundle.json"))
         return;
-    std::ifstream input(manifest_path);
-    if (!input)
-        throw std::runtime_error("cannot open model bundle manifest: " +
-                                 manifest_path.string());
-    nlohmann::json manifest;
-    input >> manifest;
+    const nlohmann::json manifest = nlohmann::json::parse(
+        detail::read_model_text(model_dir, "model_bundle.json"));
     const auto& full = metadata.at("params").at("full_model_params");
     const auto& split = metadata.at("params").at("split_model_params");
     if (manifest.at("schema_version").get<int>() != 1 ||
@@ -107,12 +104,8 @@ int ModelConfig::q_index_shift(int frame_index) const
 ModelConfig load_model_config(const std::filesystem::path& model_dir)
 {
     const auto path = model_dir / "metadata.json";
-    std::ifstream input(path);
-    if (!input)
-        throw std::runtime_error("cannot open model metadata: " + path.string());
-
-    nlohmann::json root;
-    input >> root;
+    const nlohmann::json root = nlohmann::json::parse(
+        detail::read_model_text(model_dir, "metadata.json"));
     validate_bundle_manifest(model_dir, root);
     const auto& full = root.at("params").at("full_model_params");
     const auto& split = root.at("params").at("split_model_params");
@@ -153,6 +146,11 @@ ModelConfig load_model_config(const std::filesystem::path& model_dir)
             "this runtime currently requires the dmc61sbr_e1d1 no-reset profile");
     }
     return result;
+}
+
+std::vector<std::string> embedded_model_profiles()
+{
+    return detail::list_embedded_model_profiles();
 }
 
 }  // namespace mlvc

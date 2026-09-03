@@ -1,204 +1,444 @@
-# MLVC TensorRT 可移植库集成指南
+# MLVC NVIDIA Linux SDK 使用与集成手册
 
-本文面向拿到以下归档、需要将 MLVC 编解码能力接入应用的开发者：
+本文面向将 MLVC 编解码能力接入 Linux 服务、命令行工具或摄像头演示的开发者。
+当前版本为 `0.1.0` 性能调优版本，C ABI 和码流外层协议仍可能调整，不承诺后续
+版本保持二进制兼容。
 
-```text
-packages/mlvc_cpp-0.1.0-tensorrt-nvidia-linux-x86_64.tar.gz
-```
+SDK 是 Linux x86_64 NVIDIA GPU 原生软件，不能直接加载到 Android、iOS、浏览器
+或微信小程序中。客户端演示需要通过 HTTP、WebSocket 或其他业务协议调用 Linux
+GPU 服务。
 
-归档是 Linux x86_64 NVIDIA GPU 原生库，不是微信小程序前端 SDK。推荐先
-在一台 Linux GPU 机器上把 CLI 或 C ABI 服务跑通，再由小程序通过 HTTPS
-或 WebSocket 调用该服务。
+## 1. 选择发布包
 
-## 1. 归档与运行条件
+本次发布提供两个可部署归档：
 
-发布归档的 SHA-256 为：
+| 后端         | 归档                                                     | 模型存储                                        | 主要运行时依赖                                               |
+| ------------ | -------------------------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------ |
+| Driver+cubin | `mlvc_cpp-0.1.0-driver-cubin-nvidia-linux-x86_64.tar.gz` | AOT 图、权重与 fatbin 内嵌在 `libmlvc_codec.so` | NVIDIA 驱动和系统 C/C++ 运行库                               |
+| TensorRT     | `mlvc_cpp-0.1.0-tensorrt-nvidia-linux-x86_64.tar.gz`     | 包内 ONNX model bundle，首次运行构建 engine     | NVIDIA 驱动；包内 TensorRT、ONNX parser 和 `libcudart.so.13` |
 
-```text
-50699e721a6ca9a82ec6113840e81447e53bb993af4fb1bfe4a4750529580a60
-```
+Driver+cubin 包更小、启动更快，且不依赖 CUDA Toolkit、CUDA Runtime、TensorRT、
+ONNX Runtime 或 libtorch。其 fatbin 包含 `sm_75`、`sm_80`、`sm_86`、`sm_89`
+原生代码和 `compute_89` PTX。
 
-归档大小为 `2,057,313,608` bytes（约 1.92 GiB），解包和部署时请预留足够磁盘空间。
+TensorRT 包携带运行和构建 engine 所需的动态库。engine 与 GPU 架构、TensorRT
+版本、模型和 workspace 配置相关，不是跨机器通用模型文件。
 
-下载后先校验并解包：
+源码还支持 ONNX Runtime 和 libtorch 后端，但本次发布不提供这两个后端的归档。
+四种后端共用 codec、GOP、熵编码和 YUV pipeline；推理实现、依赖、性能及 FP16
+数值结果不同。
+
+### 1.1 归档校验值
+
+| 归档         | 大小（bytes） | SHA-256                                                            |
+| ------------ | ------------: | ------------------------------------------------------------------ |
+| Driver+cubin |    73,123,533 | `fbbac58d490ab32754feb5ff7f08aa2767071aa43d9426775f47166513ed95bc` |
+| TensorRT     | 2,129,029,810 | `afdc729b51ff8cc507c15b6371162ec78d5d1af7485cd55db5db39a3ce701f0a` |
+
+部署前应从可信渠道获得归档，并校验完整 SHA-256。归档内的 `SHA256SUMS` 用于校验
+解包后的文件。
+
+## 2. 安装与运行条件
+
+以 Driver+cubin 为例：
 
 ```bash
-sha256sum mlvc_cpp-0.1.0-tensorrt-nvidia-linux-x86_64.tar.gz
+MLVC_ARCHIVE=mlvc_cpp-0.1.0-driver-cubin-nvidia-linux-x86_64.tar.gz
+MLVC_PACKAGE=mlvc_cpp-0.1.0-driver-cubin-nvidia-linux-x86_64
+
+sha256sum "packages/$MLVC_ARCHIVE"
 mkdir -p /opt/mlvc
-tar -xzf mlvc_cpp-0.1.0-tensorrt-nvidia-linux-x86_64.tar.gz -C /opt/mlvc
-export MLVC_PREFIX=/opt/mlvc/mlvc_cpp-0.1.0-tensorrt-nvidia-linux-x86_64
+tar -xzf "packages/$MLVC_ARCHIVE" -C /opt/mlvc
+export MLVC_PREFIX="/opt/mlvc/$MLVC_PACKAGE"
 ```
 
-归档主要内容：
+使用 TensorRT 时，把两个变量替换为：
 
-```text
-bin/mlvc_demo                         CLI 编解码器
-bin/mlvc_backend_bench                TensorRT 后端基准工具
-lib/libmlvc_codec.so                  稳定 C ABI 共享库
-lib/libnvinfer*.so*                   TensorRT 运行时/构建资源
-lib/libnvonnxparser*.so*              ONNX 解析器
-lib/libcudart.so.13                   CUDA 13.3 运行时（随包分发，无需另装 CUDA）
-include/mlvc/codec.h                  C ABI 头文件
-include/mlvc/*.hpp                    C++ 头文件
-lib/cmake/mlvc_codec/                 CMake package
-BUILD-MANIFEST.txt                    构建环境与版本清单
-SHA256SUMS                            归档内文件校验和
+```bash
+MLVC_ARCHIVE=mlvc_cpp-0.1.0-tensorrt-nvidia-linux-x86_64.tar.gz
+MLVC_PACKAGE=mlvc_cpp-0.1.0-tensorrt-nvidia-linux-x86_64
 ```
 
 部署主机必须满足：
 
-- Linux x86_64 和可用的 NVIDIA GPU；
-- NVIDIA 驱动能够运行 CUDA 13.3 代码。发布包是在 NVIDIA A30、驱动
-  595.71.05 环境上构建和验证的，实际部署应以 `nvidia-smi` 和驱动发布说明
-  为准；
-- 包内已经带 TensorRT 11.2.1 运行库、ONNX parser 和 CUDA 13.3 运行时
-  （`libcudart.so.13`），不需要另装 TensorRT 或 CUDA 工具包；
-- NVIDIA 驱动本身不在归档内，`libcuda.so.1` 必须由系统驱动提供；
-- 首次运行某个 GPU、模型和 workspace 组合时，TensorRT 可能需要构建 engine，
-  这一步可能较慢。之后使用 engine cache 启动会快很多。
+- Linux x86_64；
+- 一块可用且受当前 SDK 支持的 NVIDIA GPU；
+- 能加载包内 CUDA 代码和运行库的 NVIDIA 驱动；
+- 系统提供 glibc、`libstdc++.so.6`、`libgcc_s.so.1`、`libm.so.6` 等基础运行库；
+- 有权限创建输出文件；TensorRT 还需要可写的 engine cache 目录。
 
-启动前可检查：
+发布包在 NVIDIA A30、驱动 595.71.05 环境完成构建与当前验证。NVIDIA 驱动本身
+不随包分发，`libcuda.so.1` 必须来自部署主机或容器的 NVIDIA runtime。
+
+Driver+cubin 不要求安装 CUDA Toolkit。TensorRT 包也不要求另装 CUDA Toolkit 或
+TensorRT，但仍需要系统 C/C++ 运行库和 NVIDIA 驱动。
+
+本次二进制的实际动态符号要求最高达到 `GLIBC_2.38`、`GLIBCXX_3.4.32`；
+Driver+cubin 的 codec library 还要求 `CXXABI_1.3.15`。目标系统必须提供这些版本
+或更新版本，仅仅满足“Linux x86_64”并不够。可在部署前检查：
 
 ```bash
-nvidia-smi
+readelf --version-info "$MLVC_PREFIX/lib/libmlvc_codec.so" \
+  | grep -Eo 'GLIBC(X{2})?_[0-9.]+|CXXABI_[0-9.]+' | sort -Vu
+ldd "$MLVC_PREFIX/lib/libmlvc_codec.so"
+```
+
+### 2.1 解包后检查
+
+```bash
+(cd "$MLVC_PREFIX" && sha256sum -c SHA256SUMS)
 "$MLVC_PREFIX/bin/mlvc_demo" --backend-name
-# 预期输出：tensorrt
 ```
 
-不要把这个归档直接放进 Android/iOS、微信小程序包或浏览器。`.so` 是
-Linux x86_64 原生动态库，小程序端既不能加载它，也不能直接访问 NVIDIA GPU。
+第二条命令应输出 `driver-cubin` 或 `tensorrt`，并与所选归档一致。Driver+cubin
+还可以列出内嵌模型：
 
-## 2. 准备模型目录
+```bash
+"$MLVC_PREFIX/bin/mlvc_demo" --list-model-profiles
+```
 
-模型权重没有放进 2 GB 级别的运行归档，需要由部署方单独分发一个与
-profile 对应的 canonical model bundle。TensorRT 需要以下文件：
+当前应输出：
 
 ```text
-models/mlvc-psnr-v1/640x368/
-  MLVCEncoder.onnx
-  MLVCDecoder.onnx
-  gaussian_pmf.json
-  bit_estimator_pmf.json
-  metadata.json
-  model_bundle.json       # 强烈建议保留，用于校验 profile/协议身份
+mlvc-psnr-v1
+mlvc-s-psnr-v1
 ```
 
-MLVC-S 使用另一套 profile，不可只替换文件名或尺寸：
+TensorRT 的模型是外置目录，因此 `--list-model-profiles` 不列出它们。
+
+归档主要内容如下：
 
 ```text
-models/mlvc-s-psnr-v1/640x368/
-  MLVCEncoder.onnx
-  MLVCDecoder.onnx
-  gaussian_pmf.json
-  bit_estimator_pmf.json
-  metadata.json
-  model_bundle.json
+bin/mlvc_demo               CLI 编解码器
+bin/mlvc_backend_bench      模型级 benchmark 工具
+lib/libmlvc_codec.so        C ABI/C++ codec 共享库
+include/mlvc/codec.h        C ABI 头文件
+include/mlvc/*.hpp          当前 C++ 头文件
+lib/cmake/mlvc_codec/       relocatable CMake package
+BUILD-MANIFEST.txt          后端、构建环境和模型清单
+SHA256SUMS                  包内文件校验值
 ```
 
-所有文件必须来自同一次官方 MLVC split-model 导出。不要把一个导出的
-`metadata.json` 与另一个导出的 PMF 或 ONNX 混用。`model_bundle.json` 存在
-时，运行库会检查 profile、模型版本、固定尺寸以及 `mlvc-frame-le-v1` /
-`canonical-pmf-v1` 协议标识。
+Driver+cubin 另外包含 `bin/mlvc_driver_probe`。TensorRT 另外包含后端动态库、CUDA
+Runtime 许可和 `share/mlvc/models/`。
 
-当前发布包针对固定模型形状 `640x368`，最常用的输入是偶数尺寸
-`640x360`。输入是 8-bit、planar YUV420（I420：完整 Y 平面，随后完整 U、V
-平面），每帧字节数为 `width * height * 3 / 2`。宽高必须为正偶数，且按原方向
-或交换宽高后必须能放入模型画布；运行库会对后者执行现有的旋转尺寸处理。
+## 3. 模型、输入和输出约束
 
-## 3. CLI：文件模式
+两个归档都包含两个互相独立的模型 profile：
 
-编码 YUV420 到 MLVC 帧流：
+- `mlvc-psnr-v1`：默认主模型；
+- `mlvc-s-psnr-v1`：较小模型。
+
+编码端和解码端必须使用相同 profile、画布尺寸和 GOP 规则。不要把两个 profile
+的模型文件或状态混在同一会话中。
+
+Driver+cubin 默认选择 `mlvc-psnr-v1`，也可以显式选择：
+
+```bash
+--model-profile mlvc-psnr-v1
+--model-profile mlvc-s-psnr-v1
+```
+
+`--model-profile` 只对 Driver+cubin 有效。TensorRT 必须使用对应模型目录：
+
+```text
+$MLVC_PREFIX/share/mlvc/models/mlvc-psnr-v1/640x368/
+$MLVC_PREFIX/share/mlvc/models/mlvc-s-psnr-v1/640x368/
+```
+
+目录中包含 `MLVCEncoder.onnx`、`MLVCDecoder.onnx`、两个 PMF、`metadata.json` 和
+`model_bundle.json`。不要只替换其中某个文件；运行库会校验 profile、模型版本、
+固定尺寸和协议标识。
+
+### 3.1 YUV 输入
+
+当前模型画布是 `640x368`。输入必须是 8-bit planar YUV420/I420：完整 Y 平面，
+随后完整 U、V 平面。每帧字节数为：
+
+```text
+width * height * 3 / 2
+```
+
+宽高必须是正偶数，并满足以下任一条件：
+
+```text
+width <= 640 && height <= 368
+height <= 640 && width <= 368
+```
+
+第二种情况会在模型输入和输出处转置方向。未占满的画布区域使用边缘值在右侧和
+底部填充，输出恢复为调用方指定的原始宽高。
+
+当前两个 profile 的原始 `q-index` 范围都是 `0..63`。数值越大并不应在没有实际
+率失真测量时简单解释为固定的“质量等级”。
+
+## 4. CLI 文件模式
+
+以下示例假设已有 640x360 I420 文件。可以用 FFmpeg 生成测试输入：
+
+```bash
+ffmpeg -f lavfi -i testsrc2=size=640x360:rate=30 -frames:v 48 \
+  -pix_fmt yuv420p -f rawvideo input.yuv
+```
+
+### 4.1 Driver+cubin
+
+编码：
 
 ```bash
 "$MLVC_PREFIX/bin/mlvc_demo" encode \
-  --input input.yuv \
-  --output output.mlvc \
-  --width 640 --height 360 \
-  --frames 60 --q-index 21 \
-  --model-dir /srv/models/mlvc-psnr-v1/640x368 \
-  --engine-cache-dir /srv/mlvc-engine-cache \
-  --device-id 0
+  --input input.yuv --output output.mlvc \
+  --width 640 --height 360 --frames 48 --q-index 21 \
+  --model-profile mlvc-psnr-v1 --device-id 0
 ```
 
-解码 MLVC 到 YUV420：
+解码：
 
 ```bash
 "$MLVC_PREFIX/bin/mlvc_demo" decode \
-  --input output.mlvc \
-  --output reconstructed.yuv \
-  --width 640 --height 360 \
-  --frames 60 \
-  --model-dir /srv/models/mlvc-psnr-v1/640x368 \
-  --engine-cache-dir /srv/mlvc-engine-cache \
-  --device-id 1
+  --input output.mlvc --output reconstructed.yuv \
+  --width 640 --height 360 --frames 48 \
+  --model-profile mlvc-psnr-v1 --device-id 0
 ```
 
-`--frames 0` 表示一直处理到输入 EOF。编码时 `--q-index` 必须在模型支持的
-范围内；解码会从每帧容器头读取 q-index。`--workspace-mib` 可覆盖默认的
-4096 MiB TensorRT workspace，例如 `--workspace-mib 8192`。调试模型输入、
-输出张量时可加 `--debug-dir /tmp/mlvc-debug`。
+省略 `--model-profile` 时使用内嵌的 `mlvc-psnr-v1`。
 
-`--engine-cache-dir` 是 cache 根目录，运行库会自动按 `metadata.json` 的
-profile 名称隔离 MLVC 与 MLVC-S，并按 GPU 架构、TensorRT 版本、workspace 和
-FP16 配置命名 engine。不要在不同模型或不同 GPU 间手工复制 engine 文件。
+### 4.2 TensorRT
 
-## 4. CLI：stdin/stdout 流式模式
+```bash
+MLVC_MODEL_DIR="$MLVC_PREFIX/share/mlvc/models/mlvc-psnr-v1/640x368"
+MLVC_ENGINE_CACHE=/srv/mlvc-engine-cache
 
-`--input -` 和 `--output -` 分别选择标准输入和标准输出。输出为二进制时，
-CLI 的摘要和错误会写到 stderr，不会污染 stdout。下面的命令让 GPU 0 编码、
-GPU 1 解码，并且边编码边解码：
+"$MLVC_PREFIX/bin/mlvc_demo" encode \
+  --input input.yuv --output output.mlvc \
+  --width 640 --height 360 --frames 48 --q-index 21 \
+  --model-dir "$MLVC_MODEL_DIR" \
+  --engine-cache-dir "$MLVC_ENGINE_CACHE" --device-id 0
+
+"$MLVC_PREFIX/bin/mlvc_demo" decode \
+  --input output.mlvc --output reconstructed.yuv \
+  --width 640 --height 360 --frames 48 \
+  --model-dir "$MLVC_MODEL_DIR" \
+  --engine-cache-dir "$MLVC_ENGINE_CACHE" --device-id 0
+```
+
+TensorRT 首次运行某个 GPU、模型、TensorRT 版本和 workspace 组合时会构建 engine，
+启动可能明显更慢。应持久化并复用 cache 根目录，不要跨模型或 GPU 手工复制 engine。
+运行库会在 cache 根目录下继续按 profile 和 engine 参数隔离文件。
+
+### 4.3 常用参数
+
+| 参数                   | 含义                                  |
+| ---------------------- | ------------------------------------- |
+| `--frames N`           | 处理 N 帧；`0` 表示持续处理到输入 EOF |
+| `--q-index N`          | 编码原始 Q index；解码从每帧头读取    |
+| `--device-id N`        | 当前命令使用的 CUDA ordinal           |
+| `--encode-device-id N` | encode 专用的 `--device-id` 别名      |
+| `--decode-device-id N` | decode 专用的 `--device-id` 别名      |
+| `--workspace-mib N`    | 覆盖默认 4096 MiB workspace 上限      |
+| `--debug-dir DIR`      | 写出逐帧模型输入输出，供兼容性诊断    |
+
+指定 `--debug-dir` 会关闭设备驻留状态绑定，使 `ref_feature` 和 `feature` 能被写到
+host 调试目录。这条路径不代表正常运行性能。
+
+## 5. 管道和 FIFO
+
+`--input -` 和 `--output -` 分别使用 stdin 和 stdout。二进制数据写 stdout 时，
+CLI 摘要和错误写 stderr，不会污染码流。下面是 Driver+cubin 的实时管道示例：
 
 ```bash
 set -o pipefail
 cat input.yuv \
   | "$MLVC_PREFIX/bin/mlvc_demo" encode \
-      --input - --output - --width 640 --height 360 --frames 0 --q-index 21 \
-      --model-dir /srv/models/mlvc-psnr-v1/640x368 \
-      --engine-cache-dir /srv/mlvc-engine-cache --device-id 0 2>encode.log \
+      --input - --output - --width 640 --height 360 \
+      --frames 0 --q-index 21 --model-profile mlvc-psnr-v1 \
+      --encode-device-id 0 2>encode.log \
   | "$MLVC_PREFIX/bin/mlvc_demo" decode \
-      --input - --output - --width 640 --height 360 --frames 0 \
-      --model-dir /srv/models/mlvc-psnr-v1/640x368 \
-      --engine-cache-dir /srv/mlvc-engine-cache --device-id 1 2>decode.log \
+      --input - --output - --width 640 --height 360 \
+      --frames 0 --model-profile mlvc-psnr-v1 \
+      --decode-device-id 1 2>decode.log \
   > reconstructed.yuv
 ```
 
-也可以用 POSIX named FIFO；运行库会在每帧写出后 flush，适合实时生产者和
-消费者之间做背压。标准管道适合两个长驻进程的串联，避免中间临时文件；但
-它不是 HTTP 协议，也不携带视频帧率、色彩空间、profile 等业务元数据，应用
-需要在管道外维护这些信息。
+TensorRT 的两个命令需要分别增加相同的 `--model-dir` 和各自可访问的
+`--engine-cache-dir`。
 
-每个 MLVC 帧的容器格式是小端序：
+也可以使用 POSIX named FIFO。运行库会在每个 MLVC 帧写出后 flush，因此管道和
+FIFO 能提供操作系统级背压。不要每帧重启 CLI；每次重启都会重建 backend，并丢失
+连续 DPB 状态。
+
+标准管道适合从会话起点开始、可靠、有序的两个长驻进程。它不是网络协议，也不
+携带 profile、宽高、帧率、时间戳或会话生命周期信息。
+
+## 6. GOP 和参考状态
+
+`mlvc-psnr-v1` 与 `mlvc-s-psnr-v1` 的模型 metadata 都指定：
+
+```text
+iframe_period = 64
+reset_period = null
+ltr_period = null
+```
+
+公共 codec pipeline 按以下方式编排所有推理后端：
+
+```text
+绝对帧号    0    1    2  ...  63    64    65 ...
+GOP 帧号    0    1    2  ...  63     0     1 ...
+帧类型      I    P    P  ...   P     I     P ...
+参考特征   zero  F0   F1 ...  F62   zero  F64 ...
+```
+
+官方称帧 0、64、128 等为 `I_FRAME/IDR`。这里没有切换到另一套图像编码网络；
+公共 pipeline 清空参考状态，同一个模型以全零 `ref_feature` 处理该帧。它是可以
+脱离前一个 GOP 解码的零参考刷新帧。随后 63 个 P 帧递归使用上一帧 feature。
+
+Encoder DPB 保存编码器产生的 feature，Decoder DPB 保存解码器自己重建的 feature。
+两端必须在相同帧执行 reset，但不能把编码器内部 feature 直接作为解码器状态传输。
+
+用户提供的原始 q-index 会根据 GOP 位置生成模型使用的 shifted q-index；熵容器仍
+保存原始 q-index。因此帧计数失步不仅会使用错误参考，也会使用错误的 QP phase。
+
+正常路径将 `feature -> ref_feature` 保留在 GPU：
+
+- Driver+cubin 使用持久设备状态；
+- TensorRT 使用设备 I/O state binding；
+- ONNX Runtime 使用 CUDA I/O binding；
+- libtorch 保留 CUDA tensor。
+
+GOP 判断和 QP 调度属于公共 codec pipeline，后端的 `reset_state()` 只负责执行设备
+状态清零。四个后端遵循相同状态语义，但不保证产生跨后端 bit-exact 的 FP16 feature
+或码流。
+
+## 7. MLVC 帧格式及限制
+
+当前每个 MLVC 帧的原生容器格式为：
 
 ```text
 int32_le q_index | uint32_le payload_size | payload_size bytes rANS payload
 ```
 
-解码端必须从帧边界开始读取，不能把日志写入编码器 stdout。输入 YUV 则是
-连续的裸 I420 帧，没有长度头；双方必须预先约定宽、高和帧数。
+每个 rANS payload 可以独立解析，但 P 帧重建依赖前一帧 Decoder DPB。当前帧头不
+包含以下信息：
 
-### stdin/stdout 是否是理想调用方式？
+- magic、格式版本或 profile；
+- width、height 或像素格式；
+- session ID、frame ID 或时间戳；
+- I/P 类型或 reset 标志；
+- 校验和、丢包信息或结束标记。
 
-对于 Linux 上的两个独立 worker，答案是“适合但不是所有场景的最佳选择”：
+因此原生 `.mlvc` 流只适用于双方预先约定 profile、尺寸和像素格式，并从会话第
+一帧开始按顺序可靠传输的场景。EOF 或业务层结束消息用于结束 `--frames 0` 会话；
+双方不需要预先知道最终帧数。
 
-- 适合：快速集成、进程隔离、自然背压、无需落盘、可直接把编码 GPU 和解码
-  GPU 分开；
-- 不足：每个 CLI 进程只有一条会话，业务元数据需另传，异常恢复和多路会话
-  由上层负责；
-- 不建议：每帧重新启动 CLI 或每帧调用一次 C ABI，这会重复初始化 TensorRT
-  backend，并失去 DPB 的连续状态。
+不能把日志或其他数据写入 encoder stdout。读取端必须先获得完整 8 字节头，再按
+`payload_size` 读取完整 payload。
 
-生产环境通常保持一个编码 worker 和一个解码 worker 长驻，通过管道、FIFO 或
-应用内队列传输连续帧。需要更低延迟时，应在一个长驻 C++ 进程中复用设备、
-TensorRT context、DPB 和 pinned buffer；当前归档的稳定 C ABI 是“路径型、整段
-流调用”，还没有逐帧 `push/pop` session ABI。
+## 8. 摄像头与长时间直播
 
-## 5. C ABI 集成
+### 8.1 当前版本能做什么
 
-### 5.1 直接链接
+摄像头可以通过 FFmpeg 转成连续 I420，再交给一个长驻 encoder：
 
-最小 C/C++ 调用流程如下。`mlvc_encode` 和 `mlvc_decode` 是两个独立入口；
-`options.device_id` 只影响当前方向，因此可以在两个 worker 中分别设置为 0
-和 1。`workspace_mib` 的单位是 MiB，设置为 0 使用库默认的 4096 MiB。
+```bash
+ffmpeg -f v4l2 -framerate 30 -video_size 640x360 -i /dev/video0 \
+  -an -pix_fmt yuv420p -f rawvideo - \
+  | "$MLVC_PREFIX/bin/mlvc_demo" encode \
+      --input - --output camera.mlvc \
+      --width 640 --height 360 --frames 0 --q-index 21 \
+      --model-profile mlvc-psnr-v1 --device-id 0
+```
+
+具体 V4L2 输入格式取决于摄像头；可用 `ffmpeg -f v4l2 -list_formats all
+-i /dev/video0` 检查。对于 TensorRT，替换模型参数并配置 engine cache。
+上述示例把结果录制到普通文件；向直播封装器逐帧发送时，应把输出改为 stdout
+或 FIFO。只有 stdout/FIFO 路径有显式逐帧 flush 语义。
+
+只要输入不断开，这个进程会继续运行，并在每 64 帧自动产生零参考刷新帧。模型
+状态大小固定，不会随帧数增长。
+
+当前 `frames` 和统计帧数使用 32 位有符号整数；它不适合作为真正永久运行服务的
+长期计数。30 fps 下达到上限约需 2.27 年。生产 session 应改用 64 位 frame ID，
+并定期受控轮换进程。
+
+### 8.2 三种“丢帧”不是同一问题
+
+| 情况                           | 后果                                               | 处理                                      |
+| ------------------------------ | -------------------------------------------------- | ----------------------------------------- |
+| 摄像头在编码前丢帧             | 编码器仍引用上一已编码帧，画面时间间隔增大         | 可以继续编码，保留正确时间戳              |
+| 编码器主动跳过尚未编码的输入帧 | 与上一项相同                                       | 由业务层记录 frame ID/PTS，不伪造 MLVC 帧 |
+| 编码后的 MLVC P 帧在传输中丢失 | Decoder DPB 与 Encoder DPB 分叉，后续 P 帧不再可靠 | 丢弃后续 P 帧，等待或请求零参考刷新       |
+
+原生帧头没有 reset 标志，所以接收端无法仅凭 payload 判断下一帧是不是刷新帧。
+也不能在任意 P 帧中途启动新 decoder。
+
+### 8.3 当前版本的可行直播方案
+
+在不修改 codec ABI 的前提下，业务层应为 MLVC payload 增加自己的传输 envelope：
+
+```text
+SessionHeader:
+  protocol_version, session_id, profile, width, height, pixel_format,
+  fps_num, fps_den, gop_period
+
+FrameEnvelope:
+  session_id, uint64 sequence_number, capture_frame_id, pts,
+  flags(KEYFRAME/RESET), mlvc_frame_size,
+  mlvc_frame_bytes, optional_checksum
+```
+
+`sequence_number` 是从 0 开始的 MLVC session 内序号，不能用可能跨 session 连续
+增长的摄像头帧号代替。`mlvc_frame_bytes` 包含完整的原生 8 字节帧头和 rANS
+payload。这层 envelope 不是当前 `.mlvc` 文件格式的一部分。
+
+发送端应在 `sequence_number % gop_period == 0` 的帧上设置 `KEYFRAME|RESET`；
+当前两个 profile 的 `gop_period` 都是 64。接收端只能从该标志帧创建或恢复
+decoder，并把该帧作为 decoder 的本地 frame 0。
+
+当前 CLI/C ABI 没有运行中的 `force_idr()`：
+
+- 新会话启动时，第一个输入帧自然是零参考刷新帧；
+- 需要立即刷新时，停止旧 encoder，创建新 session ID，并用新长驻 encoder 编码
+  下一摄像头帧；
+- 只重启 decoder 而继续发送旧 encoder 的 P 帧是错误的；
+- 丢包后可以等到业务层标记的下一个周期刷新帧，再从该帧启动新 decoder；
+- profile、分辨率或设备切换必须创建新 session。
+
+后续生产接口应提供显式 Encoder/Decoder session、逐帧 `push/pop`、`force_idr()`、
+64 位 frame ID、取消和 flush；在这些接口实现前，本文不把路径型 ABI 描述为完整
+直播 SDK。
+
+### 8.4 推荐进程拓扑
+
+```text
+摄像头 / FFmpeg / GStreamer
+          |
+          | I420 + PTS
+          v
+长驻 MLVC encoder session
+          |
+          | 业务 FrameEnvelope + MLVC payload
+          v
+可靠有序传输 / 录制文件
+          |
+          v
+长驻 MLVC decoder session
+          |
+          | I420
+          v
+FFmpeg 转 H.264/H.265/MP4 或服务端分析
+```
+
+若传输不能保证可靠有序，必须实现丢包检测、等待刷新和 session 重建。简单地把原生
+MLVC 字节连续塞进 WebSocket，并不能自动获得直播恢复能力。
+
+## 9. C ABI 集成
+
+当前 C ABI 是阻塞、路径型的整段流接口。一次 `mlvc_encode()` 或 `mlvc_decode()`
+调用会创建一个 backend，持续处理到指定帧数或 EOF，然后销毁会话。不要每帧调用
+一次，也不要把它误当作逐帧 API。
+
+### 9.1 最小编码示例
 
 ```c
 #include <mlvc/codec.h>
@@ -207,16 +447,24 @@ TensorRT context、DPB 和 pinned buffer；当前归档的稳定 C ABI 是“路
 int main(void) {
     mlvc_codec_options options;
     mlvc_codec_options_init(&options);
+
     options.width = 640;
     options.height = 360;
     options.q_index = 21;
-    options.frames = 0;                 /* 读到 EOF */
-    options.device_id = 0;              /* 编码 GPU */
-    options.input_path = "input.yuv";  /* 也可以是 "-" */
+    options.frames = 0;              /* 一直处理到 EOF */
+    options.device_id = 0;
+    options.input_path = "input.yuv";
     options.output_path = "output.mlvc";
-    options.model_dir = "/srv/models/mlvc-psnr-v1/640x368";
+
+    /* Driver+cubin: NULL 使用内嵌 mlvc-psnr-v1。 */
+    options.model_dir = NULL;
+
+    /* TensorRT 改为包内目录，并设置可写 cache：
+    options.model_dir =
+        "/opt/mlvc/mlvc_cpp-0.1.0-tensorrt-nvidia-linux-x86_64/"
+        "share/mlvc/models/mlvc-psnr-v1/640x368";
     options.engine_cache_dir = "/srv/mlvc-engine-cache";
-    /* workspace_mib == 0 使用库默认 4096 MiB */
+    */
 
     mlvc_codec_stats stats;
     char error[1024];
@@ -224,13 +472,23 @@ int main(void) {
         fprintf(stderr, "MLVC encode failed: %s\n", error);
         return 1;
     }
+
     fprintf(stderr, "encoded %d frames in %.3f s\n",
             stats.frames, stats.elapsed_seconds);
     return 0;
 }
 ```
 
-编译时使用 `c++` 或 CMake 链接共享库，并让运行时找到同一归档的 `lib`：
+Driver+cubin 的 C ABI 可用 `"embedded:mlvc-s-psnr-v1"` 选择小模型。传入结构体的
+字符串指针必须在函数返回前保持有效。失败时函数返回 `-1`，错误写入调用方 buffer；
+C++ 异常不会跨过 C ABI。
+
+`workspace_mib == 0` 使用库默认的 4096 MiB。`input_path` 或 `output_path` 可以是
+`"-"`，也可以是普通文件或 FIFO 路径。
+
+### 9.2 链接
+
+直接使用编译器：
 
 ```bash
 c++ app.cpp -I"$MLVC_PREFIX/include" \
@@ -238,15 +496,7 @@ c++ app.cpp -I"$MLVC_PREFIX/include" \
   -lmlvc_codec -o app
 ```
 
-如果使用动态加载而不是链接，可以对
-`$MLVC_PREFIX/lib/libmlvc_codec.so` 调用 `dlopen(..., RTLD_NOW | RTLD_LOCAL)`，
-再用 `dlsym` 获取 `mlvc_codec_options_init`、`mlvc_encode` 或 `mlvc_decode`。
-无论哪种方式，都不要让 C++ 异常跨过 C ABI；失败时函数返回 `-1`，错误文本
-写入调用方提供的 buffer，并保证在容量大于零时 NUL 结尾。
-
-### 5.2 CMake
-
-归档自带 relocatable CMake package：
+使用归档内的 CMake package：
 
 ```cmake
 cmake_minimum_required(VERSION 3.23)
@@ -257,8 +507,6 @@ add_executable(my_mlvc_app main.cpp)
 target_link_libraries(my_mlvc_app PRIVATE mlvc::mlvc_codec)
 ```
 
-配置时把归档根目录加入 `CMAKE_PREFIX_PATH`：
-
 ```bash
 cmake -S . -B build \
   -DCMAKE_PREFIX_PATH="$MLVC_PREFIX" \
@@ -266,154 +514,81 @@ cmake -S . -B build \
 cmake --build build -j
 ```
 
-导出的 target 会自动添加 `include`，共享库自身使用 `$ORIGIN` 查找归档内
-TensorRT 库。容器或 systemd 部署时仍建议把 `MLVC_PREFIX` 固定为只读版本
-目录，并在启动探针中执行一次 `mlvc_demo --backend-name`。
+动态加载时可以对 `$MLVC_PREFIX/lib/libmlvc_codec.so` 使用
+`dlopen(..., RTLD_NOW | RTLD_LOCAL)`，再通过 `dlsym` 获取 C ABI 符号。不要依赖
+未列入 `codec.h` 的 C++ 符号保持版本兼容。
 
-### 5.3 两块 GPU 的编解码
+### 9.3 多 GPU
 
-当前 ABI 没有把“编码 GPU”和“解码 GPU”放在同一个 options 结构中的复合调用，
-这是有意设计：方向是独立入口。创建两个 worker，各自构造 options 并调用：
-
-```text
-encoder options.device_id = 0;  mlvc_encode(...)
-decoder options.device_id = 1;  mlvc_decode(...)
-```
-
-两个调用可以由两个线程或两个进程并行，但每个方向都应保持自己的连续输入
-流，以便 DPB 顺序与帧号一致。
-
-## 6. 微信小程序演示架构
-
-### 6.1 推荐拓扑
-
-微信小程序侧负责 UI、采集和网络；Linux GPU 服务负责 MLVC。典型链路是：
+编码与解码是两个独立入口，可以分别设置：
 
 ```text
-小程序 wx.chooseVideo / 相机
-        │ HTTPS 上传 MP4/HEVC 或预处理后的 I420
-        ▼
-Linux x86_64 GPU API 服务
-  FFmpeg 解复用/转 YUV420
-  mlvc_demo encode 或 libmlvc_codec.so
-  (可选) mlvc_decode 做回环质量演示
-  FFmpeg 将重建 YUV 编码为 H.264/H.265/MP4
-        ▼
-小程序通过 HTTPS URL 播放或下载
+encoder options.device_id = 0
+decoder options.device_id = 1
 ```
 
-小程序的 `<video>` 组件不能直接播放 MLVC 帧流或裸 YUV。因此演示“重建视频”
-时，服务端需要把 `mlvc_decode` 的 YUV 输出交给 FFmpeg，生成小程序可播放的
-MP4/H.264（或业务允许的 H.265）再返回 URL。若要在客户端直接播放 MLVC，
-需要另行开发 WebAssembly/JavaScript 解码器；本归档不提供该部分，也不应把
-`.so` 转成小程序资源来尝试加载。
+推荐为每条方向和会话使用独立长驻 worker。若使用 stdin/stdout，一个进程只能安全
+拥有对应的标准流；多会话应使用独立进程、FIFO 或应用管理的文件描述符封装。
 
-### 6.2 服务 API 建议
+## 10. 浏览器和小程序演示
 
-不要让客户端传入任意服务器路径。服务端为每个 profile 预配置固定的模型
-目录、分辨率上限、QP 范围、engine cache 和 GPU。一个最小 API 可以是：
+浏览器和微信小程序的 `<video>` 不能直接播放 MLVC 帧流或裸 I420，也不能加载本
+归档的 `.so`。可采用以下服务端链路：
 
 ```text
-POST /v1/encode
-  headers: X-MLVC-Profile: mlvc-psnr-v1
-  body: application/octet-stream (I420 连续帧，或服务端约定的上传视频)
-  query: width=640&height=360&frames=0&q_index=21
-  response: application/octet-stream (mlvc-frame-le-v1)
-
-POST /v1/decode
-  headers: X-MLVC-Profile: mlvc-psnr-v1
-  body: application/octet-stream (MLVC 帧流)
-  query: width=640&height=360&frames=0
-  response: application/octet-stream (I420)，或异步任务 URL
+客户端采集/上传
+      |
+      v
+Linux GPU 服务：解复用或转换为 I420
+      |
+      v
+MLVC encode -> 可选 MLVC decode 回环
+      |
+      v
+FFmpeg 将重建 I420 编码为 H.264/H.265/MP4
+      |
+      v
+客户端播放 URL 或实时媒体流
 ```
 
-实时演示可以使用 WebSocket 二进制消息承载连续 I420/MLVC 数据，但建议在
-应用协议中增加会话 ID、profile、width、height、帧率、结束标记和错误码。
-服务内部仍可把一条会话绑定到一个长驻 CLI worker 的 stdin/stdout；不要为每
-一帧创建进程。
+上传文件的演示可以使用普通 HTTP 任务。摄像头直播应使用有 session 生命周期和
+FrameEnvelope 的双向连接；服务端需要自己实现鉴权、限流、超时、GPU 调度、对象
+存储和媒体封装，这些组件不在 SDK 中。
 
-小程序上传原始视频并等待服务端返回可播放结果时，客户端代码可以保持很薄：
+不要让客户端提交任意服务器模型路径、输出路径或 engine cache 路径。服务端应把
+profile、最大尺寸、QP 范围、GPU 和资源配额配置为白名单。
 
-```js
-wx.chooseVideo({
-  sourceType: ['album', 'camera'],
-  success: (pick) => {
-    wx.uploadFile({
-      url: 'https://api.example.com/v1/reconstruct',
-      filePath: pick.tempFilePath,
-      name: 'file',
-      formData: {
-        profile: 'mlvc-psnr-v1',
-        width: '640',
-        height: '360',
-        q_index: '21'
-      },
-      success: (res) => {
-        const result = JSON.parse(res.data);
-        // result.url 指向服务端生成的 MP4/H.264 文件
-        this.setData({ videoSrc: result.url });
-      }
-    });
-  }
-});
-```
+## 11. 常见问题
 
-`/v1/reconstruct` 是业务服务需要自行实现的包装接口，不是归档中的可执行
-文件。服务端可以选择“编码后立即解码再转 MP4”来展示回环结果，也可以只编码
-并把 MLVC 归档到对象存储。FFmpeg、HTTP/WebSocket 框架、鉴权和对象存储均不
-随本归档提供。
+| 现象                                               | 检查和处理                                                              |
+| -------------------------------------------------- | ----------------------------------------------------------------------- |
+| `libmlvc_codec.so: cannot open shared object file` | 使用归档 CMake target、链接时设置 rpath，或检查应用的动态库搜索路径     |
+| `libcuda.so.1` 或 CUDA 初始化失败                  | 检查 NVIDIA 驱动、容器 GPU runtime、设备权限和 `nvidia-smi`             |
+| TensorRT/`libcudart.so.13` 找不到                  | 不要只复制单个 `.so`；保持归档 `bin/`、`lib/` 的相对布局                |
+| `--model-dir is required for this backend`         | TensorRT 必须指向包内具体 profile/尺寸目录                              |
+| `embedded model asset not found`                   | Driver+cubin 使用 `--list-model-profiles` 检查名称，不要混用外部 bundle |
+| 首次 TensorRT 启动很慢                             | 正常的 engine build；持久化并复用匹配的 cache                           |
+| `YUV420 dimensions` 或 plane 截断                  | 确认偶数宽高、I420 plane 顺序和每帧 `width*height*3/2` bytes            |
+| `rANS EOF`、payload 截断                           | 按 8 字节小端头读取完整 payload；检查传输是否截断或插入日志             |
+| 解码不报错但画面从某帧开始异常                     | 检查 MLVC 帧丢失、乱序、profile 不同或 Encoder/Decoder reset 失步       |
+| 新 decoder 从中间帧无法恢复                        | 只能从业务层标记的零参考刷新帧启动，并重建 decoder session              |
+| 管道停止读取后 encoder 卡住                        | 这是正常背压；检查消费者、超时和取消策略                                |
+| 小程序不能播放结果                                 | 服务端先把解码 I420 转成客户端支持的媒体格式                            |
 
-### 6.3 服务端 CLI 包装示意
+## 12. 集成验收
 
-离线任务可以由服务端先落临时文件，再调用 CLI；实时任务则用管道。下面只
-展示进程边界，不是现成的 HTTP 服务：
+部署到目标机器前至少完成：
 
-```bash
-# 服务端已经把上传内容转换成 I420，并完成权限/尺寸校验
-ffmpeg -i upload.mp4 -f rawvideo -pix_fmt yuv420p - \
-  | "$MLVC_PREFIX/bin/mlvc_demo" encode --input - --output - \
-      --width 640 --height 360 --frames 0 --q-index 21 \
-      --model-dir /srv/models/mlvc-psnr-v1/640x368 \
-      --engine-cache-dir /srv/mlvc-engine-cache --device-id 0 \
-      > result.mlvc
-```
+1. 校验归档 SHA-256 和包内 `SHA256SUMS`。
+2. 确认 `mlvc_demo --backend-name` 与归档一致。
+3. 分别用 `mlvc-psnr-v1` 和计划使用的其他 profile 做 encode/decode 回环。
+4. 覆盖帧 `0、1、63、64、65`，确认第 64 帧两端同时 reset。
+5. 运行至少 100 帧，检查 payload 完整、输出帧数、视觉质量和 GPU 内存是否稳定。
+6. 用管道或 FIFO 验证逐帧输出、背压、EOF 和异常退出。
+7. 对业务 FrameEnvelope 测试 P 帧丢失、乱序、重复、断线重连和中途加入。
+8. 确认接收端只在 `KEYFRAME|RESET` 帧创建新 decoder。
+9. 分别验证目标 GPU、driver、profile、分辨率、QP 和并发数。
+10. 对发布候选执行码流确定性、重建指标、码率和端到端吞吐门禁。
 
-如果要生成可播放的重建视频：
-
-```bash
-"$MLVC_PREFIX/bin/mlvc_demo" decode --input result.mlvc --output - \
-  --width 640 --height 360 --frames 0 \
-  --model-dir /srv/models/mlvc-psnr-v1/640x368 \
-  --engine-cache-dir /srv/mlvc-engine-cache --device-id 1 \
-  | ffmpeg -f rawvideo -pix_fmt yuv420p -s 640x360 -r 30 -i - \
-      -c:v libx264 -movflags +faststart reconstructed.mp4
-```
-
-生产服务应使用独立 worker 进程或长驻进程、请求超时、最大帧数/字节数限制、
-磁盘配额和鉴权。stdout 只放二进制数据，日志统一写 stderr 或服务日志系统。
-
-## 7. 常见错误排查
-
-| 现象                                               | 处理                                                                                              |
-| -------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `libmlvc_codec.so: cannot open shared object file` | 设置 `LD_LIBRARY_PATH="$MLVC_PREFIX/lib"`，或使用上面的 rpath/CMake target。                      |
-| `libcuda.so.1`、CUDA 初始化失败                    | 检查 NVIDIA 驱动、容器的 GPU runtime 和 `nvidia-smi`；驱动不随包提供。                            |
-| `cannot open model metadata` / ONNX 找不到         | `--model-dir` 必须指向包含 `metadata.json`、两个 ONNX 和两个 PMF 的目录。                         |
-| `model bundle manifest does not match metadata`    | 不要混用不同导出的模型文件；重新部署同一个 canonical bundle。                                     |
-| `YUV420 dimensions` 或输出帧数不足                 | 输入必须是偶数宽高的 planar I420；确认 `width * height * 3 / 2` 字节是否完整。                    |
-| 首次启动很慢                                       | 正常的 TensorRT engine build；保留并复用 `--engine-cache-dir`，且为每个 profile 隔离 cache。      |
-| 管道下游无法解码                                   | 检查上游 stdout 是否混入日志；CLI 摘要应在 stderr，且 encode/decode 的宽高、profile、帧顺序一致。 |
-| rANS EOF、payload 截断或失步                       | 不要改写 8 字节帧头；按 `int32_le q_index + uint32_le payload_size` 读取完整 payload。            |
-| 小程序无法播放结果                                 | MLVC/YUV 不是 `<video>` 支持的容器；服务端用 FFmpeg 转为 MP4/H.264/H.265。                        |
-
-## 8. 集成验收清单
-
-部署到其他机器前建议至少完成：
-
-1. 校验归档 SHA-256，确认 `mlvc_demo --backend-name` 输出 `tensorrt`。
-2. 用一段已知 I420 输入完成 2 帧 encode/decode 回环，检查输出帧数和文件大小。
-3. 用 `--frames 100` 做长流测试，确认没有 truncated payload、rANS EOF、帧错位或
-   解码中止，并抽帧转成 PNG/MP4 做视觉检查。
-4. 分别在 `device_id=0` 和 `device_id=1` 启动编码/解码 worker，确认两块 GPU
-   都有负载且 engine cache 没有串 profile。
-5. 在服务层加入输入尺寸、帧数、字节数、QP、超时和并发限制，再开放给小程序。
+模型和码流兼容性证据见 [codec-compatibility.md](codec-compatibility.md)，公共 pipeline
+设计见 [design.md](design.md)，当前性能数据见 [benchmarks.md](benchmarks.md)。

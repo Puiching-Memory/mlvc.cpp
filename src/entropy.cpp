@@ -3,11 +3,12 @@
 #include "mlvc/half.hpp"
 #include "mlvc/scales.hpp"
 
+#include "model_assets.hpp"
+
 #include <msrtc_rans/EntropyCoder.h>
 #include <nlohmann/json.hpp>
 
 #include <cmath>
-#include <fstream>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -32,14 +33,11 @@ struct BitEstimatorPmf : PmfTable {
     int channels = 0;
 };
 
-nlohmann::json load_json(const std::filesystem::path& path)
+nlohmann::json load_json(const std::filesystem::path& model_dir,
+                         const std::filesystem::path& relative_path)
 {
-    std::ifstream input(path);
-    if (!input)
-        throw std::runtime_error("cannot open PMF file: " + path.string());
-    nlohmann::json result;
-    input >> result;
-    return result;
+    return nlohmann::json::parse(
+        detail::read_model_text(model_dir, relative_path));
 }
 
 PmfTable parse_table(const nlohmann::json& value)
@@ -52,7 +50,7 @@ PmfTable parse_table(const nlohmann::json& value)
 
 GaussianPmf load_gaussian(const std::filesystem::path& model_dir)
 {
-    const auto value = load_json(model_dir / "gaussian_pmf.json");
+    const auto value = load_json(model_dir, "gaussian_pmf.json");
     PmfTable table = parse_table(value);
     GaussianPmf result;
     static_cast<PmfTable&>(result) = std::move(table);
@@ -65,7 +63,7 @@ GaussianPmf load_gaussian(const std::filesystem::path& model_dir)
 
 BitEstimatorPmf load_bit_estimator(const std::filesystem::path& model_dir)
 {
-    const auto value = load_json(model_dir / "bit_estimator_pmf.json");
+    const auto value = load_json(model_dir, "bit_estimator_pmf.json");
     PmfTable table = parse_table(value);
     BitEstimatorPmf result;
     static_cast<PmfTable&>(result) = std::move(table);

@@ -42,8 +42,8 @@ provide a driver compatible with the CUDA dependencies recorded in
   - `onnxruntime` — ONNX graphs on ONNX Runtime CUDA EP
   - `libtorch` — TorchScript exports on CUDA libtorch
   - `tensorrt` — ONNX graphs built into TensorRT engines (NVIDIA GPU)
-  - `driver_cubin` — fixed-shape AOT graph using embedded CUDA kernels and the
-    Driver API only
+  - `driver_cubin` — fixed-shape AOT graphs, weights, and CUDA kernels embedded
+    in one shared library using the Driver API only
 - Portable binary: statically links `msrtc_rans`, dynamically loads backend
   SDKs with `$ORIGIN` rpath
 - Portable shared library: `libmlvc_codec.so` with separate `mlvc_encode` and
@@ -67,7 +67,10 @@ provide a driver compatible with the CUDA dependencies recorded in
 
 MLVC exported model artifacts (`MLVCEncoder.onnx`, `MLVCDecoder.onnx`,
 `gaussian_pmf.json`, `bit_estimator_pmf.json`, `metadata.json`) are produced by
-the official converter and supplied at runtime via `--model-dir`. The
+the official converter and supplied at runtime via `--model-dir`. TensorRT
+release packaging installs both registered profiles under `share/mlvc/models`.
+Driver+cubin validates the same canonical bundles at build time, then embeds
+their metadata, PMFs, AOT schedules, and weights in `libmlvc_codec.so`. The
 `libtorch` backend additionally needs TorchScript exports
 (`MLVCEncoder.ts` / `MLVCDecoder.ts`) in the same directory.
 
@@ -134,6 +137,15 @@ runtime tensor dimensions always come from the verified `metadata.json`.
 ./scripts/package_driver_cubin.sh
 ```
 
+Both commands use canonical bundles below `model-assets/models` by default;
+pass `--model-root DIR` to use another validated source tree. TensorRT selects
+a bundled profile with, for example,
+`--model-dir "$MLVC_PREFIX/share/mlvc/models/mlvc-psnr-v1/640x368"`. Driver+cubin
+uses its embedded `mlvc-psnr-v1` profile by default; pass
+`--model-profile mlvc-s-psnr-v1` to select the embedded small model. The
+TensorRT archive also carries `libcudart.so.13` and its CUDA EULA, while the
+Driver+cubin archive remains dependent only on the system NVIDIA driver.
+
 For source-only development setup, run `./scripts/bootstrap.sh`. This executes
 `git submodule update --init --recursive --depth 1`; `.gitmodules` also marks
 both source dependencies as shallow. ONNX Runtime and libtorch are downloaded
@@ -143,7 +155,9 @@ GPU bootstrap installs missing Ubuntu build tools before acquiring the SDKs.
 
 `package.sh` refuses CPU-only ONNX Runtime/libtorch SDKs. It uses clean staging
 directories, enables Release IPO, writes file checksums, and audits both the
-executable and the backend's GPU library for unresolved dependencies.
+executable and the backend's GPU library for unresolved dependencies. It also
+checks that the staged codec resolves `libcudart.so.13` from the archive rather
+than from the build host's CUDA toolkit.
 
 The runtime accepts FP16 floating-point tensors only; int32 remains available
 for model control inputs. ONNX Runtime enables full graph optimization,
@@ -179,6 +193,10 @@ subdirectory so MLVC and MLVC-S can safely share one cache root. Every backend
 accepts `--debug-dir` to emit named model inputs and outputs for compatibility
 diagnosis. `--device-id` selects the CUDA ordinal for either command;
 `--encode-device-id` and `--decode-device-id` are direction-specific aliases.
+The Driver+cubin build does not require `--model-dir`: it defaults to its
+embedded `mlvc-psnr-v1` profile and accepts `--model-profile` for another
+embedded profile.
+
 To use one GPU for encoding and another for decoding, run the two independent
 entry points concurrently:
 
@@ -311,22 +329,25 @@ rejects results produced from different tensors or timing implementations.
 The four-backend NVIDIA A30 baseline and its limitations are recorded in
 [`docs/benchmarks/2026-09-02-a30-fp16.md`](docs/benchmarks/2026-09-02-a30-fp16.md).
 
-This first benchmark intentionally measures the current public host tensor API,
-including H2D/D2H copies and synchronization. A later device-resident benchmark
-will isolate inference after I/O binding and CUDA pipeline work lands.
+This model-level benchmark intentionally keeps all graph inputs and outputs
+host-visible so backend results remain directly comparable. The codec path uses
+device-resident `feature -> ref_feature` state and therefore omits that recurrent
+tensor's per-frame D2H/H2D transfers.
 
-## Driver-only embedded cubin path
+## Driver-only monolithic AOT path
 
 An experimental AOT path mirrors the deployment architecture observed in the
-local NGX DLSS binary: model kernels are compiled into a multi-architecture
-fatbin, embedded in the executable, and dispatched through the official CUDA
-Driver API. The executable requires `libcuda.so.1` from the NVIDIA driver, but
-does not link CUDA Runtime, cuDNN, cuBLAS, TensorRT, ONNX Runtime, or libtorch.
+local NGX DLSS binary. Model metadata, entropy tables, graph schedules, FP16
+weights, and a multi-architecture kernel fatbin are linked into read-only
+sections of `libmlvc_codec.so` and dispatched through the official CUDA Driver
+API. The library requires `libcuda.so.1` from the NVIDIA driver, but does not
+link CUDA Runtime, cuDNN, cuBLAS, TensorRT, ONNX Runtime, or libtorch.
 
-CUDA Toolkit is a build-host input only. The offline compiler converts each
-fixed-shape ONNX graph into a static weights blob, operator schedule, tensor
-lifetime arena, and integrity metadata. Rebuild the kernel fatbin, assemble the
-model package as shown above, then build the isolated backend:
+CUDA Toolkit and canonical model bundles are build-host inputs only. The
+offline compiler converts each fixed-shape ONNX graph into a static weights
+blob, operator schedule, tensor lifetime arena, and integrity metadata. CMake
+validates and embeds both registered profiles when building the isolated
+backend:
 
 ```bash
 ./scripts/build_driver_fatbin.sh
@@ -335,12 +356,13 @@ cmake -S . -B build-driver-cubin \
 cmake --build build-driver-cubin -j
 ./build-driver-cubin/mlvc_driver_probe --iterations 1000
 ./build-driver-cubin/mlvc_demo encode --input in.yuv --output out.mlvc \
-    --width 640 --height 360 --frames 2 --q-index 21 \
-    --model-dir models/mlvc-psnr-v1/640x368
+    --width 640 --height 360 --frames 2 --q-index 21
+./build-driver-cubin/mlvc_demo --list-model-profiles
 ```
 
 The prebuilt fatbin contains `sm_75`, `sm_80`, `sm_86`, and `sm_89` cubins plus
-a `compute_89` PTX fallback. Package and audit this path independently with:
+a `compute_89` PTX fallback. Package and audit the monolithic library
+independently with:
 
 ```bash
 ./scripts/package_driver_cubin.sh
@@ -350,13 +372,17 @@ The embedded module implements every operator used by both complete
 MLVCEncoder/MLVCDecoder graphs: grouped/depthwise convolution, pointwise
 convolution, residual arithmetic, concat/slice/gather, activations, reciprocal,
 rounding, and space/depth transforms. The runtime loads weights once, allocates
-a statically planned arena, and dispatches the full graph with Driver API
-streams. `mlvc_driver_probe` remains as a small fatbin/launch diagnostic.
+them directly from the library's read-only model image, allocates a statically
+planned arena, and dispatches the full graph with Driver API streams.
+`mlvc_driver_probe` remains as a small fatbin/launch diagnostic.
 
 Pointwise convolution uses four-warp WMMA tiles, dense spatial convolution uses
 WMMA implicit GEMM, and depthwise convolution has a barrier-free specialized
-kernel. FP32 accumulation preserves reference parity. Architecture-specific
-autotuning, fusion, and CUDA Graph capture remain performance improvements.
+kernel. FP32 accumulation preserves reference parity. The recurrent feature is
+kept in its device input allocation and the fixed-shape steady-state schedule is
+replayed with CUDA Graphs. Further optimization focuses on general transfer and
+pipeline scheduling instead of per-model code generation or device-specific
+autotuning tables.
 See [`docs/research/nvngx-dlss-cubin-architecture.md`](docs/research/nvngx-dlss-cubin-architecture.md).
 
 ## Repository layout

@@ -141,6 +141,68 @@ int main(int argc, char** argv)
                 "FP16 bit mismatch at element " + std::to_string(index));
         }
 
+        constexpr int space_channels = 3;
+        constexpr int space_height = 4;
+        constexpr int space_width = 6;
+        constexpr int space_block = 2;
+        constexpr int space_count =
+            space_channels * space_height * space_width;
+        constexpr int space_output_channels =
+            space_channels * space_block * space_block;
+        constexpr int space_output_height = space_height / space_block;
+        constexpr int space_output_width = space_width / space_block;
+        std::vector<std::uint16_t> space_input(space_count);
+        std::vector<std::uint16_t> space_output(space_count);
+        std::vector<std::uint16_t> space_expected(space_count);
+        for (int index = 0; index < space_count; ++index)
+            space_input[index] = static_cast<std::uint16_t>(index + 1);
+        for (int channel = 0; channel < space_output_channels; ++channel) {
+            const int input_channel = channel % space_channels;
+            const int offset = channel / space_channels;
+            for (int y = 0; y < space_output_height; ++y) {
+                for (int x = 0; x < space_output_width; ++x) {
+                    const int input_y = y * space_block + offset / space_block;
+                    const int input_x = x * space_block + offset % space_block;
+                    const int input_index =
+                        (input_channel * space_height + input_y) * space_width +
+                        input_x;
+                    const int output_index =
+                        (channel * space_output_height + y) * space_output_width +
+                        x;
+                    space_expected[output_index] = space_input[input_index];
+                }
+            }
+        }
+
+        driver.upload(input_device, space_input.data(),
+                      space_input.size() * sizeof(std::uint16_t));
+        int space_count_parameter = space_count;
+        int space_channels_parameter = space_channels;
+        int space_height_parameter = space_height;
+        int space_width_parameter = space_width;
+        int space_block_parameter = space_block;
+        void* space_parameters[] = {
+            const_cast<mlvc::driver::abi::DeviceAddress*>(&input_address),
+            const_cast<mlvc::driver::abi::DeviceAddress*>(&output_address),
+            &space_count_parameter, &space_channels_parameter,
+            &space_height_parameter, &space_width_parameter,
+            &space_block_parameter,
+        };
+        driver.launch(module.function("mlvc_space_to_depth_fp16"),
+                      {(space_count + block_size - 1) / block_size, 1, 1},
+                      block, 0, space_parameters);
+        driver.download(space_output.data(), output_device.address(),
+                        space_output.size() * sizeof(std::uint16_t));
+        const auto space_mismatch = std::mismatch(
+            space_expected.begin(), space_expected.end(), space_output.begin());
+        if (space_mismatch.first != space_expected.end()) {
+            const std::size_t index = static_cast<std::size_t>(
+                space_mismatch.first - space_expected.begin());
+            throw std::runtime_error(
+                "SpaceToDepth mapping mismatch at element " +
+                std::to_string(index));
+        }
+
         const double elapsed_us =
             std::chrono::duration<double, std::micro>(stop - start).count();
         const double mean_us = elapsed_us / static_cast<double>(options.iterations);
@@ -152,6 +214,8 @@ int main(int argc, char** argv)
         std::printf("driver API version: %d\n", info.driver_version);
         std::printf("embedded fatbin: %zu bytes\n", mlvc_driver_kernels_fatbin_size);
         std::printf("FP16 payload: %zu bytes, bit mismatches: 0\n", bytes);
+        std::printf("SpaceToDepth DCR mapping: %d elements, bit mismatches: 0\n",
+                    space_count);
         std::printf("kernel launches: %zu, mean launch+execution: %.3f us\n",
                     options.iterations, mean_us);
         return 0;

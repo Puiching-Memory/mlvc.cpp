@@ -1,4 +1,5 @@
 #include "mlvc/backend.hpp"
+#include "mlvc/model.hpp"
 #include "mlvc/pipeline.hpp"
 
 #include <cstdio>
@@ -15,15 +16,18 @@ void print_usage(const char* argv0)
     std::fprintf(stderr,
         "usage:\n"
         "  %s --backend-name\n"
+        "  %s --list-model-profiles\n"
         "  %s encode --input IN.yuv|- --output OUT.mlvc|- --width W --height H\n"
-        "       --model-dir DIR [--frames N] [--q-index N] [--device-id N]\n"
+        "       [--model-dir DIR | --model-profile NAME] [--frames N]\n"
+        "       [--q-index N] [--device-id N]\n"
         "       [--encode-device-id N]\n"
         "  %s decode --input IN.mlvc|- --output OUT.yuv|- --width W --height H\n"
-        "       --model-dir DIR [--frames N] [--device-id N]\n"
+        "       [--model-dir DIR | --model-profile NAME] [--frames N]\n"
+        "       [--device-id N]\n"
         "       [--decode-device-id N]\n"
         "  common: [--engine-cache-dir DIR] [--workspace-mib N] [--debug-dir DIR]\n"
         "  stream: use '-' for stdin/stdout; named FIFO paths are also supported\n",
-        argv0, argv0, argv0);
+        argv0, argv0, argv0, argv0);
 }
 
 int parse_integer(const char* text, const char* option, bool allow_zero)
@@ -62,6 +66,11 @@ int main(int argc, char** argv)
                         mlvc::compiled_backend_name().data());
             return 0;
         }
+        if (argc == 2 && std::strcmp(argv[1], "--list-model-profiles") == 0) {
+            for (const std::string& profile : mlvc::embedded_model_profiles())
+                std::printf("%s\n", profile.c_str());
+            return 0;
+        }
         if (argc < 2 || std::strcmp(argv[1], "--help") == 0) {
             print_usage(argv[0]);
             return argc < 2 ? 2 : 0;
@@ -71,6 +80,7 @@ int main(int argc, char** argv)
             throw std::runtime_error("command must be encode or decode");
 
         mlvc::CodecOptions options;
+        std::string model_profile;
         for (int i = 2; i < argc; ++i) {
             auto value = [&]() -> const char* {
                 if (i + 1 >= argc)
@@ -89,6 +99,8 @@ int main(int argc, char** argv)
                 options.device_id = parse_integer(value(), "--decode-device-id", true);
             } else if (std::strcmp(argv[i], "--model-dir") == 0) {
                 options.model_dir = value();
+            } else if (std::strcmp(argv[i], "--model-profile") == 0) {
+                model_profile = value();
             } else if (std::strcmp(argv[i], "--engine-cache-dir") == 0) {
                 options.engine_cache_dir = value();
             } else if (std::strcmp(argv[i], "--debug-dir") == 0) {
@@ -113,6 +125,15 @@ int main(int argc, char** argv)
             } else {
                 throw std::runtime_error("unknown argument: " + std::string(argv[i]));
             }
+        }
+        if (!model_profile.empty()) {
+            if (mlvc::compiled_backend_name() != "driver-cubin")
+                throw std::runtime_error(
+                    "--model-profile is only valid for driver-cubin");
+            if (!options.model_dir.empty())
+                throw std::runtime_error(
+                    "--model-dir and --model-profile are mutually exclusive");
+            options.model_dir = "embedded:" + model_profile;
         }
 
         const mlvc::CodecStats stats = command == "encode"

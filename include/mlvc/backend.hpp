@@ -73,17 +73,35 @@ struct BackendOptions {
     std::string engine_cache_dir;
 };
 
+// Feeds one model output directly into an input of the next invocation. The
+// bound input and output are removed from run()'s host-visible tensor lists;
+// reset_state() initializes the device-resident value to zero.
+struct StateTensorBinding {
+    std::size_t input_index = 0;
+    std::size_t output_index = 0;
+    TensorDataType data_type = TensorDataType::kFloat16;
+    std::vector<int64_t> shape;
+};
+
+struct ModelExecutionConfig {
+    std::vector<StateTensorBinding> state_bindings;
+};
+
 class InferenceBackend {
 public:
     virtual ~InferenceBackend() = default;
 
     virtual std::string_view name() const noexcept = 0;
 
-    // Loads one split-model graph by name, e.g. "MLVCEncoder" or "MLVCDecoder".
-    virtual void load(const std::string& model_name) = 0;
+    // Loads one split-model graph and fixes its host/device tensor routing.
+    virtual void load(const std::string& model_name,
+                      const ModelExecutionConfig& config) = 0;
 
-    // Runs the loaded model; inputs/outputs keep the graph's declared order.
+    // Runs the loaded model. Inputs and outputs keep graph order after bound
+    // state tensors have been removed.
     virtual std::vector<Tensor> run(const std::vector<Tensor>& inputs) = 0;
+
+    virtual void reset_state() = 0;
 };
 
 // Exactly one implementation of these symbols is linked into each release.

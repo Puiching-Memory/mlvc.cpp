@@ -167,11 +167,22 @@ Four separate GPU backends implement `mlvc::InferenceBackend`
 | `onnxruntime`  | `MLVC{Encoder,Decoder}.onnx` | CUDA 13 EP      | ONNX Runtime 1.26.0                                                               |
 | `libtorch`     | `MLVC{Encoder,Decoder}.ts`   | CUDA 13         | libtorch 2.13.0 cu130; needs separate TorchScript exports                         |
 | `tensorrt`     | `MLVC{Encoder,Decoder}.onnx` | CUDA 13         | TensorRT 11.2; hardware-specific engines are cached per GPU                       |
-| `driver_cubin` | `aot/MLVC{Encoder,Decoder}`  | CUDA Driver API | Embedded operator fatbin, static weights and tensor arena; no inference framework |
+| `driver_cubin` | embedded AOT model image     | CUDA Driver API | Embedded fatbin and AOT data; no inference framework                              |
 
-Host-side tensors preserve fp16 or int32 storage across the backend boundary.
-Floating-point model tensors are always fp16; int32 is retained for inputs such
-as `q_index_shifted`. FP32 and TF32 execution are intentionally unsupported.
+`ModelExecutionConfig::state_bindings` declares output-to-input state loops when
+the model is loaded. Bound state tensors are omitted from `run()`'s host input
+and output lists and are zeroed through `reset_state()` at GOP boundaries. The
+codec binds encoder and decoder `feature -> ref_feature` loops by default:
+
+- Driver+cubin aliases the final feature output to its persistent input buffer.
+- TensorRT ping-pongs the two I/O device buffers without a D2D copy.
+- ONNX Runtime uses CUDA I/O binding and feeds the device output value back.
+- libtorch retains the CUDA output tensor for the next invocation.
+
+Only tensors consumed or produced by CPU stages cross the backend boundary.
+Those tensors preserve fp16 or int32 storage; FP32 and TF32 execution remain
+unsupported. `--debug-dir` deliberately disables state binding so every model
+input and output, including `ref_feature` and `feature`, can be dumped.
 
 ## 8. Implementation status
 
@@ -190,26 +201,24 @@ as `q_index_shifted`. FP32 and TF32 execution are intentionally unsupported.
 - [x] Codec parity tests: official I/P-frame bitstream decode, backend roundtrip,
       reconstruction, QP schedule, and DPB tensors for both profiles
 - [x] Formal `mlvc_codec_compatibility` build target
-- [ ] Device-resident backend benchmark after CUDA tensor API implementation
+- [x] Device-resident recurrent feature state with GOP reset coverage
 
-The unchecked item is a performance optimization. It is not required for the
-host-tensor codec compatibility contract.
-
-## 9. Maximum-performance path
+## 9. General performance path
 
 Removing the CUDA runtime is a deployment choice, not automatically a speed
-optimization. The highest-value optimization for the framework backends is a
-device-resident pipeline:
+optimization. Optimizations are kept model- and GPU-independent wherever
+possible:
 
-1. Keep reconstructed features/DPB tensors on the GPU between frames.
-2. Run YUV conversion, padding, scale extraction, and suitable quantization
+1. Keep reconstructed features/DPB tensors on the GPU between frames (done).
+2. Use persistent pinned staging for unavoidable host/device transfers (done
+   for Driver+cubin and TensorRT).
+3. Run YUV conversion, padding, scale extraction, and suitable quantization
    kernels on the same stream; transfer only data consumed by CPU rANS.
-3. Use ONNX Runtime I/O binding, native CUDA libtorch tensors, and direct
-   TensorRT device addresses instead of round-tripping every tensor through
-   host memory.
-4. Capture fixed-shape frame execution with CUDA Graphs after warm-up and use
-   per-device engine/timing caches.
-5. Keep FP16 as the only floating-point model precision and validate every
+4. Overlap CPU entropy/YUV work with GPU inference using bounded frame queues
+   and double-buffered host boundaries.
+5. Capture fixed-shape execution where the backend supports it; Driver+cubin
+   already replays a CUDA Graph after warm-up.
+6. Keep FP16 as the only floating-point model precision and validate every
    optimized path against captured Python outputs and codec-level metrics.
 
 ## 10. Driver-only AOT cubin direction
@@ -227,17 +236,22 @@ Reciprocal/Round, DepthToSpace, and SpaceToDepth.
 
 `scripts/build_aot_model.py` performs static ONNX shape inference, rejects any
 operator or dtype without a runtime kernel, serializes aligned weights, and
-plans reusable intermediate lifetimes in one arena. The C++ backend uploads
-weights once and dispatches every node through `cuLaunchKernel`. Both complete
-Encoder/Decoder graphs for MLVC and MLVC-S pass the same official-Python codec
-target as the framework backends. The deployed ELFs link `libcuda.so.1` but no
-`libcudart`, cuDNN, cuBLAS, TensorRT, ONNX Runtime, or libtorch.
+plans reusable intermediate lifetimes in one arena. At build time,
+`scripts/build_embedded_models.py` validates both canonical profiles and links
+their metadata, PMFs, graphs, and weights into a read-only ELF segment. The C++
+backend uploads weights once and dispatches every node through `cuLaunchKernel`.
+Both complete Encoder/Decoder graphs for MLVC and MLVC-S pass the same
+official-Python codec target as the framework backends. The deployed ELFs link
+`libcuda.so.1` but no `libcudart`, cuDNN, cuBLAS, TensorRT, ONNX Runtime, or
+libtorch.
 
 Dense pointwise convolution uses four-warp WMMA tiles with FP32 accumulation;
 dense spatial convolution uses WMMA implicit GEMM; depthwise convolution has a
 barrier-free direct kernel. Other shapes retain the readable generic fallback.
-Remaining AOT work includes architecture-specific tile autotuning, fused
-kernels, device-resident entropy-boundary tensors, and CUDA Graph capture.
+The recurrent feature stays device-resident across frames and the steady-state
+schedule is replayed as a CUDA Graph. Further work is limited to general data
+movement and pipeline scheduling improvements rather than per-model layer code
+generation or architecture-specific autotuning tables.
 
 The normative compatibility rules and current reference-fixture procedure are
 in [`codec-compatibility.md`](codec-compatibility.md).

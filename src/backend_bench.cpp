@@ -544,7 +544,7 @@ int main(int argc, char** argv)
         const auto create_end = Clock::now();
 
         const auto load_start = Clock::now();
-        backend->load(benchmark_case.model_name);
+        backend->load(benchmark_case.model_name, {});
         const auto load_end = Clock::now();
 
         std::vector<mlvc::Tensor> outputs;

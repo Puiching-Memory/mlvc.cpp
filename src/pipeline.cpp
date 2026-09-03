@@ -5,6 +5,8 @@
 #include "mlvc/model.hpp"
 #include "mlvc/yuv.hpp"
 
+#include "model_assets.hpp"
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -20,10 +22,21 @@
 namespace mlvc {
 namespace {
 
-BackendOptions make_backend_options(const CodecOptions& options)
+std::filesystem::path resolve_model_location(const CodecOptions& options)
+{
+    if (!options.model_dir.empty())
+        return options.model_dir;
+    const std::filesystem::path embedded = detail::default_model_location();
+    if (!embedded.empty())
+        return embedded;
+    throw std::runtime_error("--model-dir is required for this backend");
+}
+
+BackendOptions make_backend_options(const CodecOptions& options,
+                                    const std::filesystem::path& model_dir)
 {
     BackendOptions result;
-    result.model_dir = options.model_dir;
+    result.model_dir = model_dir.string();
     result.device_id = options.device_id;
     result.workspace_size = options.workspace_size;
     result.engine_cache_dir = options.engine_cache_dir;
@@ -33,9 +46,8 @@ BackendOptions make_backend_options(const CodecOptions& options)
 void validate_options(const CodecOptions& options, const ModelConfig& config,
                       bool encoding)
 {
-    if (options.input_path.empty() || options.output_path.empty() ||
-        options.model_dir.empty())
-        throw std::runtime_error("--input, --output and --model-dir are required");
+    if (options.input_path.empty() || options.output_path.empty())
+        throw std::runtime_error("--input and --output are required");
     if (options.width <= 0 || options.height <= 0 ||
         options.width % 2 != 0 || options.height % 2 != 0)
         throw std::runtime_error("--width and --height must be positive even integers");
@@ -59,7 +71,25 @@ Tensor make_reference(const ModelConfig& config,
 {
     return Tensor{"ref_feature",
         {1, config.feature_channels,
-         config.feature_height(), config.feature_width()}, values};
+         config.feature_height(), config.feature_width()},
+        values};
+}
+
+ModelExecutionConfig make_execution_config(const ModelConfig& config,
+                                            bool encoding,
+                                            bool debug_tensors)
+{
+    ModelExecutionConfig result;
+    if (!debug_tensors) {
+        result.state_bindings.push_back({
+            encoding ? 1U : 3U,
+            encoding ? 0U : 1U,
+            TensorDataType::kFloat16,
+            {1, config.feature_channels,
+             config.feature_height(), config.feature_width()},
+        });
+    }
+    return result;
 }
 
 Tensor make_q_index(int q_index)
@@ -156,11 +186,16 @@ void write_debug_tensors(const CodecOptions& options, const char* stage,
 
 CodecStats encode_video(const CodecOptions& options)
 {
-    const ModelConfig config = load_model_config(options.model_dir);
+    const std::filesystem::path model_dir = resolve_model_location(options);
+    const ModelConfig config = load_model_config(model_dir);
     validate_options(options, config, true);
-    EntropyCodec entropy(options.model_dir, config);
-    std::unique_ptr<InferenceBackend> backend = create_backend(make_backend_options(options));
-    backend->load("MLVCEncoder");
+    EntropyCodec entropy(model_dir, config);
+    std::unique_ptr<InferenceBackend> backend = create_backend(
+        make_backend_options(options, model_dir));
+    const ModelExecutionConfig execution = make_execution_config(
+        config, true, !options.debug_dir.empty());
+    backend->load("MLVCEncoder", execution);
+    const bool device_state = !execution.state_bindings.empty();
 
     std::ifstream input_file;
     std::istream* input = &std::cin;
@@ -183,13 +218,19 @@ CodecStats encode_video(const CodecOptions& options)
 
     const auto started = std::chrono::steady_clock::now();
     CodecStats stats;
-    std::vector<Float16Storage> reference = zero_reference(config);
+    std::vector<Float16Storage> reference =
+        device_state ? std::vector<Float16Storage>{} : zero_reference(config);
     Yuv420Frame frame;
     while ((options.frames == 0 || stats.frames < options.frames) &&
            read_yuv420_frame(*input, options.width, options.height, frame)) {
         const int gop_frame = config.frame_in_gop(stats.frames);
-        if (gop_frame == 0)
-            std::fill(reference.begin(), reference.end(), 0);
+        const bool reset_reference = gop_frame == 0;
+        if (reset_reference) {
+            if (device_state)
+                backend->reset_state();
+            else
+                std::fill(reference.begin(), reference.end(), 0);
+        }
         const int shifted_q = options.q_index + config.q_index_shift(gop_frame);
         if (shifted_q < 0 || shifted_q >= config.total_qp_num)
             throw std::runtime_error("shifted q-index is outside the model range");
@@ -198,39 +239,48 @@ CodecStats encode_video(const CodecOptions& options)
         Tensor x = prepare_model_input(frame, config.model_width,
                                        config.model_height, config.pixel_range,
                                        padding);
-        std::vector<Tensor> inputs{
-            std::move(x), make_reference(config, reference), make_q_index(shifted_q)};
+        std::vector<Tensor> inputs;
+        inputs.push_back(std::move(x));
+        if (!device_state)
+            inputs.push_back(make_reference(config, reference));
+        inputs.push_back(make_q_index(shifted_q));
         write_debug_tensors(options, "encoder", stats.frames, "input", inputs);
         std::vector<Tensor> outputs = backend->run(inputs);
-        if (outputs.size() != 4)
+        if (outputs.size() != (device_state ? 3U : 4U))
             throw std::runtime_error("MLVCEncoder returned an unexpected output count");
-        outputs[0].name = "feature";
-        outputs[1].name = "z_raw";
-        outputs[2].name = "y_raw_0";
-        outputs[3].name = "y_raw_1";
-        validate_fp16_tensor(outputs[0],
-            {1, config.feature_channels, config.feature_height(), config.feature_width()},
-            "feature");
-        validate_fp16_tensor(outputs[1],
+        const std::size_t latent_offset = device_state ? 0U : 1U;
+        if (!device_state) {
+            outputs[0].name = "feature";
+            validate_fp16_tensor(outputs[0],
+                {1, config.feature_channels, config.feature_height(),
+                 config.feature_width()},
+                "feature");
+        }
+        outputs[latent_offset].name = "z_raw";
+        outputs[latent_offset + 1].name = "y_raw_0";
+        outputs[latent_offset + 2].name = "y_raw_1";
+        validate_fp16_tensor(outputs[latent_offset],
             {1, config.hyperprior_channels, config.hyperprior_height(), config.hyperprior_width()},
             "z_raw");
         const std::vector<int64_t> y_shape{
             1, config.latent_channels / 2,
             config.latent_height(), config.latent_width()};
-        validate_fp16_tensor(outputs[2], y_shape, "y_raw_0");
-        validate_fp16_tensor(outputs[3], y_shape, "y_raw_1");
+        validate_fp16_tensor(outputs[latent_offset + 1], y_shape, "y_raw_0");
+        validate_fp16_tensor(outputs[latent_offset + 2], y_shape, "y_raw_1");
         write_debug_tensors(options, "encoder", stats.frames, "output", outputs);
 
         EncodedFrame encoded;
         encoded.q_index = options.q_index;
-        encoded.payload = entropy.encode(outputs[3], outputs[2], outputs[1],
-                                         options.q_index);
+        encoded.payload = entropy.encode(
+            outputs[latent_offset + 2], outputs[latent_offset + 1],
+            outputs[latent_offset], options.q_index);
         write_encoded_frame(*output, encoded);
         if (stream_output)
             output->flush();
         if (!*output)
             throw std::runtime_error("failed to flush output bitstream");
-        reference = copy_fp16(outputs[0]);
+        if (!device_state)
+            reference = copy_fp16(outputs[0]);
         ++stats.frames;
         stats.input_bytes += yuv420_frame_bytes(options.width, options.height);
         stats.output_bytes += encoded.payload.size() + 8;
@@ -247,11 +297,16 @@ CodecStats encode_video(const CodecOptions& options)
 
 CodecStats decode_video(const CodecOptions& options)
 {
-    const ModelConfig config = load_model_config(options.model_dir);
+    const std::filesystem::path model_dir = resolve_model_location(options);
+    const ModelConfig config = load_model_config(model_dir);
     validate_options(options, config, false);
-    EntropyCodec entropy(options.model_dir, config);
-    std::unique_ptr<InferenceBackend> backend = create_backend(make_backend_options(options));
-    backend->load("MLVCDecoder");
+    EntropyCodec entropy(model_dir, config);
+    std::unique_ptr<InferenceBackend> backend = create_backend(
+        make_backend_options(options, model_dir));
+    const ModelExecutionConfig execution = make_execution_config(
+        config, false, !options.debug_dir.empty());
+    backend->load("MLVCDecoder", execution);
+    const bool device_state = !execution.state_bindings.empty();
 
     std::ifstream input_file;
     std::istream* input = &std::cin;
@@ -274,7 +329,8 @@ CodecStats decode_video(const CodecOptions& options)
 
     const auto started = std::chrono::steady_clock::now();
     CodecStats stats;
-    std::vector<Float16Storage> reference = zero_reference(config);
+    std::vector<Float16Storage> reference =
+        device_state ? std::vector<Float16Storage>{} : zero_reference(config);
     EncodedFrame encoded;
     const FramePadding padding = frame_padding(
         options.width, options.height, config.model_width, config.model_height);
@@ -283,8 +339,13 @@ CodecStats decode_video(const CodecOptions& options)
         if (encoded.q_index < 0 || encoded.q_index >= config.qp_num)
             throw std::runtime_error("bitstream q-index is outside the model range");
         const int gop_frame = config.frame_in_gop(stats.frames);
-        if (gop_frame == 0)
-            std::fill(reference.begin(), reference.end(), 0);
+        const bool reset_reference = gop_frame == 0;
+        if (reset_reference) {
+            if (device_state)
+                backend->reset_state();
+            else
+                std::fill(reference.begin(), reference.end(), 0);
+        }
         const int shifted_q = encoded.q_index + config.q_index_shift(gop_frame);
         if (shifted_q < 0 || shifted_q >= config.total_qp_num)
             throw std::runtime_error("shifted q-index is outside the model range");
@@ -293,19 +354,24 @@ CodecStats decode_video(const CodecOptions& options)
             entropy.decode(encoded.payload, encoded.q_index);
         std::vector<Tensor> inputs{
             std::move(latents.z_raw), std::move(latents.y_raw_0),
-            std::move(latents.y_raw_1), make_reference(config, reference),
-            make_q_index(shifted_q)};
+            std::move(latents.y_raw_1)};
+        if (!device_state)
+            inputs.push_back(make_reference(config, reference));
+        inputs.push_back(make_q_index(shifted_q));
         write_debug_tensors(options, "decoder", stats.frames, "input", inputs);
         std::vector<Tensor> outputs = backend->run(inputs);
-        if (outputs.size() != 2)
+        if (outputs.size() != (device_state ? 1U : 2U))
             throw std::runtime_error("MLVCDecoder returned an unexpected output count");
         outputs[0].name = "x_hat";
-        outputs[1].name = "feature";
         validate_fp16_tensor(outputs[0],
             {1, 3, config.model_height, config.model_width}, "x_hat");
-        validate_fp16_tensor(outputs[1],
-            {1, config.feature_channels, config.feature_height(), config.feature_width()},
-            "feature");
+        if (!device_state) {
+            outputs[1].name = "feature";
+            validate_fp16_tensor(outputs[1],
+                {1, config.feature_channels, config.feature_height(),
+                 config.feature_width()},
+                "feature");
+        }
         write_debug_tensors(options, "decoder", stats.frames, "output", outputs);
         write_yuv420_frame(*output, prepare_model_output(
             outputs[0], options.width, options.height, config.pixel_range, padding));
@@ -313,7 +379,8 @@ CodecStats decode_video(const CodecOptions& options)
             output->flush();
         if (!*output)
             throw std::runtime_error("failed to flush output YUV");
-        reference = copy_fp16(outputs[1]);
+        if (!device_state)
+            reference = copy_fp16(outputs[1]);
         ++stats.frames;
         stats.input_bytes += encoded.payload.size() + 8;
         stats.output_bytes += yuv420_frame_bytes(options.width, options.height);

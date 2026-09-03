@@ -5,6 +5,8 @@
 #include "mlvc/driver/driver.hpp"
 #include "mlvc/half.hpp"
 
+#include "model_assets.hpp"
+
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -14,7 +16,6 @@
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
-#include <fstream>
 #include <limits>
 #include <memory>
 #include <numeric>
@@ -61,34 +62,6 @@ TensorDataType public_dtype(const std::string& dtype)
     throw std::runtime_error("driver-cubin: unsupported graph I/O dtype " + dtype);
 }
 
-std::vector<std::byte> read_binary(const std::filesystem::path& path)
-{
-    std::ifstream input(path, std::ios::binary);
-    if (!input)
-        throw std::runtime_error("driver-cubin: cannot open " + path.string());
-    input.seekg(0, std::ios::end);
-    const auto end = input.tellg();
-    if (end < 0)
-        throw std::runtime_error("driver-cubin: cannot size " + path.string());
-    std::vector<std::byte> result(static_cast<std::size_t>(end));
-    input.seekg(0);
-    input.read(reinterpret_cast<char*>(result.data()),
-               static_cast<std::streamsize>(result.size()));
-    if (!input)
-        throw std::runtime_error("driver-cubin: cannot read " + path.string());
-    return result;
-}
-
-json read_json(const std::filesystem::path& path)
-{
-    std::ifstream input(path);
-    if (!input)
-        throw std::runtime_error("driver-cubin: cannot open " + path.string());
-    json result;
-    input >> result;
-    return result;
-}
-
 std::array<int, 4> dims4(const std::vector<int64_t>& shape)
 {
     if (shape.size() > 4)
@@ -119,20 +92,25 @@ struct Value {
 class AotGraph final {
 public:
     explicit AotGraph(const std::filesystem::path& model_dir, const std::string& model_name,
+                      const ModelExecutionConfig& execution_config,
                       driver::Driver& driver, const driver::Module& module)
         : driver_(driver), module_(module)
     {
-        const std::filesystem::path graph_dir = model_dir / "aot" / model_name;
-        manifest_ = read_json(graph_dir / "graph.json");
+        const std::filesystem::path graph_dir =
+            std::filesystem::path("aot") / model_name;
+        manifest_ = json::parse(detail::read_model_text(
+            model_dir, graph_dir / "graph.json"));
         if (manifest_.at("schema_version").get<int>() != 1)
             throw std::runtime_error("driver-cubin: unsupported AOT graph schema");
-        weights_host_ = read_binary(graph_dir / "weights.bin");
+        weights_host_ = detail::read_model_binary(
+            model_dir, graph_dir / "weights.bin");
         if (weights_host_.size() != manifest_.at("weights_bytes").get<std::size_t>())
             throw std::runtime_error("driver-cubin: weights size does not match graph");
 
         weights_device_ = driver_.allocate(std::max<std::size_t>(weights_host_.size(), 1));
         if (!weights_host_.empty())
-            driver_.upload_async(weights_device_, weights_host_.data(), weights_host_.size());
+            driver_.upload(weights_device_, weights_host_.data(),
+                           weights_host_.size());
         arena_device_ = driver_.allocate(manifest_.at("arena_bytes").get<std::size_t>());
 
         for (const auto& item : manifest_.at("weights")) {
@@ -483,20 +461,42 @@ public:
         concat_ = module_.function("mlvc_concat_copy_fp16");
         depth_to_space_ = module_.function("mlvc_depth_to_space_fp16");
         space_to_depth_ = module_.function("mlvc_space_to_depth_fp16");
+        configure_state(execution_config);
+    }
+
+    void reset_state()
+    {
+        for (const StateBinding& binding : state_bindings_)
+            driver_.zero_async(input_buffers_[binding.input_index]);
+        state_initialized_ = true;
     }
 
     std::vector<Tensor> run(const std::vector<Tensor>& inputs)
     {
-        if (inputs.size() != input_names_.size())
+        if (!state_bindings_.empty() && !state_initialized_)
+            throw std::runtime_error(
+                "driver-cubin: reset_state() must be called before run()");
+        if (inputs.size() + state_bindings_.size() != input_names_.size())
             throw std::runtime_error("driver-cubin: graph input count mismatch");
-        for (std::size_t i = 0; i < inputs.size(); ++i) {
-            const Value& expected = value(input_names_[i]);
-            if (inputs[i].shape != expected.shape ||
-                inputs[i].data_type() != public_dtype(expected.dtype))
+        ensure_input_staging();
+        std::size_t external_index = 0;
+        for (std::size_t graph_index = 0; graph_index < input_names_.size();
+             ++graph_index) {
+            if (is_state_input(graph_index))
+                continue;
+            const Tensor& input = inputs.at(external_index++);
+            const Value& expected = value(input_names_[graph_index]);
+            if (input.shape != expected.shape ||
+                input.data_type() != public_dtype(expected.dtype))
                 throw std::runtime_error("driver-cubin: graph input shape or dtype mismatch");
-            pin_host_memory(inputs[i].raw_data(), inputs[i].byte_size());
-            driver_.upload_async(input_buffers_[i], inputs[i].raw_data(),
-                                 inputs[i].byte_size());
+            if (input.byte_size() != input_buffers_[graph_index].size())
+                throw std::runtime_error(
+                    "driver-cubin: graph input byte size mismatch");
+            std::memcpy(input_staging_[graph_index], input.raw_data(),
+                        input.byte_size());
+            driver_.upload_async(input_buffers_[graph_index],
+                                 input_staging_[graph_index],
+                                 input.byte_size());
         }
 
         if (!cutlass_parameters_ready_ &&
@@ -515,7 +515,7 @@ public:
         ensure_output_staging();
 
         std::vector<Tensor> outputs;
-        outputs.reserve(output_names_.size());
+        outputs.reserve(output_names_.size() - state_bindings_.size());
         struct StagedCopy {
             void* destination;
             void* source;
@@ -523,6 +523,8 @@ public:
         };
         std::vector<StagedCopy> staged_copies;
         for (std::size_t index = 0; index < output_names_.size(); ++index) {
+            if (is_state_output(index))
+                continue;
             const std::string& name = output_names_[index];
             const Value& result = value(name);
             Tensor tensor;
@@ -545,7 +547,7 @@ public:
                     staged_copies.push_back(
                         {storage.data(), output_staging_[index], bytes});
                 } else {
-                    driver_.download_async(storage.data(), result.address, bytes);
+                    driver_.download(storage.data(), result.address, bytes);
                 }
             }, tensor.data);
             outputs.push_back(std::move(tensor));
@@ -557,16 +559,60 @@ public:
     }
 
 private:
-    void pin_host_memory(const void* pointer, std::size_t bytes)
+    void configure_state(const ModelExecutionConfig& config)
     {
-        if (!pointer ||
-            std::find(pinned_input_pointers_.begin(), pinned_input_pointers_.end(),
-                      pointer) != pinned_input_pointers_.end())
+        const auto final_outputs = manifest_.at("nodes").back().at("outputs")
+            .get<std::vector<std::string>>();
+        for (const StateTensorBinding& requested : config.state_bindings) {
+            if (requested.input_index >= input_names_.size() ||
+                requested.output_index >= output_names_.size()) {
+                throw std::runtime_error(
+                    "driver-cubin: state tensor index is out of range");
+            }
+            if (is_state_input(requested.input_index) ||
+                is_state_output(requested.output_index)) {
+                throw std::runtime_error(
+                    "driver-cubin: duplicate state tensor binding");
+            }
+
+            const Value& input = value(input_names_[requested.input_index]);
+            Value& output = values_.at(output_names_[requested.output_index]);
+            if (input.dtype != output.dtype || input.shape != output.shape ||
+                requested.data_type != public_dtype(input.dtype) ||
+                requested.shape != input.shape) {
+                throw std::runtime_error(
+                    "driver-cubin: state tensor shape or dtype mismatch");
+            }
+            if (std::find(final_outputs.begin(), final_outputs.end(),
+                          output_names_[requested.output_index]) ==
+                final_outputs.end()) {
+                throw std::runtime_error(
+                    "driver-cubin: in-place state output must be produced by "
+                    "the final graph node");
+            }
+
+            output.address = input_buffers_[requested.input_index].address();
+            state_bindings_.push_back(
+                {requested.input_index, requested.output_index});
+        }
+    }
+
+    void ensure_input_staging()
+    {
+        if (input_staging_.size() == input_names_.size())
             return;
-        // Remember the attempt regardless of success: failed registrations stay
-        // pageable (graceful fallback) and are not retried every iteration.
-        pinned_input_pointers_.push_back(pointer);
-        driver_.pin_host(pointer, bytes);
+        if (!input_staging_.empty())
+            throw std::runtime_error("driver-cubin: graph input count changed");
+        input_staging_.resize(input_names_.size(), nullptr);
+        for (std::size_t i = 0; i < input_names_.size(); ++i) {
+            if (is_state_input(i))
+                continue;
+            input_staging_[i] =
+                driver_.allocate_host_pinned(input_buffers_[i].size());
+            if (!input_staging_[i])
+                throw std::runtime_error(
+                    "driver-cubin: failed to allocate pinned input staging");
+        }
     }
 
     void ensure_output_staging()
@@ -575,6 +621,8 @@ private:
             return;
         output_staging_.resize(output_names_.size(), nullptr);
         for (std::size_t index = 0; index < output_names_.size(); ++index) {
+            if (is_state_output(index))
+                continue;
             const Value& result = value(output_names_[index]);
             const std::size_t element_bytes = result.dtype == "fp16" ? 2 : 4;
             const std::size_t bytes =
@@ -582,6 +630,30 @@ private:
             output_staging_[index] = driver_.allocate_host_pinned(bytes);
         }
     }
+
+    struct StateBinding {
+        std::size_t input_index;
+        std::size_t output_index;
+    };
+
+    bool is_state_input(std::size_t index) const
+    {
+        return std::any_of(
+            state_bindings_.begin(), state_bindings_.end(),
+            [&](const StateBinding& binding) {
+                return binding.input_index == index;
+            });
+    }
+
+    bool is_state_output(std::size_t index) const
+    {
+        return std::any_of(
+            state_bindings_.begin(), state_bindings_.end(),
+            [&](const StateBinding& binding) {
+                return binding.output_index == index;
+            });
+    }
+
     const Value& value(const std::string& name) const
     {
         const auto found = values_.find(name);
@@ -710,10 +782,9 @@ private:
             if (!host_params_inserted)
                 throw std::runtime_error(
                     "driver-cubin: duplicate spatial CUTLASS host state");
-            driver_.download_async(
-                host_params->second.data(), params->second,
+            driver_.download(
+                host_params->second.data(), params->second.address(),
                 host_params->second.size());
-            driver_.synchronize();
         }
 
         int input_rows = in_channels;
@@ -815,10 +886,9 @@ private:
             if (!host_params_inserted)
                 throw std::runtime_error(
                     "driver-cubin: duplicate CUTLASS host state");
-            driver_.download_async(
-                host_params->second.data(), found->second,
+            driver_.download(
+                host_params->second.data(), found->second.address(),
                 host_params->second.size());
-            driver_.synchronize();
         }
 
         auto host_params = cutlass_host_parameters_.find(node_index);
@@ -1518,7 +1588,8 @@ private:
     std::vector<std::size_t> aliased_input_slices_;
     std::vector<std::string> direct_concat_values_;
     std::vector<std::string> output_names_;
-    std::vector<const void*> pinned_input_pointers_;
+    std::vector<StateBinding> state_bindings_;
+    std::vector<void*> input_staging_;
     std::vector<void*> output_staging_;
     std::unordered_map<std::string, Value> values_;
     driver::abi::Function binary_ = nullptr;
@@ -1566,12 +1637,15 @@ private:
     driver::abi::Function depth_to_space_ = nullptr;
     driver::abi::Function space_to_depth_ = nullptr;
     bool cutlass_parameters_ready_ = false;
+    bool state_initialized_ = false;
     driver::ExecutableGraph executable_graph_;
 
 public:
     ~AotGraph()
     {
         for (void* pointer : output_staging_)
+            driver_.free_host_pinned(pointer);
+        for (void* pointer : input_staging_)
             driver_.free_host_pinned(pointer);
     }
 };
@@ -1588,9 +1662,10 @@ public:
 
     std::string_view name() const noexcept override { return "driver-cubin"; }
 
-    void load(const std::string& model_name) override
+    void load(const std::string& model_name,
+              const ModelExecutionConfig& config) override
     {
-        graph_ = std::make_unique<AotGraph>(options_.model_dir, model_name,
+        graph_ = std::make_unique<AotGraph>(options_.model_dir, model_name, config,
                                             driver_, module_);
     }
 
@@ -1599,6 +1674,13 @@ public:
         if (!graph_)
             throw std::runtime_error("driver-cubin: load() must be called first");
         return graph_->run(inputs);
+    }
+
+    void reset_state() override
+    {
+        if (!graph_)
+            throw std::runtime_error("driver-cubin: load() must be called first");
+        graph_->reset_state();
     }
 
 private:

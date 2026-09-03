@@ -46,6 +46,8 @@ provide a driver compatible with the CUDA dependencies recorded in
     Driver API only
 - Portable binary: statically links `msrtc_rans`, dynamically loads backend
   SDKs with `$ORIGIN` rpath
+- Portable shared library: `libmlvc_codec.so` with separate `mlvc_encode` and
+  `mlvc_decode` C ABI entry points, plus C++ headers and a CMake package
 - Canonical, hash-verified model bundles shared by every backend
 - Official Python I/P-frame bitstream, reconstruction, and intermediate-tensor
   conformance tests
@@ -172,8 +174,74 @@ CI and release builds run on a Linux x86_64 NVIDIA self-hosted runner.
 ```
 
 `--frames 0` processes until EOF. TensorRT additionally accepts
-`--engine-cache-dir`; every backend accepts `--debug-dir` to emit named model
-inputs and outputs for compatibility diagnosis.
+`--engine-cache-dir`; engines are automatically placed below a profile-named
+subdirectory so MLVC and MLVC-S can safely share one cache root. Every backend
+accepts `--debug-dir` to emit named model inputs and outputs for compatibility
+diagnosis. `--device-id` selects the CUDA ordinal for either command;
+`--encode-device-id` and `--decode-device-id` are direction-specific aliases.
+To use one GPU for encoding and another for decoding, run the two independent
+entry points concurrently:
+
+```bash
+./bin/mlvc_demo encode --input in.yuv --output out.mlvc \
+    --width 640 --height 360 --frames 60 --q-index 21 \
+    --model-dir models/640x368 --encode-device-id 0
+./bin/mlvc_demo decode --input out.mlvc --output rec.yuv \
+    --width 640 --height 360 --frames 60 \
+    --model-dir models/640x368 --decode-device-id 1
+```
+
+These file-based commands are intentionally ordered. For live overlap, use a
+shell pipe or named pipe; the per-frame container is streamable and both
+processes retain their own GPU ordinal. Human-readable command summaries go to
+stderr whenever binary output is stdout:
+
+```bash
+cat in.yuv \
+  | ./bin/mlvc_demo encode --input - --output - --width 640 --height 360 \
+      --frames 60 --q-index 21 --model-dir models/640x368 \
+      --encode-device-id 0 2>encode.log \
+  | ./bin/mlvc_demo decode --input - --output - --width 640 --height 360 \
+      --frames 60 --model-dir models/640x368 \
+      --decode-device-id 1 2>decode.log \
+  > rec.yuv
+```
+
+The same `-` convention is available through the C ABI (`input_path` and
+`output_path`); named FIFO paths are detected automatically and flushed after
+each frame.
+
+The standard compatibility target uses the two-frame I/P fixture. For a
+100-frame TensorRT audit, use `tests/run_codec_conformance.py --diagnostic`;
+it continues after contract violations and writes every frame's PSNR, payload
+hash, and intermediate-tensor error to the requested JSON result. This is
+useful for measuring long-term DPB drift without changing the strict default
+test behaviour.
+
+The TensorRT package also installs `libmlvc_codec.so`, `include/mlvc/codec.h`,
+the C++ headers, and `lib/cmake/mlvc_codec`. The C ABI keeps the two directions
+separate and returns an error code instead of allowing C++ exceptions to cross
+the boundary:
+
+```c
+#include <mlvc/codec.h>
+
+mlvc_codec_options options = {
+    .width = 640, .height = 360, .q_index = 21, .frames = 60,
+    .device_id = 0, .workspace_mib = 4096,
+    .input_path = "in.yuv", .output_path = "out.mlvc",
+    .model_dir = "models/640x368",
+};
+mlvc_codec_stats stats;
+char error[512];
+if (mlvc_encode(&options, &stats, error, sizeof(error)) != 0) {
+    /* error contains the diagnostic */
+}
+```
+
+Set `options.device_id` to `1` in a separate `mlvc_decode` call to bind the
+decoder to the second GPU. A CMake consumer can use
+`find_package(mlvc_codec CONFIG REQUIRED)` and link `mlvc::mlvc_codec`.
 
 ## Codec compatibility
 
@@ -313,6 +381,10 @@ scripts/                     Fetch/bootstrap scripts
 See [docs/design.md](docs/design.md) for the reference pipeline analysis
 (model split I/O, scale extraction, rANS message order, bitstream format, GOP
 and DPB handling) and implementation decisions.
+
+For external application integration, including CLI/C ABI/CMake usage and a
+微信小程序 + Linux GPU service architecture, see
+[`docs/integration-guide-zh.md`](docs/integration-guide-zh.md).
 
 ## Acknowledgements
 

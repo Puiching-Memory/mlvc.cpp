@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.23)
 project(mlvc_cpp VERSION 0.1.0 LANGUAGES CXX)
 
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
 if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR
    NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
     message(FATAL_ERROR "mlvc.cpp supports Linux x86_64 NVIDIA GPU releases only")
@@ -180,14 +183,19 @@ else()
 endif()
 
 add_library(mlvc_backend STATIC ${MLVC_BACKEND_SOURCE})
+set_target_properties(mlvc_backend PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+)
 target_include_directories(mlvc_backend
     PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/include
     PRIVATE ${MLVC_BACKEND_INCLUDES}
+            "${NLOHMANN_JSON_DIR}/single_include"
 )
 target_link_libraries(mlvc_backend PUBLIC ${MLVC_BACKEND_LIBS})
 
-add_library(mlvc_codec STATIC
+add_library(mlvc_codec SHARED
     src/bitstream.cpp
+    src/c_api.cpp
     src/entropy.cpp
     src/model.cpp
     src/pipeline.cpp
@@ -195,12 +203,21 @@ add_library(mlvc_codec STATIC
     src/yuv.cpp
 )
 target_include_directories(mlvc_codec PUBLIC
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
-target_link_libraries(mlvc_codec PUBLIC
+target_link_libraries(mlvc_codec PRIVATE
     mlvc_backend
     msrtc_rans
     nlohmann_json::nlohmann_json
+)
+set_target_properties(mlvc_codec PROPERTIES
+    VERSION ${PROJECT_VERSION}
+    SOVERSION ${PROJECT_VERSION_MAJOR}
+    OUTPUT_NAME mlvc_codec
+    POSITION_INDEPENDENT_CODE ON
+    BUILD_RPATH "\$ORIGIN"
+    INSTALL_RPATH "\$ORIGIN"
 )
 
 add_executable(mlvc_demo src/main.cpp)
@@ -210,6 +227,9 @@ include(CTest)
 if(BUILD_TESTING)
     add_executable(mlvc_codec_tests tests/codec_tests.cpp)
     target_link_libraries(mlvc_codec_tests PRIVATE mlvc_codec)
+    add_executable(mlvc_c_api_tests tests/c_api_tests.cpp)
+    target_link_libraries(mlvc_c_api_tests PRIVATE mlvc_codec)
+    add_test(NAME mlvc_c_api COMMAND mlvc_c_api_tests)
     if(EXISTS "${MLVC_TEST_ASSETS_DIR}/benchmarks/gray-q21/encoder/case.json"
        AND EXISTS "${MLVC_TEST_ASSETS_DIR}/models/mlvc-psnr-v1/canonical/640x368/metadata.json")
         add_test(NAME mlvc_codec_reference
@@ -235,12 +255,8 @@ if(BUILD_TESTING)
                 --model-dir "${_mlvc_model_dir}"
                 --reference-dir "${_mlvc_reference_dir}")
             if(MLVC_WITH_TENSORRT AND MLVC_TEST_ENGINE_CACHE_DIR)
-                set(_mlvc_profile_cache "${MLVC_TEST_ENGINE_CACHE_DIR}")
-                if(_mlvc_profile STREQUAL "mlvc-s-psnr-v1")
-                    set(_mlvc_profile_cache "${_mlvc_profile_cache}/mlvc-s")
-                endif()
                 list(APPEND _mlvc_conformance_args
-                    --engine-cache-dir "${_mlvc_profile_cache}")
+                    --engine-cache-dir "${MLVC_TEST_ENGINE_CACHE_DIR}")
             endif()
             add_test(NAME "mlvc_codec_conformance_${_mlvc_profile}"
                 COMMAND "${Python3_EXECUTABLE}" "${_mlvc_conformance_script}"
@@ -286,7 +302,10 @@ foreach(_mlvc_executable mlvc_demo mlvc_backend_bench)
     target_link_options(${_mlvc_executable} PRIVATE "LINKER:--disable-new-dtags")
 endforeach()
 if(BUILD_TESTING)
-    target_link_options(mlvc_codec_tests PRIVATE "LINKER:--disable-new-dtags")
+    foreach(_mlvc_test_target mlvc_codec_tests mlvc_c_api_tests)
+        target_link_options(${_mlvc_test_target} PRIVATE
+            "LINKER:--disable-new-dtags")
+    endforeach()
 endif()
 if(MLVC_WITH_LIBTORCH)
     foreach(_mlvc_executable mlvc_demo mlvc_backend_bench)
@@ -303,7 +322,7 @@ if(MLVC_ENABLE_IPO)
         set_property(TARGET mlvc_backend mlvc_codec mlvc_demo mlvc_backend_bench msrtc_rans PROPERTY
             INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
         if(BUILD_TESTING)
-            set_property(TARGET mlvc_codec_tests PROPERTY
+            set_property(TARGET mlvc_codec_tests mlvc_c_api_tests PROPERTY
                 INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
         endif()
     else()
@@ -315,7 +334,7 @@ endif()
 # Portable install layout: the binary goes to bin/ and every backend's
 # runtime libraries to lib/, found via $ORIGIN/../lib (no LD_LIBRARY_PATH).
 # ---------------------------------------------------------------------------
-set(MLVC_LIB_DEST "lib")
+set(MLVC_LIB_DEST "${CMAKE_INSTALL_LIBDIR}")
 foreach(_mlvc_executable mlvc_demo mlvc_backend_bench)
     set_target_properties(${_mlvc_executable} PROPERTIES
         BUILD_RPATH "\$ORIGIN"
@@ -323,7 +342,17 @@ foreach(_mlvc_executable mlvc_demo mlvc_backend_bench)
     )
 endforeach()
 
-install(TARGETS mlvc_demo mlvc_backend_bench RUNTIME DESTINATION bin)
+install(TARGETS mlvc_codec
+    EXPORT mlvc_codecTargets
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+)
+install(TARGETS mlvc_demo mlvc_backend_bench
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include/"
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp")
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
     DESTINATION "share/licenses/mlvc_cpp")
 
@@ -351,6 +380,28 @@ if(MLVC_WITH_TENSORRT)
     install(FILES ${_tensorrt_runtime_libraries}
         DESTINATION "${MLVC_LIB_DEST}")
 endif()
+
+# Export the stable shared-library target for CMake consumers.  The selected
+# backend remains an implementation detail of libmlvc_codec.so; consumers do
+# not need to link TensorRT or the internal static targets explicitly.
+configure_package_config_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/mlvc_codecConfig.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/mlvc_codecConfig.cmake"
+    INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/mlvc_codec"
+)
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/mlvc_codecConfigVersion.cmake"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+install(EXPORT mlvc_codecTargets
+    FILE mlvc_codecTargets.cmake
+    NAMESPACE mlvc::
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/mlvc_codec")
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/mlvc_codecConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/mlvc_codecConfigVersion.cmake"
+    DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/mlvc_codec")
 
 set(_backend_license_root "")
 if(MLVC_WITH_ONNXRUNTIME)

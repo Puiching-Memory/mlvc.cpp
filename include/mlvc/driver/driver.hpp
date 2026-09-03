@@ -21,10 +21,32 @@ struct DeviceInfo {
     int driver_version = 0;
     int compute_major = 0;
     int compute_minor = 0;
+    int multiprocessor_count = 0;
     std::string name;
 };
 
 class DriverState;
+
+class ExecutableGraph final {
+public:
+    ExecutableGraph() = default;
+    ~ExecutableGraph();
+
+    ExecutableGraph(const ExecutableGraph&) = delete;
+    ExecutableGraph& operator=(const ExecutableGraph&) = delete;
+    ExecutableGraph(ExecutableGraph&& other) noexcept;
+    ExecutableGraph& operator=(ExecutableGraph&& other) noexcept;
+
+    explicit operator bool() const noexcept { return graph_ != nullptr; }
+
+private:
+    friend class Driver;
+    ExecutableGraph(std::shared_ptr<DriverState> state, abi::GraphExec graph);
+    void reset() noexcept;
+
+    std::shared_ptr<DriverState> state_;
+    abi::GraphExec graph_ = nullptr;
+};
 
 class DeviceBuffer final {
 public:
@@ -96,6 +118,11 @@ public:
     void launch(abi::Function function, Dim3 grid, Dim3 block,
                 unsigned int shared_memory_bytes,
                 std::span<void*> parameters) const;
+    void set_max_dynamic_shared_memory(abi::Function function,
+                                       unsigned int bytes) const;
+    void begin_capture() const;
+    ExecutableGraph end_capture() const;
+    void launch_graph(const ExecutableGraph& graph) const;
     void synchronize() const;
 
 private:

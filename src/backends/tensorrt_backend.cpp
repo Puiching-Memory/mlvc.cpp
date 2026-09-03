@@ -7,7 +7,10 @@
 #include <NvOnnxParser.h>
 #include <cuda_runtime.h>
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -258,6 +261,29 @@ private:
         std::filesystem::path directory = options_.engine_cache_dir.empty()
             ? std::filesystem::path(options_.model_dir) / ".mlvc-cache"
             : std::filesystem::path(options_.engine_cache_dir);
+        // A shared cache root is commonly used for both MLVC profiles.  Keep
+        // their engines in separate namespaces because TensorRT engine names
+        // alone do not identify the ONNX graph or tensor shapes.
+        std::string profile = "model";
+        try {
+            std::ifstream metadata(
+                std::filesystem::path(options_.model_dir) / "metadata.json");
+            nlohmann::json root;
+            if (metadata)
+                metadata >> root;
+            if (root.contains("name") && root.at("name").is_string())
+                profile = root.at("name").get<std::string>();
+        } catch (const std::exception&) {
+            // Model validation reports the authoritative metadata error.  A
+            // fallback namespace keeps backend benchmark diagnostics usable
+            // for an ONNX-only directory without a metadata file.
+        }
+        for (char& value : profile) {
+            if (!(std::isalnum(static_cast<unsigned char>(value)) ||
+                  value == '-' || value == '_' || value == '.'))
+                value = '_';
+        }
+        directory /= profile;
         return directory /
             (model_name + ".trt" + std::to_string(NV_TENSORRT_MAJOR) + "." +
              std::to_string(NV_TENSORRT_MINOR) + ".sm" +
@@ -323,6 +349,8 @@ private:
         config->setBuilderOptimizationLevel(5);
         config->setMemoryPoolLimit(nvinfer1::MemoryPoolType::kWORKSPACE,
                                    options_.workspace_size);
+        // TensorRT 11 uses the ONNX tensor types directly; the exported graphs
+        // are FP16 and the runtime contract rejects implicit FP32 tensors.
         config->clearFlag(nvinfer1::BuilderFlag::kTF32);
 
         TrtPtr<nvinfer1::IHostMemory> plan(

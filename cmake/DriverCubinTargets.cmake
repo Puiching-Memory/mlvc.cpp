@@ -27,9 +27,15 @@ add_custom_command(
 add_library(mlvc_driver_kernels STATIC
     "${MLVC_EMBEDDED_FATBIN_SOURCE}"
 )
+set_target_properties(mlvc_driver_kernels PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
+)
 
 add_library(mlvc_driver STATIC
     src/driver/driver.cpp
+)
+set_target_properties(mlvc_driver PROPERTIES
+    POSITION_INDEPENDENT_CODE ON
 )
 target_include_directories(mlvc_driver PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/include"

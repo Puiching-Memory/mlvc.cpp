@@ -70,6 +70,29 @@ has_library() {
         compgen -G "$root/lib64/$name" >/dev/null
 }
 
+resolve_cudart() {
+    # The GPU releases link libcudart (CUDA runtime), which the NVIDIA driver
+    # does not provide.  Resolve it from the active CUDA 13 toolkit so it can
+    # be bundled next to the backend libraries.
+    local nvcc_real toolkit_root candidate path
+    nvcc_real="$(readlink -f "$(command -v nvcc)")"
+    toolkit_root="$(dirname "$(dirname "$nvcc_real")")"
+    for candidate in \
+        "$toolkit_root/targets/x86_64-linux/lib/libcudart.so.13" \
+        "$toolkit_root/lib64/libcudart.so.13"; do
+        [[ -e "$candidate" ]] || continue
+        printf '%s\n' "$candidate"
+        return 0
+    done
+    path="$(ldconfig -p 2>/dev/null |
+        awk '/libcudart\.so\.13 /{print $NF; exit}')"
+    if [[ -n "$path" && -e "$path" ]]; then
+        printf '%s\n' "$path"
+        return 0
+    fi
+    return 1
+}
+
 ONNXRUNTIME_SDK="$("$ROOT/scripts/fetch_onnxruntime.sh" --print-dir 2>/dev/null || true)"
 LIBTORCH_SDK="$("$ROOT/scripts/fetch_libtorch.sh" --print-dir 2>/dev/null || true)"
 TENSORRT_SDK=system
@@ -168,6 +191,9 @@ package_backend() {
         -DCMAKE_BUILD_TYPE="$BUILD_TYPE"
         -DMLVC_BACKEND="$backend"
         -DMLVC_ENABLE_IPO=ON
+        -DCMAKE_INSTALL_BINDIR=bin
+        -DCMAKE_INSTALL_LIBDIR=lib
+        -DCMAKE_INSTALL_INCLUDEDIR=include
     )
     case "$backend" in
         onnxruntime) configure_args+=("-DONNXRUNTIME_ROOT=$sdk_root") ;;
@@ -185,8 +211,21 @@ package_backend() {
     prefix="$stage_root/$product"
     cmake --install "$build_dir" --config "$BUILD_TYPE" --prefix "$prefix"
 
+    echo "==> bundling CUDA runtime"
+    if ! cudart_so="$(resolve_cudart)"; then
+        echo "error: CUDA runtime libcudart.so.13 not found on the build host" >&2
+        return 1
+    fi
+    cp -L "$cudart_so" "$prefix/lib/libcudart.so.13"
+
     local binary="$prefix/bin/mlvc_demo"
     [[ -x "$binary" ]] || { echo "error: packaged binary is missing: $binary" >&2; return 1; }
+    local codec_library
+    codec_library="$(find "$prefix/lib" -maxdepth 1 -type f -name 'libmlvc_codec.so.*' -print -quit)"
+    [[ -n "$codec_library" ]] || {
+        echo "error: packaged codec library is missing: libmlvc_codec.so.*" >&2
+        return 1
+    }
     local benchmark_binary="$prefix/bin/mlvc_backend_bench"
     [[ -x "$benchmark_binary" ]] || {
         echo "error: packaged benchmark binary is missing: $benchmark_binary" >&2
@@ -206,6 +245,7 @@ package_backend() {
     }
     audit_linkage "$binary"
     audit_linkage "$benchmark_binary"
+    audit_linkage "$codec_library" "$prefix/lib"
     local probe_pattern
     case "$backend" in
         onnxruntime) probe_pattern='libonnxruntime_providers_cuda.so*' ;;
@@ -226,15 +266,18 @@ package_backend() {
         printf 'version=%s\n' "$VERSION"
         printf 'backend=%s\n' "$backend"
         printf 'gpu_only=true\n'
+        printf 'codec_library=%s\n' "$(basename "$codec_library")"
+        printf 'codec_api=c-abi,cxx\n'
         printf 'nvidia_driver=%s\n' "$DRIVER_VERSION"
         printf 'driver_cuda_capability=%s\n' "${DRIVER_CUDA_CAPABILITY:-unknown}"
         printf 'cuda_toolkit=%s\n' "${CUDA_TOOLKIT_VERSION:-not-detected}"
         printf 'build_gpu=%s\n' "$GPU_NAMES"
         printf 'sdk=%s\n' "$sdk_label"
+        printf 'bundled_cuda_runtime=%s\n' "libcudart.so.13"
     } > "$prefix/BUILD-MANIFEST.txt"
     (
         cd "$prefix"
-        find bin lib share -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+        find bin include lib share -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
     ) > "$prefix/SHA256SUMS"
 
     if [[ "$NO_TAR" -eq 1 ]]; then

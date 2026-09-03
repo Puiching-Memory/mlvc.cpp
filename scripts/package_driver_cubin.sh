@@ -53,6 +53,9 @@ cmake -S "$ROOT" -B "$BUILD_ROOT" \
     -DCMAKE_BUILD_TYPE=Release \
     -DMLVC_DRIVER_CUBIN_ONLY=ON \
     -DMLVC_ENABLE_IPO=ON \
+    -DCMAKE_INSTALL_BINDIR=bin \
+    -DCMAKE_INSTALL_LIBDIR=lib \
+    -DCMAKE_INSTALL_INCLUDEDIR=include \
     -DBUILD_TESTING=ON
 cmake --build "$BUILD_ROOT" --parallel "$JOBS"
 ctest --test-dir "$BUILD_ROOT" --output-on-failure
@@ -65,6 +68,11 @@ cmake --install "$BUILD_ROOT" --prefix "$prefix"
 demo="$prefix/bin/mlvc_demo"
 benchmark="$prefix/bin/mlvc_backend_bench"
 probe="$prefix/bin/mlvc_driver_probe"
+codec_library="$(find "$prefix/lib" -maxdepth 1 -type f -name 'libmlvc_codec.so.*' -print -quit)"
+[[ -n "$codec_library" ]] || {
+    echo "error: packaged codec library is missing: libmlvc_codec.so.*" >&2
+    exit 1
+}
 for binary in "$demo" "$benchmark" "$probe"; do
     [[ -x "$binary" ]] || {
         echo "error: packaged driver-cubin executable is missing: $binary" >&2
@@ -86,6 +94,21 @@ for binary in "$demo" "$benchmark" "$probe"; do
         exit 1
     fi
 done
+linkage="$(ldd "$codec_library")"
+[[ "$linkage" != *"not found"* ]] || {
+    echo "$linkage" >&2
+    exit 1
+}
+[[ "$linkage" == *"libcuda.so.1"* ]] || {
+    echo "error: $codec_library does not require the NVIDIA driver" >&2
+    exit 1
+}
+if grep -Eqi 'libcudart|libcudnn|libcublas|libnvinfer|libonnxruntime|libtorch' \
+        <<<"$linkage"; then
+    echo "error: a forbidden CUDA Toolkit or inference runtime was linked" >&2
+    echo "$linkage" >&2
+    exit 1
+fi
 [[ "$("$demo" --backend-name)" == "driver-cubin" ]] || {
     echo "error: packaged codec is not the driver-cubin variant" >&2
     exit 1
@@ -104,6 +127,8 @@ fatbin_sha="$(sha256sum "$ROOT/assets/cubin/mlvc_driver_kernels.fatbin" | cut -d
     printf 'backend=driver-cubin\n'
     printf 'codec_pipeline=complete\n'
     printf 'aot_graphs=MLVCEncoder,MLVCDecoder\n'
+    printf 'codec_library=%s\n' "$(basename "$codec_library")"
+    printf 'codec_api=c-abi,cxx\n'
     printf 'floating_point=fp16-only\n'
     printf 'runtime_gpu_dependency=libcuda.so.1\n'
     printf 'cuda_toolkit_runtime_dependency=false\n'
@@ -113,7 +138,7 @@ fatbin_sha="$(sha256sum "$ROOT/assets/cubin/mlvc_driver_kernels.fatbin" | cut -d
 } > "$prefix/BUILD-MANIFEST.txt"
 (
     cd "$prefix"
-    find bin share -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
+    find bin include lib share -type f -print0 | LC_ALL=C sort -z | xargs -0 sha256sum
 ) > "$prefix/SHA256SUMS"
 
 if [[ "$NO_TAR" -eq 1 ]]; then

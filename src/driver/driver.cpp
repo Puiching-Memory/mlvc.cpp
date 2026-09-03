@@ -1,6 +1,7 @@
 #include "mlvc/driver/driver.hpp"
 
 #include <array>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
@@ -35,6 +36,9 @@ public:
         check(cuDeviceGetAttribute(&info.compute_minor,
                                    abi::kComputeCapabilityMinor, device),
               "cuDeviceGetAttribute(minor)");
+        check(cuDeviceGetAttribute(&info.multiprocessor_count,
+                                   abi::kMultiprocessorCount, device),
+              "cuDeviceGetAttribute(multiprocessor count)");
 
         try {
             check(cuDevicePrimaryCtxRetain(&context, device),
@@ -100,6 +104,43 @@ public:
     abi::Stream stream = nullptr;
     DeviceInfo info;
 };
+
+ExecutableGraph::ExecutableGraph(std::shared_ptr<DriverState> state,
+                                 abi::GraphExec graph)
+    : state_(std::move(state)), graph_(graph)
+{
+}
+
+ExecutableGraph::~ExecutableGraph()
+{
+    reset();
+}
+
+ExecutableGraph::ExecutableGraph(ExecutableGraph&& other) noexcept
+    : state_(std::move(other.state_)),
+      graph_(std::exchange(other.graph_, nullptr))
+{
+}
+
+ExecutableGraph& ExecutableGraph::operator=(ExecutableGraph&& other) noexcept
+{
+    if (this != &other) {
+        reset();
+        state_ = std::move(other.state_);
+        graph_ = std::exchange(other.graph_, nullptr);
+    }
+    return *this;
+}
+
+void ExecutableGraph::reset() noexcept
+{
+    if (state_ && graph_) {
+        if (cuCtxSetCurrent(state_->context) == CUDA_SUCCESS)
+            cuGraphExecDestroy(graph_);
+    }
+    graph_ = nullptr;
+    state_.reset();
+}
 
 DeviceBuffer::DeviceBuffer(std::shared_ptr<DriverState> state,
                            abi::DeviceAddress address, std::size_t size)
@@ -268,6 +309,61 @@ void Driver::launch(abi::Function function, Dim3 grid, Dim3 block,
                        block.x, block.y, block.z, shared_memory_bytes,
                        state_->stream, parameters.data(), nullptr),
         "cuLaunchKernel");
+}
+
+void Driver::set_max_dynamic_shared_memory(abi::Function function,
+                                           unsigned int bytes) const
+{
+    if (!function || bytes > static_cast<unsigned int>(
+                               std::numeric_limits<int>::max())) {
+        throw std::runtime_error(
+            "driver-cubin: invalid dynamic shared-memory limit");
+    }
+    state_->make_current();
+    DriverState::check(
+        cuFuncSetAttribute(
+            function, CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+            static_cast<int>(bytes)),
+        "cuFuncSetAttribute(max dynamic shared memory)");
+}
+
+void Driver::begin_capture() const
+{
+    state_->make_current();
+    DriverState::check(
+        cuStreamBeginCapture(state_->stream, abi::kStreamCaptureThreadLocal),
+        "cuStreamBeginCapture");
+}
+
+ExecutableGraph Driver::end_capture() const
+{
+    state_->make_current();
+    abi::Graph graph = nullptr;
+    DriverState::check(cuStreamEndCapture(state_->stream, &graph),
+                       "cuStreamEndCapture");
+
+    abi::GraphExec executable = nullptr;
+    const abi::Result instantiate_result =
+        cuGraphInstantiate(&executable, graph, 0);
+    const abi::Result destroy_result = cuGraphDestroy(graph);
+    if (instantiate_result != abi::kSuccess)
+        DriverState::throw_error(instantiate_result, "cuGraphInstantiate");
+    if (destroy_result != abi::kSuccess) {
+        cuGraphExecDestroy(executable);
+        DriverState::throw_error(destroy_result, "cuGraphDestroy");
+    }
+    return ExecutableGraph(state_, executable);
+}
+
+void Driver::launch_graph(const ExecutableGraph& graph) const
+{
+    if (!graph.graph_)
+        throw std::runtime_error("driver-cubin: executable graph is empty");
+    if (graph.state_.get() != state_.get())
+        throw std::runtime_error("driver-cubin: executable graph belongs to another driver");
+    state_->make_current();
+    DriverState::check(cuGraphLaunch(graph.graph_, state_->stream),
+                       "cuGraphLaunch");
 }
 
 void Driver::synchronize() const

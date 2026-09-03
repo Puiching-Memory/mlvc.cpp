@@ -15,11 +15,14 @@ void print_usage(const char* argv0)
     std::fprintf(stderr,
         "usage:\n"
         "  %s --backend-name\n"
-        "  %s encode --input IN.yuv --output OUT.mlvc --width W --height H\n"
+        "  %s encode --input IN.yuv|- --output OUT.mlvc|- --width W --height H\n"
         "       --model-dir DIR [--frames N] [--q-index N] [--device-id N]\n"
-        "  %s decode --input IN.mlvc --output OUT.yuv --width W --height H\n"
+        "       [--encode-device-id N]\n"
+        "  %s decode --input IN.mlvc|- --output OUT.yuv|- --width W --height H\n"
         "       --model-dir DIR [--frames N] [--device-id N]\n"
-        "  common: [--engine-cache-dir DIR] [--workspace-mib N] [--debug-dir DIR]\n",
+        "       [--decode-device-id N]\n"
+        "  common: [--engine-cache-dir DIR] [--workspace-mib N] [--debug-dir DIR]\n"
+        "  stream: use '-' for stdin/stdout; named FIFO paths are also supported\n",
         argv0, argv0, argv0);
 }
 
@@ -76,6 +79,14 @@ int main(int argc, char** argv)
             };
             if (std::strcmp(argv[i], "--device-id") == 0) {
                 options.device_id = parse_integer(value(), "--device-id", true);
+            } else if (std::strcmp(argv[i], "--encode-device-id") == 0) {
+                if (command != "encode")
+                    throw std::runtime_error("--encode-device-id is only valid for encode");
+                options.device_id = parse_integer(value(), "--encode-device-id", true);
+            } else if (std::strcmp(argv[i], "--decode-device-id") == 0) {
+                if (command != "decode")
+                    throw std::runtime_error("--decode-device-id is only valid for decode");
+                options.device_id = parse_integer(value(), "--decode-device-id", true);
             } else if (std::strcmp(argv[i], "--model-dir") == 0) {
                 options.model_dir = value();
             } else if (std::strcmp(argv[i], "--engine-cache-dir") == 0) {
@@ -108,11 +119,15 @@ int main(int argc, char** argv)
             ? mlvc::encode_video(options) : mlvc::decode_video(options);
         const double fps = stats.elapsed_seconds > 0.0
             ? static_cast<double>(stats.frames) / stats.elapsed_seconds : 0.0;
-        std::printf("%s complete: backend=%.*s frames=%d input=%zu output=%zu "
-                    "elapsed=%.3f s throughput=%.2f fps\n",
-                    command.c_str(), static_cast<int>(mlvc::compiled_backend_name().size()),
-                    mlvc::compiled_backend_name().data(), stats.frames,
-                    stats.input_bytes, stats.output_bytes, stats.elapsed_seconds, fps);
+        // Binary output may be stdout.  Keep the human-readable summary on
+        // stderr so it cannot corrupt a downstream decoder or muxer.
+        FILE* status = options.output_path == "-" ? stderr : stdout;
+        std::fprintf(status,
+                     "%s complete: backend=%.*s frames=%d input=%zu output=%zu "
+                     "elapsed=%.3f s throughput=%.2f fps\n",
+                     command.c_str(), static_cast<int>(mlvc::compiled_backend_name().size()),
+                     mlvc::compiled_backend_name().data(), stats.frames,
+                     stats.input_bytes, stats.output_bytes, stats.elapsed_seconds, fps);
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "error: %s\n", error.what());

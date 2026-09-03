@@ -15,7 +15,10 @@ OUTPUT="$ROOT/assets/cubin/mlvc_driver_kernels.fatbin"
 temporary="$(mktemp "$OUTPUT.tmp.XXXXXX")"
 trap 'rm -f "$temporary"' EXIT
 
-"$NVCC" --fatbin -O3 --std=c++20 \
+"$NVCC" --fatbin -O3 --std=c++20 --expt-relaxed-constexpr \
+    -I"$ROOT/include" \
+    -I/usr/include \
+    -Xcompiler=-Wno-template-body \
     -gencode arch=compute_75,code=sm_75 \
     -gencode arch=compute_80,code=sm_80 \
     -gencode arch=compute_86,code=sm_86 \

@@ -181,6 +181,8 @@ as `q_index_shifted`. FP32 and TF32 execution are intentionally unsupported.
 - [x] `src/bitstream.cpp` — official per-frame little-endian container
 - [x] `src/pipeline.cpp` — encoder/decoder DPBs, GOP/QP schedule, frame loop
 - [x] `src/main.cpp` — `encode` and `decode` CLI
+- [x] Streamable stdin/stdout and named-FIFO frame loop with per-frame flush
+- [x] `libmlvc_codec.so` C ABI (`mlvc_encode` / `mlvc_decode`) and CMake export
 - [x] Canonical model packages for MLVC and MLVC-S
 - [x] FP16 backend microbenchmark: same captured inputs, latency distribution,
       Python-reference tensor error metrics

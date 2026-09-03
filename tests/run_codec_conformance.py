@@ -25,6 +25,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--reference-dir", type=Path, required=True)
     parser.add_argument("--engine-cache-dir", type=Path)
     parser.add_argument("--result", type=Path)
+    parser.add_argument(
+        "--diagnostic",
+        action="store_true",
+        help="write all metrics and continue after contract violations",
+    )
     return parser.parse_args()
 
 
@@ -86,6 +91,7 @@ def compare_yuv(
     frame_bytes: int,
     max_error: int,
     min_psnr: float,
+    enforce_contract: bool = True,
 ) -> list[dict[str, Any]]:
     if len(reference) != len(actual) or len(reference) % frame_bytes != 0:
         raise AssertionError("reconstructed YUV size mismatch")
@@ -104,7 +110,8 @@ def compare_yuv(
             squared_error += delta * delta
         rmse = math.sqrt(squared_error / frame_bytes)
         psnr = 999.9 if rmse == 0 else 20.0 * math.log10(255.0 / rmse)
-        if maximum > max_error or psnr < min_psnr:
+        within_contract = maximum <= max_error and psnr >= min_psnr
+        if not within_contract and enforce_contract:
             raise AssertionError(
                 f"frame {frame} reconstruction outside contract: "
                 f"max={maximum}, psnr={psnr:.3f} dB"
@@ -116,6 +123,7 @@ def compare_yuv(
                 "max_sample_error": maximum,
                 "rmse": rmse,
                 "psnr_db": psnr,
+                "within_contract": within_contract,
             }
         )
     return results
@@ -139,6 +147,7 @@ def compare_tensors(
     debug_root: Path,
     records: list[dict[str, Any]],
     contract: dict[str, Any],
+    enforce_contract: bool = True,
 ) -> list[dict[str, Any]]:
     results = []
     exact_encoder_frames = set(contract["exact_encoder_frames"])
@@ -189,7 +198,10 @@ def compare_tensors(
             and name in {"z_raw", "y_raw_0", "y_raw_1"}
             and frame not in exact_encoder_frames
         )
+        within_contract = True
         if strict and mismatches:
+            within_contract = False
+        if strict and mismatches and enforce_contract:
             raise AssertionError(
                 f"tensor must be numerically exact: {relative} ({mismatches} mismatches)"
             )
@@ -197,6 +209,8 @@ def compare_tensors(
             max_abs > contract["tensor_max_abs_error"]
             or rmse > contract["tensor_max_rmse"]
         ):
+            within_contract = False
+        if enforce_tolerance and not strict and not within_contract and enforce_contract:
             raise AssertionError(
                 f"tensor outside contract: {relative}, max={max_abs}, rmse={rmse}"
             )
@@ -207,6 +221,7 @@ def compare_tensors(
                 "max_abs_error": max_abs,
                 "rmse": rmse,
                 "enforced": enforce_tolerance,
+                "within_contract": within_contract,
             }
         )
     return results
@@ -263,13 +278,30 @@ def main() -> None:
         if len(expected_frames) != manifest["frames"] or len(actual_frames) != manifest["frames"]:
             raise AssertionError("reference or backend encoder produced the wrong frame count")
         exact_frames = set(manifest["contract"]["exact_encoder_frames"])
+        bitstream_comparison = []
         for index, ((expected_q, expected), (actual_q, actual)) in enumerate(
             zip(expected_frames, actual_frames)
         ):
-            if expected_q != actual_q:
+            q_match = expected_q == actual_q
+            payload_match = expected == actual
+            if not q_match and not args.diagnostic:
                 raise AssertionError(f"frame {index} q-index mismatch")
-            if index in exact_frames and expected != actual:
+            if index in exact_frames and not payload_match and not args.diagnostic:
                 raise AssertionError(f"frame {index} payload is not bit-exact")
+            bitstream_comparison.append(
+                {
+                    "frame": index,
+                    "q_index_match": q_match,
+                    "expected_q_index": expected_q,
+                    "actual_q_index": actual_q,
+                    "expected_payload_bytes": len(expected),
+                    "actual_payload_bytes": len(actual),
+                    "payload_bit_exact": payload_match,
+                    "payload_sha256": hashlib.sha256(actual).hexdigest(),
+                    "expected_payload_sha256": hashlib.sha256(expected).hexdigest(),
+                    "required_bit_exact": index in exact_frames,
+                }
+            )
 
         decoded = work / "decoded-reference.yuv"
         decode_debug = work / "decode-debug"
@@ -290,6 +322,7 @@ def main() -> None:
             frame_bytes,
             manifest["contract"]["decoder_max_yuv_sample_error"],
             manifest["contract"]["decoder_min_psnr_db"],
+            enforce_contract=not args.diagnostic,
         )
         roundtrip_reconstruction = compare_yuv(
             (args.reference_dir / manifest["reconstruction"]["path"]).read_bytes(),
@@ -297,12 +330,14 @@ def main() -> None:
             frame_bytes,
             manifest["contract"]["decoder_max_yuv_sample_error"],
             manifest["contract"]["decoder_min_psnr_db"],
+            enforce_contract=not args.diagnostic,
         )
         tensor_results = compare_tensors(
             args.reference_dir,
             encode_debug,
             [record for record in manifest["tensors"] if record["path"].startswith("encoder/")],
             manifest["contract"],
+            enforce_contract=not args.diagnostic,
         )
         tensor_results.extend(
             compare_tensors(
@@ -310,6 +345,7 @@ def main() -> None:
                 decode_debug,
                 [record for record in manifest["tensors"] if record["path"].startswith("decoder/")],
                 manifest["contract"],
+                enforce_contract=not args.diagnostic,
             )
         )
         result = {
@@ -320,20 +356,38 @@ def main() -> None:
             ).strip(),
             "encoded_frame_bytes": [len(payload) for _, payload in actual_frames],
             "bit_exact_frames": sorted(exact_frames),
+            "bitstream_comparison": bitstream_comparison,
             "reference_decode_reconstruction": reference_decode_reconstruction,
             "roundtrip_reconstruction": roundtrip_reconstruction,
             "tensors": tensor_results,
         }
+        result["contract_passed"] = all(
+            item["within_contract"]
+            for item in result["reference_decode_reconstruction"]
+            + result["roundtrip_reconstruction"]
+            + result["tensors"]
+        ) and all(
+            item["q_index_match"]
+            and (not item["required_bit_exact"] or item["payload_bit_exact"])
+            for item in bitstream_comparison
+        )
         if args.result:
             args.result.parent.mkdir(parents=True, exist_ok=True)
             args.result.write_text(
                 json.dumps(result, indent=2, sort_keys=True) + "\n",
                 encoding="utf-8",
             )
-        print(
-            f"codec conformance passed: backend={result['backend']} "
-            f"profile={result['profile']} frames={manifest['frames']}"
-        )
+        if args.diagnostic:
+            print(
+                f"codec conformance diagnostic: backend={result['backend']} "
+                f"profile={result['profile']} frames={manifest['frames']} "
+                f"contract_passed={result['contract_passed']}"
+            )
+        else:
+            print(
+                f"codec conformance passed: backend={result['backend']} "
+                f"profile={result['profile']} frames={manifest['frames']}"
+            )
 
 
 if __name__ == "__main__":

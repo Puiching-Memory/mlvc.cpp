@@ -93,3 +93,49 @@ ctest --test-dir build --output-on-failure -L conformance
 per-frame YUV metrics, and per-tensor errors for audit. The same test applies
 without backend-specific exceptions to `onnxruntime`, `libtorch`, `tensorrt`,
 and `driver-cubin` builds.
+
+For long-sequence audits, generate a 100-frame fixture with the pinned Python
+split-model implementation and add `--diagnostic` to keep all per-frame and
+per-tensor measurements when a contract check fails:
+
+```bash
+(cd third_party/mlvc && uv run ../../scripts/make_codec_reference.py \
+    --model-dir "$PWD/../../model-assets/models/mlvc-psnr-v1/canonical/640x368" \
+    --input "$PWD/../../model-assets/references/mlvc-psnr-v1/gray-q21-2f/input.yuv" \
+    --width 640 --height 360 --frames 100 --q-index 21 \
+    --output-dir /tmp/mlvc-official-100 --execution-provider cuda)
+python3 tests/run_codec_conformance.py --diagnostic \
+    --binary build-test-tensorrt/mlvc_demo \
+    --model-dir model-assets/models/mlvc-psnr-v1/canonical/640x368 \
+    --reference-dir /tmp/mlvc-official-100 \
+    --engine-cache-dir model-assets/engines/a30-fp16 \
+    --result model-assets/results/conformance/tensorrt-mlvc-100.json
+```
+
+`--diagnostic` does not weaken the normal test: it records
+`contract_passed=false` instead of stopping at the first mismatch. On the
+NVIDIA A30 used for the 2026-09-02 release audit, the TensorRT profile-scoped
+engine produced the following 100-frame results:
+
+| Profile | Encode fps | Decode official stream fps | Decode self stream fps | Official-stream min PSNR | Self-stream min PSNR | Max self YUV error | Strict failures (official/self) |
+| ------- | ---------: | -------------------------: | ---------------------: | ------------------------: | -------------------: | -----------------: | -----------------------------: |
+| `mlvc-psnr-v1` | 69.98 | 72.85 | 95.70 | 63.522 dB | 60.447 dB | 2 | 0 / 32 |
+| `mlvc-s-psnr-v1` | 109.72 | 116.65 | 146.38 | 59.421 dB | 49.096 dB | 4 | 9 / 100 |
+
+Both profiles preserved the unshifted `q_index=21` on all 100 containers and
+reset their feature DPB at frames 0 and 64, matching the official GOP schedule.
+For the main profile, the frame-0 and frame-64 I-frame payloads were both
+107 bytes and bit-exact with Python; `y_raw_0` and `y_raw_1` were numerically
+exact across the complete sequence. The remaining main-profile failures are
+small TensorRT FP16 feature/DPB drift and a two-level YUV sample excursion in
+the self-encoded stream. MLVC-S shows larger long-term feature drift, so its
+100-frame TensorRT result is explicitly not release-contract conforming yet.
+
+The complete JSON reports are kept at
+`model-assets/results/conformance/tensorrt-mlvc-100.json` and
+`model-assets/results/conformance/tensorrt-mlvc-s-100.json` in the development
+workspace. These long-sequence numbers are diagnostic evidence, not a relaxed
+release contract: TensorRT tactic selection and FP16 accumulation can vary
+between serialized engines. The two-frame CTest remains the required portable
+compatibility gate, while the 100-frame audit currently shows that MLVC-S does
+not yet meet the strict 60 dB / one-sample long-sequence target.

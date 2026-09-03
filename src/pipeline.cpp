@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -94,6 +95,14 @@ std::size_t regular_file_size(const std::string& path)
     return error ? 0 : static_cast<std::size_t>(size);
 }
 
+bool streaming_path(const std::string& path)
+{
+    if (path == "-")
+        return true;
+    std::error_code error;
+    return std::filesystem::is_fifo(path, error);
+}
+
 const char* tensor_dtype_name(TensorDataType type)
 {
     return type == TensorDataType::kFloat16 ? "fp16" : "int32";
@@ -153,12 +162,23 @@ CodecStats encode_video(const CodecOptions& options)
     std::unique_ptr<InferenceBackend> backend = create_backend(make_backend_options(options));
     backend->load("MLVCEncoder");
 
-    std::ifstream input(options.input_path, std::ios::binary);
-    if (!input)
+    std::ifstream input_file;
+    std::istream* input = &std::cin;
+    if (options.input_path != "-") {
+        input_file.open(options.input_path, std::ios::binary);
+        input = &input_file;
+    }
+    if (!*input)
         throw std::runtime_error("cannot open input YUV: " + options.input_path);
     create_parent_directory(options.output_path);
-    std::ofstream output(options.output_path, std::ios::binary | std::ios::trunc);
-    if (!output)
+    std::ofstream output_file;
+    std::ostream* output = &std::cout;
+    const bool stream_output = streaming_path(options.output_path);
+    if (options.output_path != "-") {
+        output_file.open(options.output_path, std::ios::binary | std::ios::trunc);
+        output = &output_file;
+    }
+    if (!*output)
         throw std::runtime_error("cannot create output bitstream: " + options.output_path);
 
     const auto started = std::chrono::steady_clock::now();
@@ -166,7 +186,7 @@ CodecStats encode_video(const CodecOptions& options)
     std::vector<Float16Storage> reference = zero_reference(config);
     Yuv420Frame frame;
     while ((options.frames == 0 || stats.frames < options.frames) &&
-           read_yuv420_frame(input, options.width, options.height, frame)) {
+           read_yuv420_frame(*input, options.width, options.height, frame)) {
         const int gop_frame = config.frame_in_gop(stats.frames);
         if (gop_frame == 0)
             std::fill(reference.begin(), reference.end(), 0);
@@ -205,15 +225,21 @@ CodecStats encode_video(const CodecOptions& options)
         encoded.q_index = options.q_index;
         encoded.payload = entropy.encode(outputs[3], outputs[2], outputs[1],
                                          options.q_index);
-        write_encoded_frame(output, encoded);
+        write_encoded_frame(*output, encoded);
+        if (stream_output)
+            output->flush();
+        if (!*output)
+            throw std::runtime_error("failed to flush output bitstream");
         reference = copy_fp16(outputs[0]);
         ++stats.frames;
         stats.input_bytes += yuv420_frame_bytes(options.width, options.height);
+        stats.output_bytes += encoded.payload.size() + 8;
     }
-    output.flush();
-    if (!output)
+    output->flush();
+    if (!*output)
         throw std::runtime_error("failed to finalize output bitstream");
-    stats.output_bytes = regular_file_size(options.output_path);
+    if (!stream_output)
+        stats.output_bytes = regular_file_size(options.output_path);
     stats.elapsed_seconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - started).count();
     return stats;
@@ -227,12 +253,23 @@ CodecStats decode_video(const CodecOptions& options)
     std::unique_ptr<InferenceBackend> backend = create_backend(make_backend_options(options));
     backend->load("MLVCDecoder");
 
-    std::ifstream input(options.input_path, std::ios::binary);
-    if (!input)
+    std::ifstream input_file;
+    std::istream* input = &std::cin;
+    if (options.input_path != "-") {
+        input_file.open(options.input_path, std::ios::binary);
+        input = &input_file;
+    }
+    if (!*input)
         throw std::runtime_error("cannot open MLVC bitstream: " + options.input_path);
     create_parent_directory(options.output_path);
-    std::ofstream output(options.output_path, std::ios::binary | std::ios::trunc);
-    if (!output)
+    std::ofstream output_file;
+    std::ostream* output = &std::cout;
+    const bool stream_output = streaming_path(options.output_path);
+    if (options.output_path != "-") {
+        output_file.open(options.output_path, std::ios::binary | std::ios::trunc);
+        output = &output_file;
+    }
+    if (!*output)
         throw std::runtime_error("cannot create output YUV: " + options.output_path);
 
     const auto started = std::chrono::steady_clock::now();
@@ -242,7 +279,7 @@ CodecStats decode_video(const CodecOptions& options)
     const FramePadding padding = frame_padding(
         options.width, options.height, config.model_width, config.model_height);
     while ((options.frames == 0 || stats.frames < options.frames) &&
-           read_encoded_frame(input, encoded)) {
+           read_encoded_frame(*input, encoded)) {
         if (encoded.q_index < 0 || encoded.q_index >= config.qp_num)
             throw std::runtime_error("bitstream q-index is outside the model range");
         const int gop_frame = config.frame_in_gop(stats.frames);
@@ -270,15 +307,19 @@ CodecStats decode_video(const CodecOptions& options)
             {1, config.feature_channels, config.feature_height(), config.feature_width()},
             "feature");
         write_debug_tensors(options, "decoder", stats.frames, "output", outputs);
-        write_yuv420_frame(output, prepare_model_output(
+        write_yuv420_frame(*output, prepare_model_output(
             outputs[0], options.width, options.height, config.pixel_range, padding));
+        if (stream_output)
+            output->flush();
+        if (!*output)
+            throw std::runtime_error("failed to flush output YUV");
         reference = copy_fp16(outputs[1]);
         ++stats.frames;
         stats.input_bytes += encoded.payload.size() + 8;
         stats.output_bytes += yuv420_frame_bytes(options.width, options.height);
     }
-    output.flush();
-    if (!output)
+    output->flush();
+    if (!*output)
         throw std::runtime_error("failed to finalize output YUV");
     stats.elapsed_seconds = std::chrono::duration<double>(
         std::chrono::steady_clock::now() - started).count();

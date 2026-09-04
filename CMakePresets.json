@@ -1,0 +1,87 @@
+{
+  "version": 4,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 23,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "release-base",
+      "hidden": true,
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "MLVC_ENABLE_IPO": "ON",
+        "MLVC_MODEL_ROOT": "${sourceDir}/models/canonical",
+        "MLVC_TEST_ASSETS_DIR": "${sourceDir}/models/fixtures"
+      }
+    },
+    {
+      "name": "driver-cubin-release",
+      "displayName": "Driver+cubin Release",
+      "inherits": "release-base",
+      "cacheVariables": {
+        "MLVC_SELECTED_BACKEND": "driver_cubin",
+        "BUILD_TESTING": "ON"
+      }
+    },
+    {
+      "name": "onnxruntime-release",
+      "displayName": "ONNX Runtime Release",
+      "inherits": "release-base",
+      "cacheVariables": {
+        "MLVC_SELECTED_BACKEND": "onnxruntime",
+        "ONNXRUNTIME_ROOT": "${sourceDir}/third_party/onnxruntime/onnxruntime-linux-x64-gpu-1.26.0",
+        "BUILD_TESTING": "OFF"
+      }
+    },
+    {
+      "name": "libtorch-release",
+      "displayName": "libtorch Release",
+      "inherits": "release-base",
+      "cacheVariables": {
+        "MLVC_SELECTED_BACKEND": "libtorch",
+        "LIBTORCH_ROOT": "${sourceDir}/third_party/libtorch/2.13.0-cu130/libtorch",
+        "BUILD_TESTING": "OFF"
+      }
+    },
+    {
+      "name": "tensorrt-release",
+      "displayName": "TensorRT Release",
+      "inherits": "release-base",
+      "cacheVariables": {
+        "MLVC_SELECTED_BACKEND": "tensorrt",
+        "BUILD_TESTING": "OFF"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "driver-cubin-release",
+      "configurePreset": "driver-cubin-release"
+    },
+    {
+      "name": "onnxruntime-release",
+      "configurePreset": "onnxruntime-release"
+    },
+    {
+      "name": "libtorch-release",
+      "configurePreset": "libtorch-release"
+    },
+    {
+      "name": "tensorrt-release",
+      "configurePreset": "tensorrt-release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "driver-cubin-release",
+      "configurePreset": "driver-cubin-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    }
+  ]
+}

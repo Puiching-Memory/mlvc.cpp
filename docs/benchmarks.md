@@ -73,15 +73,30 @@ kernel while preserving the original FP16 rounding boundaries. A controlled
 A/B on an A30 used six interleaved processes per variant, 50 warm-up iterations
 and 300 measured iterations per process. GPU clocks remained unlocked.
 
-| Variant                         | Median-of-runs mean ms | Median-of-runs p50 ms |
-| ------------------------------- | ---------------------: | --------------------: |
-| Unfused 12-node tail            |                 3.4646 |                3.4635 |
+| Variant                          | Median-of-runs mean ms | Median-of-runs p50 ms |
+| -------------------------------- | ---------------------: | --------------------: |
+| Unfused 12-node tail             |                 3.4646 |                3.4635 |
 | Fused `mlvc_feature_update_fp16` |                 3.3992 |                3.3981 |
 
 The fused path reduced both measures by 1.9%. The standard and small embedded
 model profiles produced byte-identical output tensor files with the fusion
 enabled and disabled. This focused A/B is additive to, rather than a
 replacement for, the multi-backend table above.
+
+### 2026-09-04 y-latent quantization and prior-tail fusion
+
+The standard encoder profile now fuses the y0 and y1 quantization/prior-update
+tails. `mlvc_y0_tail_fp16` replaces 19 graph nodes through the input to the
+spatial-prior stack; `mlvc_y1_tail_fp16` replaces 15 nodes through the final
+decoder-input scale. The kernels preserve the intermediate FP16 rounding
+boundaries and materialize `z_raw`, `y_raw_0`, and `y_raw_1` identically to the
+generic schedule across two-frame conformance runs.
+
+The matcher is shape- and alias-aware. It accepts only the fixed dependency
+chain with the expected consumer counts and permits only the exact arena
+aliases used by the standard profile. MLVC-S is intentionally left on the
+generic tail because its 24-channel workload is too small for a stable fused
+latency win on the A30.
 
 ## Accuracy
 

@@ -37,12 +37,12 @@ Outputs (per input size, here `640x368`):
 | `aot/`                   | Optional Driver+cubin graph schedules/weights |
 | `model_bundle.json`      | Canonical artifact hashes and codec contract  |
 
-`scripts/assemble_model_package.py` copies all backend formats into a single
+`tools/model_package.py assemble` copies all backend formats into a single
 canonical directory. Its metadata and PMF tables always come from one ONNX
 export. This prevents backend-specific PMF rounding from making streams
-undecodable by another package. `scripts/verify_model_profile.py` validates
-checkpoint/profile parameter mapping; the bundle assembler validates model
-identity and every artifact hash.
+undecodable by another package. `tools/model_convert.py verify` validates
+checkpoint/profile parameter mapping; the bundle tool validates model identity
+and every artifact hash.
 
 ### ONNX IO (verified, `opset 18`, FP16 weights)
 
@@ -79,7 +79,7 @@ Key dimensions for `640x368` (from `metadata.json`):
 MLVC-S is not obtained by substituting dimensions in the MLVC profile. Its
 verified mini-hyperprior export has `feature_channels=96`, `y_channels=48`,
 `z_channels=48`, `y_scale_repeat=4`, and a `6 x 10` z plane. Both profiles are
-registered in `configs/model_profiles.json`; runtime dimensions come only from
+registered in `models/profiles/profiles.json`; runtime dimensions come only from
 their packaged metadata.
 
 ## 2. Scale extraction (`extract_scales`)
@@ -159,8 +159,8 @@ Reference: `FrameLoop` (`video/conversion/_frame_loop.py`) with model defaults:
 ## 7. Inference backends
 
 Four separate GPU backends implement `mlvc::InferenceBackend`
-(`include/mlvc/backend.hpp`). A release compiles exactly one via the
-`MLVC_BACKEND` CMake setting:
+(`runtime/include/mlvc/runtime/backend.hpp`). A release compiles exactly one
+via the `MLVC_SELECTED_BACKEND` CMake setting:
 
 | Backend        | Model artifacts              | Execution       | Notes                                                                             |
 | -------------- | ---------------------------- | --------------- | --------------------------------------------------------------------------------- |
@@ -184,14 +184,46 @@ Those tensors preserve fp16 or int32 storage; FP32 and TF32 execution remain
 unsupported. `--debug-dir` deliberately disables state binding so every model
 input and output, including `ref_feature` and `feature`, can be dumped.
 
+### Driver+cubin internal boundaries
+
+The Driver+cubin implementation is kept under `backends/driver_cubin` and does
+not expose its CUDA, CUTLASS, JSON, or AOT types through the installed SDK. Its
+source modules have one-way responsibilities:
+
+| Module | Responsibility |
+| ------ | -------------- |
+| `backend.cpp` | Implements the backend factory and owns one loaded AOT graph |
+| `model_loader.cpp` | Loads the embedded graph manifest and weight image |
+| `graph_ir.cpp` | Provides graph value, dtype, shape, and scalar accessors |
+| `graph_validator.cpp` | Validates state bindings, slices, and alias ranges |
+| `memory_planner.cpp` | Plans input aliases and reusable epilogue/concat workspaces |
+| `fusion_registry.cpp` | Matches complete fusion dependency chains and launches them |
+| `execution_plan.cpp` | Lowers unmatched nodes to validated kernel launches |
+| `kernel_registry.cpp` | Resolves fatbin entry points and their resource attributes |
+| `cuda_graph_executor.cpp` | Owns staging, state reset, graph capture, and replay |
+| `driver.cpp` | Wraps CUDA Driver API handles and allocations with RAII |
+
+`aot_graph.hpp` is the private contract shared by these translation units. The
+runtime path is therefore `load -> validate/plan -> capture -> replay`; model
+loading and planning do not recur for each frame. Fusion matching order and all
+FP16 materialization points are retained as codec behavior.
+
+The fatbin has one explicit compilation entry,
+`backends/driver_cubin/kernels/module.cu`. It aggregates separate implementation
+units for elementwise operations, activations, layouts, tensor transforms,
+recurrent-feature and quantization-tail fusions, and generic/pointwise/spatial/
+depthwise convolutions. Shared helpers live in `.cuh` files. CMake tracks every
+included unit as an input, while all generated fatbin and embedded-array files
+are written below the build tree.
+
 ## 8. Implementation status
 
-- [x] `src/entropy.cpp` — canonical PMF loading + rANS encode/decode
-- [x] `src/scales.cpp` — parameterized dual-prior scale extraction/masks
-- [x] `src/yuv.cpp` — YUV420 I/O, edge padding, crop, 420/444 conversion
-- [x] `src/bitstream.cpp` — official per-frame little-endian container
-- [x] `src/pipeline.cpp` — encoder/decoder DPBs, GOP/QP schedule, frame loop
-- [x] `src/main.cpp` — `encode` and `decode` CLI
+- [x] `core/src/entropy.cpp` — canonical PMF loading + rANS encode/decode
+- [x] `core/src/scales.cpp` — parameterized dual-prior scale extraction/masks
+- [x] `core/src/yuv.cpp` — YUV420 I/O, edge padding, crop, 420/444 conversion
+- [x] `core/src/bitstream.cpp` — official per-frame little-endian container
+- [x] `codec/src/pipeline.cpp` — encoder/decoder DPBs, GOP/QP schedule, frame loop
+- [x] `tools/cli/main.cpp` — `encode` and `decode` CLI
 - [x] Streamable stdin/stdout and named-FIFO frame loop with per-frame flush
 - [x] `libmlvc_codec.so` C ABI (`mlvc_encode` / `mlvc_decode`) and CMake export
 - [x] Canonical model packages for MLVC and MLVC-S
@@ -234,10 +266,10 @@ operators present in both profiles: Conv (including grouped/depthwise and
 pointwise forms), Add/Mul/Sub, Concat/Slice/Gather, LeakyRelu/Clip/Sigmoid,
 Reciprocal/Round, DepthToSpace, and SpaceToDepth.
 
-`scripts/build_aot_model.py` performs static ONNX shape inference, rejects any
+`tools/model_aot.py` performs static ONNX shape inference, rejects any
 operator or dtype without a runtime kernel, serializes aligned weights, and
 plans reusable intermediate lifetimes in one arena. At build time,
-`scripts/build_embedded_models.py` validates both canonical profiles and links
+`tools/model_package.py embed` validates both canonical profiles and links
 their metadata, PMFs, graphs, and weights into a read-only ELF segment. The C++
 backend uploads weights once and dispatches every node through `cuLaunchKernel`.
 Both complete Encoder/Decoder graphs for MLVC and MLVC-S pass the same

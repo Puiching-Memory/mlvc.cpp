@@ -1,14 +1,13 @@
 # Build artifacts
-build/
-build-*/
-cmake-build-*/
+/build/
+/cmake-build-*/
 *.o
 *.obj
 *.a
 *.so
 *.so.*
 
-# Portable package outputs (scripts/package.sh)
+# Portable package outputs (tools/package.sh)
 dist/
 packages/
 /packages-driver-*/
@@ -19,7 +18,10 @@ third_party/onnxruntime/
 third_party/libtorch/
 
 # Model & media artifacts
-/model-assets/
+/models/canonical/
+/models/fixtures/
+/models/generated/
+/backends/driver_cubin/generated/
 *.onnx
 *.ts
 *.pt

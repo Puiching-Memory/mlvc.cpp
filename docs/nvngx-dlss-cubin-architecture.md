@@ -77,3 +77,23 @@ TensorRT, ONNX Runtime, or libtorch.
 
 NVIDIA CUDA headers remain subject to the NVIDIA software license. They are
 used from the build host's CUDA Toolkit and are not copied into the package.
+
+## 2026-09-04 y-latent tail fusion
+
+The encoder's y-latent tail now has two additional fixed-shape fusion kernels:
+
+- `mlvc_y0_tail_fp16` replaces the first prior split, y0 normalization and
+  quantization, y0 prior update, and the two following concats. It also writes
+  the normalized tensor and clipped prior as side outputs because both remain
+  live for the y1 pass.
+- `mlvc_y1_tail_fp16` replaces y1 quantization, y1 prior update, the residual
+  add, and the final scale multiply. It writes `y_raw_1` and the decoder input
+  directly.
+
+Both kernels retain the graph's FP16 materialization points: Clip and
+Reciprocal are rounded before normalization, every Add/Mul/Sub is rounded in
+FP16, and Round is applied after the same FP16 sum. The backend only enables
+the match after validating the complete node dependency chain, consumer counts,
+channel Slice ranges, static shapes, and permitted arena aliases. The MLVC-S
+profile has 24 y channels, so it deliberately uses the generic schedule; on
+the A30 its smaller workload did not amortize the fused kernels' footprint.

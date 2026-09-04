@@ -47,7 +47,7 @@ provide a driver compatible with the CUDA dependencies recorded in
 - Portable binary: statically links `msrtc_rans`, dynamically loads backend
   SDKs with `$ORIGIN` rpath
 - Portable shared library: `libmlvc_codec.so` with separate `mlvc_encode` and
-  `mlvc_decode` C ABI entry points, plus C++ headers and a CMake package
+  `mlvc_decode` C ABI entry points, one stable C header, and a CMake package
 - Canonical, hash-verified model bundles shared by every backend
 - Official Python I/P-frame bitstream, reconstruction, and intermediate-tensor
   conformance tests
@@ -65,33 +65,34 @@ provide a driver compatible with the CUDA dependencies recorded in
 | nlohmann/json 3.11.3          | JSON parsing (PMF tables / metadata) | Pinned Git submodule                                       |
 | CMake >= 3.23, C++20 compiler | Build                                |                                                            |
 
-MLVC exported model artifacts (`MLVCEncoder.onnx`, `MLVCDecoder.onnx`,
-`gaussian_pmf.json`, `bit_estimator_pmf.json`, `metadata.json`) are produced by
-the official converter and supplied at runtime via `--model-dir`. TensorRT
-release packaging installs both registered profiles under `share/mlvc/models`.
-Driver+cubin validates the same canonical bundles at build time, then embeds
-their metadata, PMFs, AOT schedules, and weights in `libmlvc_codec.so`. The
-`libtorch` backend additionally needs TorchScript exports
-(`MLVCEncoder.ts` / `MLVCDecoder.ts`) in the same directory.
+MLVC exported model artifacts are produced by the official converter. The
+ONNX Runtime and TensorRT release packages copy `MLVCEncoder.onnx` and
+`MLVCDecoder.onnx`; the libtorch package copies `MLVCEncoder.ts` and
+`MLVCDecoder.ts`. All three install both registered profiles, their metadata,
+and their PMFs under `share/mlvc/models`. The runtime discovers that directory
+relative to the installed `libmlvc_codec.so`, so packaged applications do not
+need `--model-dir`. Driver+cubin validates the same canonical bundles at build
+time, then embeds their metadata, PMFs, AOT schedules, and weights in
+`libmlvc_codec.so`.
 
-The repository provides thin wrappers around the upstream converter for the
-two framework artifact formats. Run them from `third_party/mlvc`:
+The unified conversion tool provides subcommands for both framework artifact
+formats. Run it from `third_party/mlvc`:
 
 ```bash
-uv run ../../scripts/export_onnx.py export \
+uv run ../../tools/model_convert.py onnx export \
     --model-version dmc61sbr_reglu --model-type onnx \
     --target-device generic --torch-device cuda --precision fp16 \
     --weights-path /absolute/path/to/mlvc-psnr-v1.ckpt \
     --no-validate-conversion
 
-uv run ../../scripts/export_torchscript.py export \
+uv run ../../tools/model_convert.py torchscript export \
     --model-version dmc61sbr_reglu --model-type torch \
     --torch-device cuda --precision fp16 \
     --weights-path /absolute/path/to/mlvc-psnr-v1.ckpt \
     --no-validate-conversion
 ```
 
-Both wrappers preserve upstream model construction and save the final captured
+Both subcommands preserve upstream model construction and save the final captured
 inputs/outputs as `benchmark-MLVC*.npz`. The ONNX wrapper uses a small NVIDIA
 pass set and deliberately omits QNN workarounds and channel-splitting passes.
 The TorchScript wrapper replaces the upstream eager `.torch` serializer with a
@@ -103,57 +104,54 @@ are authoritative:
 
 ```bash
 REPO="$(pwd)"
-(cd third_party/mlvc && uv run ../../scripts/build_aot_model.py \
-    --model-dir "$REPO/model-assets/models/mlvc-psnr-v1/onnx-generic/640x368" \
+(cd third_party/mlvc && uv run ../../tools/model_aot.py \
+    --model-dir "$REPO/models/generated/exports/mlvc-psnr-v1/onnx-generic/640x368" \
     --output-dir /tmp/mlvc-aot)
-./scripts/assemble_model_package.py --profile mlvc-psnr-v1 \
-    --onnx-dir model-assets/models/mlvc-psnr-v1/onnx-generic/640x368 \
-    --torchscript-dir model-assets/models/mlvc-psnr-v1/torch-generic/640x368 \
-    --aot-dir /tmp/mlvc-aot --output-dir models/mlvc-psnr-v1/640x368
-./scripts/assemble_model_package.py \
-    --output-dir models/mlvc-psnr-v1/640x368 --verify-only
+./tools/model_package.py assemble --profile mlvc-psnr-v1 \
+    --onnx-dir models/generated/exports/mlvc-psnr-v1/onnx-generic/640x368 \
+    --torchscript-dir models/generated/exports/mlvc-psnr-v1/torch-generic/640x368 \
+    --aot-dir /tmp/mlvc-aot --output-dir models/canonical/mlvc-psnr-v1/640x368
+./tools/model_package.py verify \
+    --model-dir models/canonical/mlvc-psnr-v1/640x368
 ```
 
 Repeat with the `mlvc-s-psnr-v1` profile and corresponding export directories
-for MLVC-S. `configs/model_profiles.json` is the source of profile identity;
+for MLVC-S. `models/profiles/profiles.json` is the source of profile identity;
 runtime tensor dimensions always come from the verified `metadata.json`.
 
 ## NVIDIA release build
 
 ```bash
 # Shallow-clone source submodules and install the pinned GPU SDKs.
-./scripts/bootstrap.sh --backend all
+./tools/bootstrap.sh --backend all
 
-# Preflight all SDKs, build three framework trees, validate runtime linkage,
-# verify that each binary contains only its intended backend, then create
-# three archives under packages/.
-./scripts/package.sh
+# Preflight all SDKs, build all four isolated backends, validate
+# runtime linkage, and create four archives under packages/.
+./tools/package.sh
 
 # One release can also be built independently.
-./scripts/package.sh --backend tensorrt --jobs 8
-
-# Build the fourth, inference-framework-free release.
-./scripts/build_driver_fatbin.sh
-./scripts/package_driver_cubin.sh
+./tools/package.sh --backend driver-cubin --jobs 8
 ```
 
-Both commands use canonical bundles below `model-assets/models` by default;
-pass `--model-root DIR` to use another validated source tree. TensorRT selects
-a bundled profile with, for example,
-`--model-dir "$MLVC_PREFIX/share/mlvc/models/mlvc-psnr-v1/640x368"`. Driver+cubin
-uses its embedded `mlvc-psnr-v1` profile by default; pass
-`--model-profile mlvc-s-psnr-v1` to select the embedded small model. The
+The packaging command uses canonical bundles below `models/canonical` by default;
+pass `--model-root DIR` to use another validated source tree. Every package
+uses `mlvc-psnr-v1` by default; pass `--model-profile mlvc-s-psnr-v1` to select
+the small model. Driver+cubin reads its embedded model, while ONNX Runtime,
+libtorch, and TensorRT discover their copied model files inside the package.
+An explicit `--model-dir` remains available as a development override. The
 TensorRT archive also carries `libcudart.so.13` and its CUDA EULA, while the
-Driver+cubin archive remains dependent only on the system NVIDIA driver.
+Driver+cubin archive remains dependent only on the system NVIDIA driver. The
+driver fatbin is generated in the build tree by CMake from
+`backends/driver_cubin/kernels/module.cu`.
 
-For source-only development setup, run `./scripts/bootstrap.sh`. This executes
+For source-only development setup, run `./tools/bootstrap.sh`. This executes
 `git submodule update --init --recursive --depth 1`; `.gitmodules` also marks
 both source dependencies as shallow. ONNX Runtime and libtorch are downloaded
 SDK inputs and remain git-ignored; TensorRT is installed from NVIDIA's system
-repository. The one supported version matrix lives in `scripts/dependencies.env`.
+repository. The one supported version matrix lives in `tools/dependencies.env`.
 GPU bootstrap installs missing Ubuntu build tools before acquiring the SDKs.
 
-`package.sh` refuses CPU-only ONNX Runtime/libtorch SDKs. It uses clean staging
+`tools/package.sh` refuses CPU-only ONNX Runtime/libtorch SDKs. It uses clean staging
 directories, enables Release IPO, writes file checksums, and audits both the
 executable and the backend's GPU library for unresolved dependencies. It also
 checks that the staged codec resolves `libcudart.so.13` from the archive rather
@@ -170,11 +168,14 @@ engine caches.
 For a direct development build, bootstrap and select one GPU backend:
 
 ```bash
-./scripts/bootstrap.sh --backend onnxruntime
-cmake -S . -B build -DMLVC_BACKEND=onnxruntime \
-      -DONNXRUNTIME_ROOT="$(./scripts/fetch_onnxruntime.sh --print-dir)"
-cmake --build build -j
+./tools/bootstrap.sh --backend onnxruntime
+cmake --preset onnxruntime-release
+cmake --build --preset onnxruntime-release -j
 ```
+
+All source builds are placed below the single top-level `build/` directory.
+Equivalent presets are provided for `libtorch`, `tensorrt`, and
+`driver-cubin`.
 
 CI and release builds run on a Linux x86_64 NVIDIA self-hosted runner.
 
@@ -182,9 +183,9 @@ CI and release builds run on a Linux x86_64 NVIDIA self-hosted runner.
 
 ```bash
 ./mlvc_demo encode --input in.yuv --width 640 --height 360 --frames 60 \
-                   --q-index 21 --model-dir models/640x368 --output out.mlvc
+                   --q-index 21 --output out.mlvc
 ./mlvc_demo decode --input out.mlvc --width 640 --height 360 --frames 60 \
-                   --model-dir models/640x368 --output rec.yuv
+                   --output rec.yuv
 ```
 
 `--frames 0` processes until EOF. TensorRT additionally accepts
@@ -193,9 +194,8 @@ subdirectory so MLVC and MLVC-S can safely share one cache root. Every backend
 accepts `--debug-dir` to emit named model inputs and outputs for compatibility
 diagnosis. `--device-id` selects the CUDA ordinal for either command;
 `--encode-device-id` and `--decode-device-id` are direction-specific aliases.
-The Driver+cubin build does not require `--model-dir`: it defaults to its
-embedded `mlvc-psnr-v1` profile and accepts `--model-profile` for another
-embedded profile.
+No release package requires `--model-dir`: all default to `mlvc-psnr-v1` and
+accept `--model-profile` to select another packaged profile.
 
 To use one GPU for encoding and another for decoding, run the two independent
 entry points concurrently:
@@ -203,10 +203,10 @@ entry points concurrently:
 ```bash
 ./bin/mlvc_demo encode --input in.yuv --output out.mlvc \
     --width 640 --height 360 --frames 60 --q-index 21 \
-    --model-dir models/640x368 --encode-device-id 0
+    --encode-device-id 0
 ./bin/mlvc_demo decode --input out.mlvc --output rec.yuv \
     --width 640 --height 360 --frames 60 \
-    --model-dir models/640x368 --decode-device-id 1
+    --decode-device-id 1
 ```
 
 These file-based commands are intentionally ordered. For live overlap, use a
@@ -217,10 +217,10 @@ stderr whenever binary output is stdout:
 ```bash
 cat in.yuv \
   | ./bin/mlvc_demo encode --input - --output - --width 640 --height 360 \
-      --frames 60 --q-index 21 --model-dir models/640x368 \
+      --frames 60 --q-index 21 \
       --encode-device-id 0 2>encode.log \
   | ./bin/mlvc_demo decode --input - --output - --width 640 --height 360 \
-      --frames 60 --model-dir models/640x368 \
+      --frames 60 \
       --decode-device-id 1 2>decode.log \
   > rec.yuv
 ```
@@ -230,16 +230,17 @@ The same `-` convention is available through the C ABI (`input_path` and
 each frame.
 
 The standard compatibility target uses the two-frame I/P fixture. For a
-100-frame TensorRT audit, use `tests/run_codec_conformance.py --diagnostic`;
+100-frame TensorRT audit, use `tests/conformance/run_codec_conformance.py --diagnostic`;
 it continues after contract violations and writes every frame's PSNR, payload
 hash, and intermediate-tensor error to the requested JSON result. This is
 useful for measuring long-term DPB drift without changing the strict default
 test behaviour.
 
-The TensorRT package also installs `libmlvc_codec.so`, `include/mlvc/codec.h`,
-the C++ headers, and `lib/cmake/mlvc_codec`. The C ABI keeps the two directions
-separate and returns an error code instead of allowing C++ exceptions to cross
-the boundary:
+Every release package installs `libmlvc_codec.so`, the stable
+`include/mlvc/codec.h` C header, and `lib/cmake/mlvc_codec`. Core, runtime, and
+backend C++ headers remain private to the source tree. The C ABI keeps the two
+directions separate and returns an error code instead of allowing C++
+exceptions to cross the boundary:
 
 ```c
 #include <mlvc/codec.h>
@@ -248,7 +249,7 @@ mlvc_codec_options options = {
     .width = 640, .height = 360, .q_index = 21, .frames = 60,
     .device_id = 0, .workspace_mib = 4096,
     .input_path = "in.yuv", .output_path = "out.mlvc",
-    .model_dir = "models/640x368",
+    .model_dir = NULL, /* Use the package's default mlvc-psnr-v1 profile. */
 };
 mlvc_codec_stats stats;
 char error[512];
@@ -268,10 +269,10 @@ the recurrent feature DPB), then run the formal compatibility target:
 
 ```bash
 REPO="$(pwd)"
-(cd third_party/mlvc && uv run ../../scripts/make_codec_reference.py \
-    --model-dir "$REPO/models/mlvc-psnr-v1/640x368" \
+(cd third_party/mlvc && uv run ../../tools/model_reference.py \
+    --model-dir "$REPO/models/canonical/mlvc-psnr-v1/640x368" \
     --input "$REPO/input.yuv" --width 640 --height 360 --frames 2 --q-index 21 \
-    --output-dir "$REPO/model-assets/references/mlvc-psnr-v1/gray-q21-2f")
+    --output-dir "$REPO/models/fixtures/references/mlvc-psnr-v1/gray-q21-2f")
 cmake --build build --target mlvc_codec_compatibility
 ```
 
@@ -289,7 +290,7 @@ outputs used by each model part as `model_data_*.npz`. Convert one snapshot in
 the same Python environment that runs MLVC:
 
 ```bash
-./scripts/make_benchmark_case.py \
+./tools/benchmark.py make-case \
     --input output/debug/model_data_0.npz \
     --model MLVCEncoder \
     --output-dir benchmark-cases/encoder-frame-0
@@ -298,8 +299,8 @@ the same Python environment that runs MLVC:
 Run the resulting case with each isolated backend build:
 
 ```bash
-./build-release/onnxruntime/mlvc_backend_bench \
-    --model-dir models/640x368 \
+./build/onnxruntime-release/mlvc_backend_bench \
+    --model-dir models/canonical/mlvc-psnr-v1/640x368 \
     --case benchmark-cases/encoder-frame-0/case.json \
     --warmup 20 --iterations 100 \
     --result results/onnxruntime-encoder-frame-0.json
@@ -315,7 +316,7 @@ non-zero process exit status.
 Summarize comparable result files in one table:
 
 ```bash
-./scripts/compare_backend_results.py \
+./tools/benchmark.py compare \
     results/onnxruntime-encoder-frame-0.json \
     results/libtorch-encoder-frame-0.json \
     results/tensorrt-encoder-frame-0.json \
@@ -350,14 +351,12 @@ validates and embeds both registered profiles when building the isolated
 backend:
 
 ```bash
-./scripts/build_driver_fatbin.sh
-cmake -S . -B build-driver-cubin \
-      -DMLVC_DRIVER_CUBIN_ONLY=ON -DCMAKE_BUILD_TYPE=Release
-cmake --build build-driver-cubin -j
-./build-driver-cubin/mlvc_driver_probe --iterations 1000
-./build-driver-cubin/mlvc_demo encode --input in.yuv --output out.mlvc \
+cmake --preset driver-cubin-release
+cmake --build --preset driver-cubin-release -j
+./build/driver-cubin-release/mlvc_driver_probe --iterations 1000
+./build/driver-cubin-release/mlvc_demo encode --input in.yuv --output out.mlvc \
     --width 640 --height 360 --frames 2 --q-index 21
-./build-driver-cubin/mlvc_demo --list-model-profiles
+./build/driver-cubin-release/mlvc_demo --list-model-profiles
 ```
 
 The prebuilt fatbin contains `sm_75`, `sm_80`, `sm_86`, and `sm_89` cubins plus
@@ -365,7 +364,7 @@ a `compute_89` PTX fallback. Package and audit the monolithic library
 independently with:
 
 ```bash
-./scripts/package_driver_cubin.sh
+./tools/package.sh --backend driver-cubin
 ```
 
 The embedded module implements every operator used by both complete
@@ -383,23 +382,35 @@ kept in its device input allocation and the fixed-shape steady-state schedule is
 replayed with CUDA Graphs. Further optimization focuses on general transfer and
 pipeline scheduling instead of per-model code generation or device-specific
 autotuning tables.
-See [`docs/research/nvngx-dlss-cubin-architecture.md`](docs/research/nvngx-dlss-cubin-architecture.md).
+See [`docs/nvngx-dlss-cubin-architecture.md`](docs/nvngx-dlss-cubin-architecture.md).
 
 ## Repository layout
 
 ```
-CMakeLists.txt               Top-level single-backend build (MLVC_BACKEND)
-src/main.cpp                 CLI entry point
-src/backend_bench.cpp        FP16 model latency and parity benchmark
-src/backends/                One implementation selected per release
-include/mlvc/                Public headers (backend abstraction, pipeline)
+public/include/mlvc/codec.h Stable C ABI header
+core/                        Tensor, model, YUV, entropy and bitstream logic
+runtime/                     Backend interface and runtime contracts
+codec/                       C ABI and codec pipeline
+backends/                    One backend implementation selected per release
+backends/driver_cubin/src/   AOT load, validation, planning and execution modules
+backends/driver_cubin/kernels/ Explicitly aggregated CUDA kernel modules
+tools/cli/                   CLI entry point
+tools/benchmark/             FP16 model latency and parity benchmark
+tools/bootstrap.sh           Source and GPU SDK setup
+tools/package.sh             Unified four-backend release packaging
+tools/model_*.py             Model conversion, AOT, packaging, and references
+tools/benchmark.py           Benchmark fixture and result utilities
+tests/unit/                  Portable unit and C API tests
+tests/conformance/           Official reference conformance runner
+models/canonical/            Verified backend-independent model bundles
+models/fixtures/             Test inputs, benchmark cases and references
+models/generated/            Ignored converter/export/cache outputs
+models/profiles/profiles.json Model profile registry
 third_party/mlvc/            microsoft/mlvc shallow Git submodule
 third_party/nlohmann_json/   nlohmann/json shallow Git submodule
 third_party/onnxruntime/     ONNX Runtime (fetched by script, git-ignored)
 third_party/libtorch/        libtorch (fetched by script, git-ignored)
 docs/design.md               Pipeline design notes (ONNX IO, entropy coding, GOP)
-examples/                    Sample scripts/data generation
-scripts/                     Fetch/bootstrap scripts
 ```
 
 ## Design notes

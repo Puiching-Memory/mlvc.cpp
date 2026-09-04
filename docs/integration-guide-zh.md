@@ -10,30 +10,31 @@ GPU 服务。
 
 ## 1. 选择发布包
 
-本次发布提供两个可部署归档：
+本次发布提供四个可部署归档：
 
 | 后端         | 归档                                                     | 模型存储                                        | 主要运行时依赖                                               |
 | ------------ | -------------------------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------ |
 | Driver+cubin | `mlvc_cpp-0.1.0-driver-cubin-nvidia-linux-x86_64.tar.gz` | AOT 图、权重与 fatbin 内嵌在 `libmlvc_codec.so` | NVIDIA 驱动和系统 C/C++ 运行库                               |
+| ONNX Runtime | `mlvc_cpp-0.1.0-onnxruntime-nvidia-linux-x86_64.tar.gz`  | 包内 ONNX model bundle                          | NVIDIA 驱动；包内 ONNX Runtime、cuDNN 和 CUDA-X 运行库       |
+| libtorch     | `mlvc_cpp-0.1.0-libtorch-nvidia-linux-x86_64.tar.gz`     | 包内 TorchScript model bundle                   | NVIDIA 驱动；包内 libtorch、cuDNN 和 CUDA-X 运行库           |
 | TensorRT     | `mlvc_cpp-0.1.0-tensorrt-nvidia-linux-x86_64.tar.gz`     | 包内 ONNX model bundle，首次运行构建 engine     | NVIDIA 驱动；包内 TensorRT、ONNX parser 和 `libcudart.so.13` |
 
 Driver+cubin 包更小、启动更快，且不依赖 CUDA Toolkit、CUDA Runtime、TensorRT、
 ONNX Runtime 或 libtorch。其 fatbin 包含 `sm_75`、`sm_80`、`sm_86`、`sm_89`
 原生代码和 `compute_89` PTX。
 
-TensorRT 包携带运行和构建 engine 所需的动态库。engine 与 GPU 架构、TensorRT
-版本、模型和 workspace 配置相关，不是跨机器通用模型文件。
-
-源码还支持 ONNX Runtime 和 libtorch 后端，但本次发布不提供这两个后端的归档。
-四种后端共用 codec、GOP、熵编码和 YUV pipeline；推理实现、依赖、性能及 FP16
-数值结果不同。
+三个框架后端包都携带对应模型和运行所需的动态库。TensorRT engine 与 GPU 架构、
+TensorRT 版本、模型和 workspace 配置相关，不是跨机器通用模型文件。四种后端共用
+codec、GOP、熵编码和 YUV pipeline；推理实现、依赖、性能及 FP16 数值结果不同。
 
 ### 1.1 归档校验值
 
 | 归档         | 大小（bytes） | SHA-256                                                            |
 | ------------ | ------------: | ------------------------------------------------------------------ |
-| Driver+cubin |    73,123,533 | `fbbac58d490ab32754feb5ff7f08aa2767071aa43d9426775f47166513ed95bc` |
-| TensorRT     | 2,129,029,810 | `afdc729b51ff8cc507c15b6371162ec78d5d1af7485cd55db5db39a3ce701f0a` |
+| Driver+cubin |   145,604,536 | `d61fd32eb7eabd6e82bce0402f9ac49b255139faed3fb31e12797cb4849ae6f1` |
+| ONNX Runtime |   634,265,317 | `e7392d550e5ee56ea77db303d96b829658dc364d7a2d62905a0b830e966f2cb9` |
+| libtorch     | 1,344,965,552 | `d535a6ccd55d27ac0251414ebe9b6a60eecf0eb00c15583c94ea9790173f89a8` |
+| TensorRT     | 2,129,064,826 | `d823d2b8dd0bb5494fb3b2aae4e036b55e079acc15cf7647e047dde755e4ba60` |
 
 部署前应从可信渠道获得归档，并校验完整 SHA-256。归档内的 `SHA256SUMS` 用于校验
 解包后的文件。
@@ -52,7 +53,8 @@ tar -xzf "packages/$MLVC_ARCHIVE" -C /opt/mlvc
 export MLVC_PREFIX="/opt/mlvc/$MLVC_PACKAGE"
 ```
 
-使用 TensorRT 时，把两个变量替换为：
+使用其他后端时，把变量中的 `driver-cubin` 替换为 `onnxruntime`、`libtorch` 或
+`tensorrt`。例如 TensorRT：
 
 ```bash
 MLVC_ARCHIVE=mlvc_cpp-0.1.0-tensorrt-nvidia-linux-x86_64.tar.gz
@@ -90,8 +92,8 @@ ldd "$MLVC_PREFIX/lib/libmlvc_codec.so"
 "$MLVC_PREFIX/bin/mlvc_demo" --backend-name
 ```
 
-第二条命令应输出 `driver-cubin` 或 `tensorrt`，并与所选归档一致。Driver+cubin
-还可以列出内嵌模型：
+第二条命令应输出 `driver-cubin`、`onnxruntime`、`libtorch` 或 `tensorrt`，并与
+所选归档一致。四种归档都可以列出可用模型：
 
 ```bash
 "$MLVC_PREFIX/bin/mlvc_demo" --list-model-profiles
@@ -104,8 +106,6 @@ mlvc-psnr-v1
 mlvc-s-psnr-v1
 ```
 
-TensorRT 的模型是外置目录，因此 `--list-model-profiles` 不列出它们。
-
 归档主要内容如下：
 
 ```text
@@ -113,18 +113,17 @@ bin/mlvc_demo               CLI 编解码器
 bin/mlvc_backend_bench      模型级 benchmark 工具
 lib/libmlvc_codec.so        C ABI/C++ codec 共享库
 include/mlvc/codec.h        C ABI 头文件
-include/mlvc/*.hpp          当前 C++ 头文件
 lib/cmake/mlvc_codec/       relocatable CMake package
 BUILD-MANIFEST.txt          后端、构建环境和模型清单
 SHA256SUMS                  包内文件校验值
 ```
 
-Driver+cubin 另外包含 `bin/mlvc_driver_probe`。TensorRT 另外包含后端动态库、CUDA
-Runtime 许可和 `share/mlvc/models/`。
+Driver+cubin 另外包含 `bin/mlvc_driver_probe`。ONNX Runtime、libtorch 和 TensorRT
+归档另外包含后端动态库、运行库许可和 `share/mlvc/models/`。
 
 ## 3. 模型、输入和输出约束
 
-两个归档都包含两个互相独立的模型 profile：
+四个归档都包含两个互相独立的模型 profile：
 
 - `mlvc-psnr-v1`：默认主模型；
 - `mlvc-s-psnr-v1`：较小模型。
@@ -132,23 +131,25 @@ Runtime 许可和 `share/mlvc/models/`。
 编码端和解码端必须使用相同 profile、画布尺寸和 GOP 规则。不要把两个 profile
 的模型文件或状态混在同一会话中。
 
-Driver+cubin 默认选择 `mlvc-psnr-v1`，也可以显式选择：
+所有归档默认选择 `mlvc-psnr-v1`，也可以显式选择：
 
 ```bash
 --model-profile mlvc-psnr-v1
 --model-profile mlvc-s-psnr-v1
 ```
 
-`--model-profile` 只对 Driver+cubin 有效。TensorRT 必须使用对应模型目录：
+Driver+cubin 从共享库读取内嵌模型。其余三个后端自动从归档中的对应目录读取模型：
 
 ```text
 $MLVC_PREFIX/share/mlvc/models/mlvc-psnr-v1/640x368/
 $MLVC_PREFIX/share/mlvc/models/mlvc-s-psnr-v1/640x368/
 ```
 
-目录中包含 `MLVCEncoder.onnx`、`MLVCDecoder.onnx`、两个 PMF、`metadata.json` 和
-`model_bundle.json`。不要只替换其中某个文件；运行库会校验 profile、模型版本、
-固定尺寸和协议标识。
+ONNX Runtime 和 TensorRT 目录包含 `MLVCEncoder.onnx`、`MLVCDecoder.onnx`；libtorch
+目录包含 `MLVCEncoder.ts`、`MLVCDecoder.ts`。三个后端的目录都包含两个 PMF、
+`metadata.json` 和 `model_bundle.json`。无需传 `--model-dir`；该参数只保留作自定义
+模型的显式覆盖。不要只替换其中某个文件；运行库会校验 profile、模型版本、固定
+尺寸和协议标识。
 
 ### 3.1 YUV 输入
 
@@ -181,7 +182,7 @@ ffmpeg -f lavfi -i testsrc2=size=640x360:rate=30 -frames:v 48 \
   -pix_fmt yuv420p -f rawvideo input.yuv
 ```
 
-### 4.1 Driver+cubin
+### 4.1 四种发布包
 
 编码：
 
@@ -201,24 +202,21 @@ ffmpeg -f lavfi -i testsrc2=size=640x360:rate=30 -frames:v 48 \
   --model-profile mlvc-psnr-v1 --device-id 0
 ```
 
-省略 `--model-profile` 时使用内嵌的 `mlvc-psnr-v1`。
+省略 `--model-profile` 时使用包内的 `mlvc-psnr-v1`。上述命令适用于全部四种归档。
 
-### 4.2 TensorRT
+### 4.2 TensorRT engine cache
 
 ```bash
-MLVC_MODEL_DIR="$MLVC_PREFIX/share/mlvc/models/mlvc-psnr-v1/640x368"
 MLVC_ENGINE_CACHE=/srv/mlvc-engine-cache
 
 "$MLVC_PREFIX/bin/mlvc_demo" encode \
   --input input.yuv --output output.mlvc \
   --width 640 --height 360 --frames 48 --q-index 21 \
-  --model-dir "$MLVC_MODEL_DIR" \
   --engine-cache-dir "$MLVC_ENGINE_CACHE" --device-id 0
 
 "$MLVC_PREFIX/bin/mlvc_demo" decode \
   --input output.mlvc --output reconstructed.yuv \
   --width 640 --height 360 --frames 48 \
-  --model-dir "$MLVC_MODEL_DIR" \
   --engine-cache-dir "$MLVC_ENGINE_CACHE" --device-id 0
 ```
 
@@ -235,6 +233,8 @@ TensorRT 首次运行某个 GPU、模型、TensorRT 版本和 workspace 组合�
 | `--device-id N`        | 当前命令使用的 CUDA ordinal           |
 | `--encode-device-id N` | encode 专用的 `--device-id` 别名      |
 | `--decode-device-id N` | decode 专用的 `--device-id` 别名      |
+| `--model-profile NAME` | 选择包内模型 profile                  |
+| `--model-dir DIR`      | 显式覆盖包内模型，仅用于自定义部署    |
 | `--workspace-mib N`    | 覆盖默认 4096 MiB workspace 上限      |
 | `--debug-dir DIR`      | 写出逐帧模型输入输出，供兼容性诊断    |
 
@@ -260,8 +260,8 @@ cat input.yuv \
   > reconstructed.yuv
 ```
 
-TensorRT 的两个命令需要分别增加相同的 `--model-dir` 和各自可访问的
-`--engine-cache-dir`。
+TensorRT 的两个命令应使用各自可访问的 `--engine-cache-dir`。选择非默认模型时，
+编码和解码命令还必须传入相同的 `--model-profile`。
 
 也可以使用 POSIX named FIFO。运行库会在每个 MLVC 帧写出后 flush，因此管道和
 FIFO 能提供操作系统级背压。不要每帧重启 CLI；每次重启都会重建 backend，并丢失
@@ -456,13 +456,10 @@ int main(void) {
     options.input_path = "input.yuv";
     options.output_path = "output.mlvc";
 
-    /* Driver+cubin: NULL 使用内嵌 mlvc-psnr-v1。 */
+    /* 所有发布包：NULL 使用包内默认 mlvc-psnr-v1。 */
     options.model_dir = NULL;
 
-    /* TensorRT 改为包内目录，并设置可写 cache：
-    options.model_dir =
-        "/opt/mlvc/mlvc_cpp-0.1.0-tensorrt-nvidia-linux-x86_64/"
-        "share/mlvc/models/mlvc-psnr-v1/640x368";
+    /* TensorRT 可设置可写 cache：
     options.engine_cache_dir = "/srv/mlvc-engine-cache";
     */
 
@@ -479,9 +476,9 @@ int main(void) {
 }
 ```
 
-Driver+cubin 的 C ABI 可用 `"embedded:mlvc-s-psnr-v1"` 选择小模型。传入结构体的
-字符串指针必须在函数返回前保持有效。失败时函数返回 `-1`，错误写入调用方 buffer；
-C++ 异常不会跨过 C ABI。
+Driver+cubin 的 C ABI 可用 `"embedded:mlvc-s-psnr-v1"` 选择小模型；其他三个后端
+可用 `"packaged:mlvc-s-psnr-v1"`。传入结构体的字符串指针必须在函数返回前保持
+有效。失败时函数返回 `-1`，错误写入调用方 buffer；C++ 异常不会跨过 C ABI。
 
 `workspace_mib == 0` 使用库默认的 4096 MiB。`input_path` 或 `output_path` 可以是
 `"-"`，也可以是普通文件或 FIFO 路径。
@@ -565,7 +562,7 @@ profile、最大尺寸、QP 范围、GPU 和资源配额配置为白名单。
 | `libmlvc_codec.so: cannot open shared object file` | 使用归档 CMake target、链接时设置 rpath，或检查应用的动态库搜索路径     |
 | `libcuda.so.1` 或 CUDA 初始化失败                  | 检查 NVIDIA 驱动、容器 GPU runtime、设备权限和 `nvidia-smi`             |
 | TensorRT/`libcudart.so.13` 找不到                  | 不要只复制单个 `.so`；保持归档 `bin/`、`lib/` 的相对布局                |
-| `--model-dir is required for this backend`         | TensorRT 必须指向包内具体 profile/尺寸目录                              |
+| `packaged model profile` 相关错误                  | 保持归档的 `lib/` 与 `share/mlvc/models/` 相对布局，并检查 profile 名称 |
 | `embedded model asset not found`                   | Driver+cubin 使用 `--list-model-profiles` 检查名称，不要混用外部 bundle |
 | 首次 TensorRT 启动很慢                             | 正常的 engine build；持久化并复用匹配的 cache                           |
 | `YUV420 dimensions` 或 plane 截断                  | 确认偶数宽高、I420 plane 顺序和每帧 `width*height*3/2` bytes            |

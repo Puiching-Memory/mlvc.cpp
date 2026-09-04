@@ -64,3 +64,59 @@ jobs:
           name: mlvc-cpp-driver-cubin-ci-${{ matrix.compiler }}
           path: packages/${{ matrix.compiler }}/*-ci.tar.gz
           if-no-files-found: error
+
+  framework-backends-compile:
+    # The package job only builds driver-cubin, so global warning policy
+    # changes (-Wall/-Wextra/-Wshadow/-Werror) are never exercised against
+    # the ONNX Runtime, libtorch, and TensorRT SDKs.  Compile all three
+    # framework backends to catch regressions that a driver-cubin-only CI
+    # cannot see.  Model bundles are gitignored, so this is a compile-only
+    # job; it does not run tests or produce archives.
+    name: compile framework backends under -Werror
+    runs-on: ubuntu-26.04
+    env:
+      CC: gcc
+      CXX: g++
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Cache pinned GPU SDKs
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/onnxruntime
+            third_party/libtorch
+          key: mlvc-sdks-${{ hashFiles('tools/dependencies.env') }}
+
+      - name: Bootstrap CUDA toolkit and pinned GPU SDKs
+        run: ./tools/bootstrap.sh --backend all
+
+      - name: Compile onnxruntime backend
+        run: |
+          cmake -S . -B build/ci-onnxruntime -DCMAKE_BUILD_TYPE=Release \
+            -DMLVC_SELECTED_BACKEND=onnxruntime \
+            -DMLVC_TEST_ASSETS_DIR="$PWD/models/fixtures" \
+            -DMLVC_ENABLE_IPO=ON -DMLVC_WARNINGS_AS_ERRORS=ON \
+            -DONNXRUNTIME_ROOT="$PWD/third_party/onnxruntime/onnxruntime-linux-x64-gpu-1.26.0"
+          cmake --build build/ci-onnxruntime --parallel 2
+
+      - name: Compile libtorch backend
+        run: |
+          cmake -S . -B build/ci-libtorch -DCMAKE_BUILD_TYPE=Release \
+            -DMLVC_SELECTED_BACKEND=libtorch \
+            -DMLVC_TEST_ASSETS_DIR="$PWD/models/fixtures" \
+            -DMLVC_ENABLE_IPO=ON -DMLVC_WARNINGS_AS_ERRORS=ON \
+            -DLIBTORCH_ROOT="$PWD/third_party/libtorch/2.13.0-cu130/libtorch"
+          cmake --build build/ci-libtorch --parallel 2
+
+      - name: Compile tensorrt backend
+        run: |
+          cmake -S . -B build/ci-tensorrt -DCMAKE_BUILD_TYPE=Release \
+            -DMLVC_SELECTED_BACKEND=tensorrt \
+            -DMLVC_TEST_ASSETS_DIR="$PWD/models/fixtures" \
+            -DMLVC_ENABLE_IPO=ON -DMLVC_WARNINGS_AS_ERRORS=ON
+          cmake --build build/ci-tensorrt --parallel 2

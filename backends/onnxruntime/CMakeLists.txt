@@ -1,7 +1,7 @@
 add_library(mlvc_backend_onnxruntime STATIC src/backend.cpp)
 set_target_properties(mlvc_backend_onnxruntime PROPERTIES
     POSITION_INDEPENDENT_CODE ON)
-target_include_directories(mlvc_backend_onnxruntime PRIVATE
+target_include_directories(mlvc_backend_onnxruntime SYSTEM PRIVATE
     "${ONNXRUNTIME_INCLUDE_DIR}")
 target_link_libraries(mlvc_backend_onnxruntime PRIVATE
     mlvc_runtime

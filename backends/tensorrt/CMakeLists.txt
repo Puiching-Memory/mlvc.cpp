@@ -1,7 +1,7 @@
 add_library(mlvc_backend_tensorrt STATIC src/backend.cpp)
 set_target_properties(mlvc_backend_tensorrt PROPERTIES
     POSITION_INDEPENDENT_CODE ON)
-target_include_directories(mlvc_backend_tensorrt PRIVATE
+target_include_directories(mlvc_backend_tensorrt SYSTEM PRIVATE
     "${TENSORRT_INCLUDE_DIR}"
     "${CUDAToolkit_INCLUDE_DIRS}"
     "${NLOHMANN_JSON_DIR}/single_include")

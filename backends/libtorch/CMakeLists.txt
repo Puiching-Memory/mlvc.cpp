@@ -1,7 +1,7 @@
 add_library(mlvc_backend_libtorch STATIC src/backend.cpp)
 set_target_properties(mlvc_backend_libtorch PROPERTIES
     POSITION_INDEPENDENT_CODE ON)
-target_include_directories(mlvc_backend_libtorch PRIVATE
+target_include_directories(mlvc_backend_libtorch SYSTEM PRIVATE
     ${TORCH_INCLUDE_DIRS})
 target_link_libraries(mlvc_backend_libtorch PRIVATE
     mlvc_runtime

@@ -31,10 +31,10 @@ codec、GOP、熵编码和 YUV pipeline；推理实现、依赖、性能及 FP16
 
 | 归档         | 大小（bytes） | SHA-256                                                            |
 | ------------ | ------------: | ------------------------------------------------------------------ |
-| Driver+cubin |   145,604,536 | `d61fd32eb7eabd6e82bce0402f9ac49b255139faed3fb31e12797cb4849ae6f1` |
-| ONNX Runtime |   634,265,317 | `e7392d550e5ee56ea77db303d96b829658dc364d7a2d62905a0b830e966f2cb9` |
-| libtorch     | 1,344,965,552 | `d535a6ccd55d27ac0251414ebe9b6a60eecf0eb00c15583c94ea9790173f89a8` |
-| TensorRT     | 2,129,064,826 | `d823d2b8dd0bb5494fb3b2aae4e036b55e079acc15cf7647e047dde755e4ba60` |
+| Driver+cubin |   145,719,208 | `91e68632dbce21e4b7b57688fcc2115a7c37b306112f289ae2d1cda7dc48112f` |
+| ONNX Runtime |   634,273,970 | `f106c1bbef6ff8966c5d192029ef7907dc037722c06bc9ef2da82c284cf288f7` |
+| libtorch     | 1,344,967,432 | `a64f4ba1b40d22f06233ca66008e199703627aeb8b516d1dcbacb4c370c89eae` |
+| TensorRT     | 2,129,086,071 | `afe58656cd737f04ab789660a0e9eaf7ec72df97567bdaf717ec559c28c14cf5` |
 
 部署前应从可信渠道获得归档，并校验完整 SHA-256。归档内的 `SHA256SUMS` 用于校验
 解包后的文件。

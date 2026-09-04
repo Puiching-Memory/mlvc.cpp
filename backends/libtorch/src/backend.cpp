@@ -168,14 +168,14 @@ public:
         for (StateBinding& binding : state_bindings_) {
             if (binding.spec.output_index >= at_outputs.size())
                 throw std::runtime_error("libtorch: state output index is out of range");
-            at::Tensor& output = at_outputs[binding.spec.output_index];
-            if (output.scalar_type() !=
+            at::Tensor& state_output = at_outputs[binding.spec.output_index];
+            if (state_output.scalar_type() !=
                     torch_data_type(binding.spec.data_type) ||
-                output.sizes() != at::IntArrayRef(binding.spec.shape)) {
+                state_output.sizes() != at::IntArrayRef(binding.spec.shape)) {
                 throw std::runtime_error(
                     "libtorch: state tensor shape or dtype mismatch");
             }
-            binding.tensor = output;
+            binding.tensor = state_output;
         }
 
         std::vector<Tensor> result;

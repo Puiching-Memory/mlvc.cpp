@@ -20,6 +20,19 @@ proprietary input supplied for analysis and is intentionally not committed.
   upsample, anisotropic reconstruction, padded-window, and ray-reconstruction
   layers
 
+The network-kernel families expose both NHWC and channel-packed NCHW8 variants.
+Several entry names describe whole subgraphs rather than single operators, for
+example `bilinear_upsample_conv_1x1_conv_1x1`, `conv_3x3_pool`, and
+`conv_3x3_pool_conv_1x1_pool`. The SM80 images inspected for these families use
+roughly 16-49 KiB of shared memory per block. A representative 128x128 FP16
+pointwise image uses 194 registers per thread and 24 KiB of shared memory.
+
+Runtime strings also identify recycled buffer resources, three tensor
+containers, an alias tensor container, a shared weights buffer, and fused
+engine input/output kernels. These observations reinforce that layout,
+lifetime planning, and pre/post-processing are part of the compiled schedule;
+they are not left to a generic operator interpreter.
+
 The evidence shows an ahead-of-time kernel runtime, not an embedded general
 inference framework. Model layers are represented by fixed-shape, heavily
 fused cubin kernels and selected through an internal kernel map.
@@ -38,6 +51,24 @@ The equivalent deployment boundary is:
    `cuModuleGetFunction`, and dispatch with `cuLaunchKernel`.
 6. Keep weights, DPB/history, and intermediate tensor arenas resident on the
    device.
+
+## Applied optimization lesson
+
+The encoder's recurrent-feature tail previously replayed 12 graph nodes: three
+channel slices, two sigmoids, six binary operations, and a concat. Following
+the DLL's fused input/output-kernel pattern, mlvc.cpp now recognizes this exact
+dependency chain and dispatches one `mlvc_feature_update_fp16` kernel. The
+kernel writes the next recurrent state in place and retains every intermediate
+FP16 rounding point, so it remains byte-identical to the unfused graph for both
+embedded model profiles.
+
+Two other ideas were measured and rejected on A30 rather than retained on
+architectural similarity alone. Forcing the existing single-kernel
+Conv+ReGLU implementation instead of CUTLASS plus the vectorized ReGLU kernel
+regressed encoder latency by about 4%. Reducing the hottest CUTLASS pointwise
+pipeline from four stages to two increased register use from 228 to 248 and
+regressed latency by about 2.5%. The DLL's resource figures therefore serve as
+directional evidence, not portable launch parameters.
 
 Unlike the inspected DLL, mlvc.cpp intentionally requires the NVIDIA driver at
 program load time. It does not dynamically fall back when the driver is absent.

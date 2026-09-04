@@ -66,6 +66,23 @@ from a per-GPU timing table or an offline autotune database.
 | Encoder |        244.8031 |            12.7472 |          3.5521 |         3.589x |     68.917x |
 | Decoder |        251.4018 |            12.6680 |          3.2853 |         3.856x |     76.523x |
 
+### 2026-09-04 recurrent-feature fusion
+
+The encoder tail now fuses a fixed 12-node recurrent-feature update into one
+kernel while preserving the original FP16 rounding boundaries. A controlled
+A/B on an A30 used six interleaved processes per variant, 50 warm-up iterations
+and 300 measured iterations per process. GPU clocks remained unlocked.
+
+| Variant                         | Median-of-runs mean ms | Median-of-runs p50 ms |
+| ------------------------------- | ---------------------: | --------------------: |
+| Unfused 12-node tail            |                 3.4646 |                3.4635 |
+| Fused `mlvc_feature_update_fp16` |                 3.3992 |                3.3981 |
+
+The fused path reduced both measures by 1.9%. The standard and small embedded
+model profiles produced byte-identical output tensor files with the fusion
+enabled and disabled. This focused A/B is additive to, rather than a
+replacement for, the multi-backend table above.
+
 ## Accuracy
 
 The reference is the upstream PyTorch conversion-loop output rounded to FP16.

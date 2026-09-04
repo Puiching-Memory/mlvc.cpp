@@ -385,6 +385,7 @@ public:
         binary_ = module_.function("mlvc_binary_fp16");
         binary_contiguous_ = module_.function("mlvc_binary_contiguous_fp16");
         unary_ = module_.function("mlvc_unary_fp16");
+        feature_update_ = module_.function("mlvc_feature_update_fp16");
         reglu_ = module_.function("mlvc_reglu_fp16");
         reglu_vec8_ = module_.function("mlvc_reglu_vec8_fp16");
         convolution_ = module_.function("mlvc_conv_fp16");
@@ -715,7 +716,9 @@ private:
     {
         const auto& nodes = manifest_.at("nodes");
         for (std::size_t index = 0; index < nodes.size();) {
-            if (try_execute_pointwise_reglu(nodes, index))
+            if (try_execute_feature_update(nodes, index))
+                index += 12;
+            else if (try_execute_pointwise_reglu(nodes, index))
                 index += 5;
             else if (try_execute_pointwise_epilogue(nodes, index))
                 index += 2;
@@ -724,6 +727,136 @@ private:
             else
                 execute(nodes.at(index++));
         }
+    }
+
+    bool try_execute_feature_update(const json& nodes, std::size_t index)
+    {
+        if (index + 11 >= nodes.size())
+            return false;
+        static constexpr std::array<const char*, 12> operations{
+            "Slice", "Slice", "Slice", "Sigmoid", "Sigmoid", "Mul",
+            "Sub", "Mul", "Add", "Mul", "Mul", "Concat"};
+        for (std::size_t offset = 0; offset < operations.size(); ++offset) {
+            if (nodes.at(index + offset).at("op") != operations[offset])
+                return false;
+        }
+
+        auto inputs = [&](std::size_t offset) {
+            return nodes.at(index + offset).at("inputs")
+                .get<std::vector<std::string>>();
+        };
+        auto output = [&](std::size_t offset) -> std::string {
+            const auto names = nodes.at(index + offset).at("outputs")
+                .get<std::vector<std::string>>();
+            return names.size() == 1 ? names[0] : std::string{};
+        };
+
+        const auto slice0_inputs = inputs(0);
+        const auto slice1_inputs = inputs(1);
+        const auto slice2_inputs = inputs(2);
+        if (slice0_inputs.empty() || slice1_inputs.empty() ||
+            slice2_inputs.empty() || slice0_inputs[0] != slice1_inputs[0] ||
+            slice0_inputs[0] != slice2_inputs[0]) {
+            return false;
+        }
+        const std::string slice0 = output(0);
+        const std::string slice1 = output(1);
+        const std::string slice2 = output(2);
+        const std::string sigmoid0 = output(3);
+        const std::string sigmoid1 = output(4);
+        const std::string weighted1 = output(5);
+        const std::string inverse_gate = output(6);
+        const std::string weighted0 = output(7);
+        const std::string blended = output(8);
+        const std::string gated = output(9);
+        const std::string scaled = output(10);
+        const std::string result_name = output(11);
+        if (slice0.empty() || slice1.empty() || slice2.empty() ||
+            sigmoid0.empty() || sigmoid1.empty() || weighted1.empty() ||
+            inverse_gate.empty() || weighted0.empty() || blended.empty() ||
+            gated.empty() || scaled.empty() || result_name.empty() ||
+            inputs(3) != std::vector<std::string>{slice1} ||
+            inputs(4) != std::vector<std::string>{slice2} ||
+            inputs(5).size() != 2 || inputs(5)[0] != sigmoid0 ||
+            inputs(6).size() != 2 || inputs(6)[1] != sigmoid0 ||
+            inputs(7) != std::vector<std::string>{inverse_gate, slice0} ||
+            inputs(8) != std::vector<std::string>{weighted1, weighted0} ||
+            inputs(9) != std::vector<std::string>{sigmoid1, blended} ||
+            inputs(10).size() != 2 || inputs(10)[0] != gated ||
+            inputs(11) != std::vector<std::string>{scaled, blended} ||
+            nodes.at(index + 11).at("attributes").at("axis").get<int>() != 1) {
+            return false;
+        }
+
+        auto consumer_count = [&](const std::string& name) {
+            std::size_t count = 0;
+            for (const auto& candidate : nodes) {
+                const auto candidate_inputs = candidate.at("inputs")
+                    .get<std::vector<std::string>>();
+                count += static_cast<std::size_t>(std::count(
+                    candidate_inputs.begin(), candidate_inputs.end(), name));
+            }
+            return count;
+        };
+        const std::array<std::pair<const std::string*, std::size_t>, 11>
+            expected_consumers{{
+                {&slice0, 1}, {&slice1, 1}, {&slice2, 1}, {&sigmoid0, 2},
+                {&sigmoid1, 1}, {&weighted1, 1}, {&inverse_gate, 1},
+                {&weighted0, 1}, {&blended, 2}, {&gated, 1}, {&scaled, 1}}};
+        for (const auto& [name, expected] : expected_consumers) {
+            if (consumer_count(*name) != expected)
+                return false;
+        }
+
+        const Value& source = value(slice0_inputs[0]);
+        const Value& first = value(slice0);
+        const Value& history = value(inputs(5)[1]);
+        const Value& scale = value(inputs(10)[1]);
+        const Value& result = value(result_name);
+        if (source.dtype != "fp16" || first.dtype != "fp16" ||
+            history.dtype != "fp16" || scale.dtype != "fp16" ||
+            result.dtype != "fp16" ||
+            source.shape.size() != 4 || first.shape.size() != 4 ||
+            result.shape.size() != 4 || first.shape[0] != source.shape[0] ||
+            source.shape[1] != first.shape[1] * 3 ||
+            result.shape[0] != first.shape[0] ||
+            result.shape[1] != first.shape[1] * 2 ||
+            result.shape[2] != first.shape[2] ||
+            result.shape[3] != first.shape[3] ||
+            history.shape != first.shape ||
+            scale.shape != std::vector<int64_t>{1, first.shape[1], 1, 1} ||
+            value(slice1).shape != first.shape ||
+            value(slice2).shape != first.shape ||
+            scalar_fp16(inputs(6)[0]) != 1.0F) {
+            return false;
+        }
+        for (std::size_t offset = 3; offset <= 10; ++offset) {
+            if (value(output(offset)).dtype != "fp16" ||
+                value(output(offset)).shape != first.shape) {
+                return false;
+            }
+        }
+
+        int channels = static_cast<int>(first.shape[1]);
+        if (!is_channel_slice(nodes.at(index), 0, channels) ||
+            !is_channel_slice(nodes.at(index + 1), channels, channels * 2) ||
+            !is_channel_slice(nodes.at(index + 2), channels * 2, channels * 3)) {
+            return false;
+        }
+
+        DeviceAddress source_address = source.address;
+        DeviceAddress history_address = history.address;
+        DeviceAddress scale_address = scale.address;
+        DeviceAddress result_address = result.address;
+        int batch_count = static_cast<int>(first.shape[0]);
+        int spatial_count = static_cast<int>(first.shape[2] * first.shape[3]);
+        void* parameters[] = {
+            &source_address, &history_address, &scale_address, &result_address,
+            &batch_count, &channels, &spatial_count};
+        const std::size_t pairs = static_cast<std::size_t>(batch_count) *
+            channels * ((spatial_count + 1) / 2);
+        launch_linear(feature_update_, pairs, parameters);
+        return true;
     }
 
     bool launch_cutlass_spatial(
@@ -1595,6 +1728,7 @@ private:
     driver::abi::Function binary_ = nullptr;
     driver::abi::Function binary_contiguous_ = nullptr;
     driver::abi::Function unary_ = nullptr;
+    driver::abi::Function feature_update_ = nullptr;
     driver::abi::Function reglu_ = nullptr;
     driver::abi::Function reglu_vec8_ = nullptr;
     driver::abi::Function convolution_ = nullptr;

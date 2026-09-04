@@ -355,15 +355,31 @@ def replace_file(path: Path, content: bytes) -> None:
         raise
 
 
+def depfile_escape(path: Path) -> str:
+    return (
+        str(path.resolve())
+        .replace("\\", "\\\\")
+        .replace(" ", "\\ ")
+        .replace("#", "\\#")
+        .replace("$", "$$")
+    )
+
+
 def embed(args: argparse.Namespace) -> None:
     model_root = args.model_root.resolve()
     profiles = load_json(PROFILE_PATH)["profiles"]
     payload = bytearray()
     index: list[tuple[str, str, int, int]] = []
+    dependencies = {PROFILE_PATH.resolve()}
 
     for profile, registration in profiles.items():
         source_dir = find_source_bundle(model_root, profile)
+        dependencies.add((source_dir / "model_bundle.json").resolve())
         source_manifest = verify_package(source_dir)
+        dependencies.update(
+            (source_dir / record["path"]).resolve()
+            for record in source_manifest["artifacts"].values()
+        )
         if source_manifest.get("profile") != profile:
             raise ValueError(
                 f"bundle profile mismatch: {source_dir} describes "
@@ -394,8 +410,18 @@ def embed(args: argparse.Namespace) -> None:
         f"    {{{json.dumps(profile)}, {json.dumps(name)}, {offset}, {size}}},\n"
         for profile, name, offset, size in index
     ).encode()
-    replace_file(args.output_data.resolve(), bytes(payload))
-    replace_file(args.output_index.resolve(), index_source)
+    output_data = args.output_data.resolve()
+    output_index = args.output_index.resolve()
+    replace_file(output_data, bytes(payload))
+    replace_file(output_index, index_source)
+    if args.depfile is not None:
+        targets = f"{depfile_escape(output_data)} {depfile_escape(output_index)}"
+        prerequisites = " ".join(
+            depfile_escape(path) for path in sorted(dependencies)
+        )
+        replace_file(
+            args.depfile.resolve(), f"{targets}: {prerequisites}\n".encode()
+        )
     print(
         f"embedded {len(profiles)} driver-cubin profiles: "
         f"{len(index)} assets, {len(payload)} bytes"
@@ -434,6 +460,7 @@ def main() -> None:
     embed_parser.add_argument("--model-root", type=Path, required=True)
     embed_parser.add_argument("--output-data", type=Path, required=True)
     embed_parser.add_argument("--output-index", type=Path, required=True)
+    embed_parser.add_argument("--depfile", type=Path)
     embed_parser.set_defaults(action=embed)
 
     args = parser.parse_args()

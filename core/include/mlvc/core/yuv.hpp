@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <istream>
 #include <ostream>
+#include <span>
 #include <vector>
 
 namespace mlvc {
@@ -18,25 +19,46 @@ struct Yuv420Frame {
     std::vector<std::uint8_t> v;
 };
 
-struct Yuv420FrameView {
-    int width = 0;
-    int height = 0;
-    const std::uint8_t* y = nullptr;
-    const std::uint8_t* u = nullptr;
-    const std::uint8_t* v = nullptr;
+class Yuv420FrameView {
+public:
+    Yuv420FrameView(int width, int height, std::span<const std::uint8_t> y,
+                    std::span<const std::uint8_t> u,
+                    std::span<const std::uint8_t> v);
+
+    int width() const noexcept { return width_; }
+    int height() const noexcept { return height_; }
+    std::span<const std::uint8_t> y() const noexcept { return y_; }
+    std::span<const std::uint8_t> u() const noexcept { return u_; }
+    std::span<const std::uint8_t> v() const noexcept { return v_; }
+
+private:
+    int width_;
+    int height_;
+    std::span<const std::uint8_t> y_;
+    std::span<const std::uint8_t> u_;
+    std::span<const std::uint8_t> v_;
 };
 
-struct MutableYuv420FrameView {
-    int width = 0;
-    int height = 0;
-    std::uint8_t* y = nullptr;
-    std::uint8_t* u = nullptr;
-    std::uint8_t* v = nullptr;
+class MutableYuv420FrameView {
+public:
+    MutableYuv420FrameView(int width, int height, std::span<std::uint8_t> y,
+                           std::span<std::uint8_t> u,
+                           std::span<std::uint8_t> v);
 
-    operator Yuv420FrameView() const noexcept
-    {
-        return Yuv420FrameView{width, height, y, u, v};
-    }
+    int width() const noexcept { return width_; }
+    int height() const noexcept { return height_; }
+    std::span<std::uint8_t> y() const noexcept { return y_; }
+    std::span<std::uint8_t> u() const noexcept { return u_; }
+    std::span<std::uint8_t> v() const noexcept { return v_; }
+
+    operator Yuv420FrameView() const;
+
+private:
+    int width_;
+    int height_;
+    std::span<std::uint8_t> y_;
+    std::span<std::uint8_t> u_;
+    std::span<std::uint8_t> v_;
 };
 
 struct FramePadding {
@@ -53,8 +75,8 @@ bool read_yuv420_frame(std::istream& input, MutableYuv420FrameView frame);
 void write_yuv420_frame(std::ostream& output, const Yuv420Frame& frame);
 void write_yuv420_frame(std::ostream& output, Yuv420FrameView frame);
 
-Yuv420FrameView yuv420_view(const Yuv420Frame& frame) noexcept;
-MutableYuv420FrameView mutable_yuv420_view(Yuv420Frame& frame) noexcept;
+Yuv420FrameView yuv420_view(const Yuv420Frame& frame);
+MutableYuv420FrameView mutable_yuv420_view(Yuv420Frame& frame);
 
 FramePadding frame_padding(int width, int height,
                            int model_width, int model_height);

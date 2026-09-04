@@ -24,6 +24,9 @@ endif()
 option(MLVC_ENABLE_IPO "Enable interprocedural optimization in Release builds" ON)
 option(MLVC_EMBED_MODELS
     "Embed canonical model bundles in driver-cubin builds" ON)
+option(MLVC_WARNINGS_AS_ERRORS "Treat project warnings as errors" OFF)
+option(MLVC_ENABLE_SANITIZERS
+    "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
 set(MLVC_SELECTED_BACKEND "onnxruntime" CACHE STRING
     "Inference backend: onnxruntime, libtorch, tensorrt, or driver_cubin")
 set_property(CACHE MLVC_SELECTED_BACKEND PROPERTY STRINGS
@@ -59,6 +62,31 @@ function(mlvc_enable_ipo target)
         set_property(TARGET "${target}"
             PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     endif()
+endfunction()
+
+add_library(mlvc_project_options INTERFACE)
+target_compile_options(mlvc_project_options INTERFACE
+    "$<$<COMPILE_LANG_AND_ID:C,GNU,Clang,AppleClang>:-Wall;-Wextra;-Wpedantic;-Wformat=2;-Wshadow;-Wundef>"
+    "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-Wall;-Wextra;-Wpedantic;-Wformat=2;-Wshadow;-Wundef>")
+if(MLVC_WARNINGS_AS_ERRORS)
+    target_compile_options(mlvc_project_options INTERFACE
+        "$<$<COMPILE_LANG_AND_ID:C,GNU,Clang,AppleClang>:-Werror>"
+        "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-Werror>")
+endif()
+if(MLVC_ENABLE_SANITIZERS)
+    if(NOT CMAKE_C_COMPILER_ID MATCHES "GNU|Clang" OR
+       NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        message(FATAL_ERROR "MLVC sanitizers require GCC or Clang")
+    endif()
+    target_compile_options(mlvc_project_options INTERFACE
+        -fno-omit-frame-pointer -fno-sanitize-recover=all
+        -fsanitize=address,undefined)
+    target_link_options(mlvc_project_options INTERFACE
+        -fno-sanitize-recover=all -fsanitize=address,undefined)
+endif()
+
+function(mlvc_configure_target target)
+    target_link_libraries("${target}" PRIVATE mlvc_project_options)
 endfunction()
 
 include(cmake/Dependencies.cmake)

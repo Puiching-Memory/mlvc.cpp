@@ -3,6 +3,7 @@
 #include <array>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 
 namespace mlvc {
 namespace {
@@ -23,7 +24,8 @@ void store_u32_le(std::byte* data, std::uint32_t value)
 
 }  // namespace
 
-bool read_encoded_frame(std::istream& input, EncodedFrame& frame)
+bool read_encoded_frame(std::istream& input, EncodedFrame& frame,
+                        std::size_t max_payload_bytes)
 {
     std::array<std::byte, 8> header{};
     input.read(reinterpret_cast<char*>(header.data()), header.size());
@@ -32,18 +34,23 @@ bool read_encoded_frame(std::istream& input, EncodedFrame& frame)
     if (input.gcount() != static_cast<std::streamsize>(header.size()))
         throw std::runtime_error("truncated MLVC frame header");
 
-    frame.q_index = static_cast<std::int32_t>(load_u32_le(header.data()));
+    EncodedFrame decoded;
+    decoded.q_index = static_cast<std::int32_t>(load_u32_le(header.data()));
     const std::uint32_t payload_size = load_u32_le(header.data() + 4);
-    frame.payload.resize(payload_size);
-    input.read(reinterpret_cast<char*>(frame.payload.data()), payload_size);
+    if (payload_size > max_payload_bytes)
+        throw std::runtime_error("MLVC frame payload exceeds the configured limit");
+    decoded.payload.resize(payload_size);
+    input.read(reinterpret_cast<char*>(decoded.payload.data()), payload_size);
     if (input.gcount() != static_cast<std::streamsize>(payload_size))
         throw std::runtime_error("truncated MLVC frame payload");
+    frame = std::move(decoded);
     return true;
 }
 
 void write_encoded_frame(std::ostream& output, const EncodedFrame& frame)
 {
-    if (frame.payload.size() > std::numeric_limits<std::uint32_t>::max())
+    if (frame.payload.size() > std::numeric_limits<std::uint32_t>::max() ||
+        frame.payload.size() > kMaxEncodedFramePayloadBytes)
         throw std::runtime_error("MLVC frame payload is too large");
     std::array<std::byte, 8> header{};
     store_u32_le(header.data(), static_cast<std::uint32_t>(frame.q_index));

@@ -10,6 +10,7 @@ target_link_libraries(mlvc_backend_tensorrt PRIVATE
     "${NVINFER_LIBRARY}"
     "${NVONNXPARSER_LIBRARY}"
     CUDA::cudart)
+mlvc_configure_target(mlvc_backend_tensorrt)
 mlvc_enable_ipo(mlvc_backend_tensorrt)
 
 file(GLOB _tensorrt_runtime_libraries

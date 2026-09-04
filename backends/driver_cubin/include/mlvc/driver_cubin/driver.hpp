@@ -94,6 +94,32 @@ private:
     std::size_t size_ = 0;
 };
 
+class PinnedHostBuffer final {
+public:
+    PinnedHostBuffer() = default;
+    ~PinnedHostBuffer();
+
+    PinnedHostBuffer(const PinnedHostBuffer&) = delete;
+    PinnedHostBuffer& operator=(const PinnedHostBuffer&) = delete;
+    PinnedHostBuffer(PinnedHostBuffer&& other) noexcept;
+    PinnedHostBuffer& operator=(PinnedHostBuffer&& other) noexcept;
+
+    void* data() noexcept { return data_; }
+    const void* data() const noexcept { return data_; }
+    std::size_t size() const noexcept { return size_; }
+    explicit operator bool() const noexcept { return data_ != nullptr; }
+
+private:
+    friend class Driver;
+    PinnedHostBuffer(std::shared_ptr<DriverState> state, void* data,
+                     std::size_t size);
+    void reset() noexcept;
+
+    std::shared_ptr<DriverState> state_;
+    void* data_ = nullptr;
+    std::size_t size_ = 0;
+};
+
 class Module final {
 public:
     Module() = default;
@@ -128,9 +154,8 @@ public:
     const DeviceInfo& device_info() const noexcept;
 
     DeviceBuffer allocate(std::size_t bytes) const;
+    PinnedHostBuffer allocate_host_pinned(std::size_t bytes) const;
     Event create_event() const;
-    void* allocate_host_pinned(std::size_t bytes) const;
-    void free_host_pinned(void* pointer) const;
     bool pin_host(const void* host_pointer, std::size_t bytes) const;
     Module load_module(std::span<const std::byte> image) const;
 

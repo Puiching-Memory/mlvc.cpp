@@ -22,6 +22,7 @@ target_link_libraries(mlvc_codec PRIVATE
     msrtc_rans
     nlohmann_json::nlohmann_json
     ${CMAKE_DL_LIBS})
+mlvc_configure_target(mlvc_codec)
 mlvc_enable_ipo(mlvc_codec)
 
 install(TARGETS mlvc_codec

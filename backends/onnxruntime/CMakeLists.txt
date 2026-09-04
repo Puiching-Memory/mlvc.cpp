@@ -6,6 +6,7 @@ target_include_directories(mlvc_backend_onnxruntime PRIVATE
 target_link_libraries(mlvc_backend_onnxruntime PRIVATE
     mlvc_runtime
     "${ONNXRUNTIME_LIBRARY}")
+mlvc_configure_target(mlvc_backend_onnxruntime)
 mlvc_enable_ipo(mlvc_backend_onnxruntime)
 
 file(GLOB _onnxruntime_runtime_libraries

@@ -24,13 +24,11 @@ void extract_scales(TensorView z_raw, const ModelConfig& config,
     const std::vector<int64_t> expected{
         1, config.hyperprior_channels,
         config.hyperprior_height(), config.hyperprior_width()};
-    if (z_raw.data_type != TensorDataType::kFloat16 ||
-        !std::equal(z_raw.shape.begin(), z_raw.shape.end(),
-                    expected.begin(), expected.end()) ||
-        z_raw.shape.size() != expected.size() ||
-        z_raw.bytes != static_cast<std::size_t>(config.hyperprior_channels) *
-            config.hyperprior_height() * config.hyperprior_width() *
-            sizeof(Float16Storage)) {
+    const std::span<const std::int64_t> shape = z_raw.shape();
+    if (z_raw.data_type() != TensorDataType::kFloat16 ||
+        shape.size() != expected.size() ||
+        !std::equal(shape.begin(), shape.end(), expected.begin()) ||
+        z_raw.element_count() != checked_tensor_element_count(expected)) {
         throw std::runtime_error("z_raw shape or dtype does not match model metadata");
     }
 
@@ -42,7 +40,7 @@ void extract_scales(TensorView z_raw, const ModelConfig& config,
     const int z_height = config.hyperprior_height();
     const int z_width = config.hyperprior_width();
     const int spatial_repeat = config.downsample_hyperprior;
-    const auto* z = static_cast<const Float16Storage*>(z_raw.data);
+    const std::span<const Float16Storage> z = z_raw.fp16_data();
     const std::size_t output_count =
         static_cast<std::size_t>(half_channels) * y_height * y_width;
     scales_0.resize(output_count);

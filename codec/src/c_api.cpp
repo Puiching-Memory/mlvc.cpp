@@ -9,6 +9,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 
 namespace {
 
@@ -19,6 +20,10 @@ const char* nonnull(const char* value)
 
 mlvc::CodecOptions convert_options(const mlvc_codec_options& source)
 {
+    if (source.struct_size < MLVC_CODEC_OPTIONS_V1_SIZE)
+        throw std::runtime_error("options structure is smaller than ABI v1");
+    if (source.abi_version != MLVC_CODEC_ABI_VERSION)
+        throw std::runtime_error("unsupported options ABI version");
     mlvc::CodecOptions result;
     result.width = source.width;
     result.height = source.height;
@@ -40,6 +45,16 @@ mlvc::CodecOptions convert_options(const mlvc_codec_options& source)
     return result;
 }
 
+void validate_stats_target(const mlvc_codec_stats* target)
+{
+    if (!target)
+        return;
+    if (target->struct_size < MLVC_CODEC_STATS_V1_SIZE)
+        throw std::runtime_error("stats structure is smaller than ABI v1");
+    if (target->abi_version != MLVC_CODEC_ABI_VERSION)
+        throw std::runtime_error("unsupported stats ABI version");
+}
+
 void copy_stats(const mlvc::CodecStats& source, mlvc_codec_stats* target)
 {
     if (!target)
@@ -50,7 +65,8 @@ void copy_stats(const mlvc::CodecStats& source, mlvc_codec_stats* target)
     target->elapsed_seconds = source.elapsed_seconds;
 }
 
-int fail(const std::string& message, char* error_buffer, size_t error_capacity)
+int fail(std::string_view message, char* error_buffer,
+         size_t error_capacity) noexcept
 {
     if (error_buffer && error_capacity != 0) {
         const size_t count = std::min(error_capacity - 1, message.size());
@@ -62,11 +78,13 @@ int fail(const std::string& message, char* error_buffer, size_t error_capacity)
 
 template <typename Operation>
 int invoke(const mlvc_codec_options* options, mlvc_codec_stats* stats,
-           char* error_buffer, size_t error_capacity, Operation&& operation)
+           char* error_buffer, size_t error_capacity,
+           Operation&& operation) noexcept
 {
     try {
         if (!options)
             throw std::runtime_error("options must not be null");
+        validate_stats_target(stats);
         copy_stats(operation(convert_options(*options)), stats);
         if (error_buffer && error_capacity != 0)
             error_buffer[0] = '\0';
@@ -81,25 +99,37 @@ int invoke(const mlvc_codec_options* options, mlvc_codec_stats* stats,
 }  // namespace
 
 extern "C" MLVC_CODEC_API void mlvc_codec_options_init(mlvc_codec_options* options)
+    noexcept
 {
     if (!options)
         return;
     *options = mlvc_codec_options{};
+    options->struct_size = MLVC_CODEC_OPTIONS_V1_SIZE;
+    options->abi_version = MLVC_CODEC_ABI_VERSION;
     options->width = 640;
     options->height = 360;
     options->q_index = 21;
     options->device_id = 0;
 }
 
-extern "C" MLVC_CODEC_API const char* mlvc_backend_name(void)
+extern "C" MLVC_CODEC_API void mlvc_codec_stats_init(mlvc_codec_stats* stats)
+    noexcept
 {
-    static const std::string name(mlvc::compiled_backend_name());
-    return name.c_str();
+    if (!stats)
+        return;
+    *stats = mlvc_codec_stats{};
+    stats->struct_size = MLVC_CODEC_STATS_V1_SIZE;
+    stats->abi_version = MLVC_CODEC_ABI_VERSION;
+}
+
+extern "C" MLVC_CODEC_API const char* mlvc_backend_name(void) noexcept
+{
+    return mlvc::compiled_backend_name_c_str();
 }
 
 extern "C" MLVC_CODEC_API int mlvc_encode(
     const mlvc_codec_options* options, mlvc_codec_stats* stats,
-    char* error_buffer, size_t error_capacity)
+    char* error_buffer, size_t error_capacity) noexcept
 {
     return invoke(options, stats, error_buffer, error_capacity,
                   [](const mlvc::CodecOptions& converted) {
@@ -109,7 +139,7 @@ extern "C" MLVC_CODEC_API int mlvc_encode(
 
 extern "C" MLVC_CODEC_API int mlvc_decode(
     const mlvc_codec_options* options, mlvc_codec_stats* stats,
-    char* error_buffer, size_t error_capacity)
+    char* error_buffer, size_t error_capacity) noexcept
 {
     return invoke(options, stats, error_buffer, error_capacity,
                   [](const mlvc::CodecOptions& converted) {

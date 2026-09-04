@@ -133,18 +133,15 @@ void integer_values_f16c(const Float16Storage* source, std::int32_t* result,
 
 void integer_values(TensorView tensor, std::vector<std::int32_t>& result)
 {
-    if (tensor.data_type != TensorDataType::kFloat16 ||
-        tensor.bytes % sizeof(Float16Storage) != 0 || !tensor.data) {
+    if (tensor.data_type() != TensorDataType::kFloat16)
         throw std::runtime_error("entropy input must be FP16");
-    }
-    const std::size_t count = tensor.bytes / sizeof(Float16Storage);
-    result.resize(count);
-    const auto* source = static_cast<const Float16Storage*>(tensor.data);
+    const std::span<const Float16Storage> source = tensor.fp16_data();
+    result.resize(source.size());
     if (__builtin_cpu_supports("f16c") && __builtin_cpu_supports("avx2")) {
-        integer_values_f16c(source, result.data(), count);
+        integer_values_f16c(source.data(), result.data(), source.size());
         return;
     }
-    for (std::size_t i = 0; i < count; ++i) {
+    for (std::size_t i = 0; i < source.size(); ++i) {
         const float value = half_to_float(source[i]);
         if (!std::isfinite(value) || value < -32768.0F || value > 32767.0F)
             throw std::runtime_error(
@@ -173,14 +170,13 @@ void fp16_values_f16c(const std::int32_t* values, Float16Storage* storage,
 void fp16_values(const std::vector<std::int32_t>& values,
                  MutableTensorView destination)
 {
-    if (destination.data_type != TensorDataType::kFloat16 ||
-        destination.bytes != values.size() * sizeof(Float16Storage) ||
-        !destination.data) {
+    if (destination.data_type() != TensorDataType::kFloat16 ||
+        destination.element_count() != values.size()) {
         throw std::runtime_error("entropy output must be matching FP16 storage");
     }
-    auto* storage = static_cast<Float16Storage*>(destination.data);
+    const std::span<Float16Storage> storage = destination.fp16_data();
     if (__builtin_cpu_supports("f16c") && __builtin_cpu_supports("avx2")) {
-        fp16_values_f16c(values.data(), storage, values.size());
+        fp16_values_f16c(values.data(), storage.data(), values.size());
         return;
     }
     for (std::size_t i = 0; i < values.size(); ++i)
@@ -360,9 +356,9 @@ void EntropyCodec::decode_into(
     const std::vector<std::int64_t> expected_y{
         1, impl_->config.latent_channels / 2,
         impl_->config.latent_height(), impl_->config.latent_width()};
-    if (!shape_equals(z_raw.shape, expected_z) ||
-        !shape_equals(y_raw_0.shape, expected_y) ||
-        !shape_equals(y_raw_1.shape, expected_y)) {
+    if (!shape_equals(z_raw.shape(), expected_z) ||
+        !shape_equals(y_raw_0.shape(), expected_y) ||
+        !shape_equals(y_raw_1.shape(), expected_y)) {
         throw std::runtime_error("entropy output tensor shape mismatch");
     }
 

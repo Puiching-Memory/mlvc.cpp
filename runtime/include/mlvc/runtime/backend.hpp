@@ -97,7 +97,11 @@ public:
 };
 
 // Exactly one implementation of these symbols is linked into each release.
-std::string_view compiled_backend_name() noexcept;
+const char* compiled_backend_name_c_str() noexcept;
+inline std::string_view compiled_backend_name() noexcept
+{
+    return compiled_backend_name_c_str();
+}
 std::unique_ptr<InferenceBackend> create_backend(const BackendOptions& options);
 
 }  // namespace mlvc

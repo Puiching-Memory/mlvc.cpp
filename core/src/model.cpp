@@ -4,14 +4,24 @@
 
 #include <nlohmann/json.hpp>
 
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <limits>
 #include <stdexcept>
 
 namespace mlvc {
 namespace {
 
-int divide_up(int value, int divisor)
+int divide_up(int value, std::int64_t divisor)
 {
-    return (value + divisor - 1) / divisor;
+    if (value <= 0 || divisor <= 0 ||
+        divisor > std::numeric_limits<int>::max()) {
+        throw std::runtime_error("invalid model downsample dimensions");
+    }
+    return static_cast<int>(
+        static_cast<std::int64_t>(value) / divisor +
+        (static_cast<std::int64_t>(value) % divisor != 0 ? 1 : 0));
 }
 
 std::optional<int> optional_int(const nlohmann::json& value)
@@ -51,36 +61,82 @@ void validate_bundle_manifest(const std::filesystem::path& model_dir,
 
 }  // namespace
 
-int ModelConfig::feature_height() const noexcept
+void ModelConfig::validate() const
+{
+    const bool invalid_dimensions =
+        model_width <= 0 || model_height <= 0 || feature_channels <= 0 ||
+        latent_channels <= 0 || hyperprior_channels <= 0 ||
+        downsample_feature <= 0 || downsample_latent <= 0 ||
+        downsample_hyperprior <= 0 || y_scale_repeat <= 0;
+    if (name.empty() || model_version.empty() || invalid_dimensions ||
+        !std::isfinite(pixel_range) || pixel_range <= 0.0F || qp_num <= 0 ||
+        total_qp_num < qp_num || latent_channels % 2 != 0 ||
+        latent_channels % y_scale_repeat != 0 ||
+        latent_channels / y_scale_repeat > hyperprior_channels ||
+        frame_index_map.empty() || qp_shift.empty()) {
+        throw std::runtime_error("invalid fixed-shape model metadata");
+    }
+
+    const auto invalid_map_index = [&](int index) {
+        return index < 0 ||
+            static_cast<std::size_t>(index) >= qp_shift.size();
+    };
+    if (std::any_of(frame_index_map.begin(), frame_index_map.end(),
+                    invalid_map_index)) {
+        throw std::runtime_error("model QP shift mapping is out of range");
+    }
+    if (std::any_of(qp_shift.begin(), qp_shift.end(), [&](int shift) {
+            return shift < 0 || shift > total_qp_num - qp_num;
+        })) {
+        throw std::runtime_error("model QP shift is outside the model range");
+    }
+    if (iframe_period && *iframe_period <= 0)
+        throw std::runtime_error("model I-frame period must be positive");
+    if (reset_period && *reset_period <= 0)
+        throw std::runtime_error("model reset period must be positive");
+    if (static_cast<std::int64_t>(downsample_latent) *
+            downsample_hyperprior >
+        std::numeric_limits<int>::max()) {
+        throw std::runtime_error("model downsample factor is too large");
+    }
+    if (!disable_feature_reset || reset_period.has_value()) {
+        throw std::runtime_error(
+            "this runtime currently requires the dmc61sbr_e1d1 no-reset profile");
+    }
+}
+
+int ModelConfig::feature_height() const
 {
     return divide_up(model_height, downsample_feature);
 }
 
-int ModelConfig::feature_width() const noexcept
+int ModelConfig::feature_width() const
 {
     return divide_up(model_width, downsample_feature);
 }
 
-int ModelConfig::latent_height() const noexcept
+int ModelConfig::latent_height() const
 {
     return divide_up(model_height, downsample_latent);
 }
 
-int ModelConfig::latent_width() const noexcept
+int ModelConfig::latent_width() const
 {
     return divide_up(model_width, downsample_latent);
 }
 
-int ModelConfig::hyperprior_height() const noexcept
+int ModelConfig::hyperprior_height() const
 {
     return divide_up(model_height,
-                     downsample_latent * downsample_hyperprior);
+        static_cast<std::int64_t>(downsample_latent) *
+            downsample_hyperprior);
 }
 
-int ModelConfig::hyperprior_width() const noexcept
+int ModelConfig::hyperprior_width() const
 {
     return divide_up(model_width,
-                     downsample_latent * downsample_hyperprior);
+        static_cast<std::int64_t>(downsample_latent) *
+            downsample_hyperprior);
 }
 
 int ModelConfig::frame_in_gop(int absolute_frame) const
@@ -94,10 +150,14 @@ int ModelConfig::frame_in_gop(int absolute_frame) const
 
 int ModelConfig::q_index_shift(int frame_index) const
 {
+    if (frame_index < 0)
+        throw std::runtime_error("frame index must be non-negative");
     if (frame_index_map.empty() || qp_shift.empty())
         throw std::runtime_error("model metadata has no QP shift mapping");
-    const int map_index = frame_index_map.at(
-        static_cast<std::size_t>((frame_index + 1) % frame_index_map.size()));
+    const std::size_t frame = static_cast<std::size_t>(frame_index);
+    const std::size_t frame_map_index =
+        (frame % frame_index_map.size() + 1U) % frame_index_map.size();
+    const int map_index = frame_index_map.at(frame_map_index);
     return qp_shift.at(static_cast<std::size_t>(map_index));
 }
 
@@ -133,17 +193,10 @@ ModelConfig load_model_config(const std::filesystem::path& model_dir)
     result.disable_feature_reset =
         full.at("disable_feature_reset").get<bool>();
 
-    if (result.model_width <= 0 || result.model_height <= 0 ||
-        result.feature_channels <= 0 || result.latent_channels <= 0 ||
-        result.hyperprior_channels <= 0 || result.y_scale_repeat <= 0 ||
-        result.latent_channels % 2 != 0 ||
-        result.latent_channels % result.y_scale_repeat != 0) {
-        throw std::runtime_error("invalid fixed-shape model metadata: " +
-                                 path.string());
-    }
-    if (!result.disable_feature_reset || result.reset_period.has_value()) {
-        throw std::runtime_error(
-            "this runtime currently requires the dmc61sbr_e1d1 no-reset profile");
+    try {
+        result.validate();
+    } catch (const std::exception& error) {
+        throw std::runtime_error(std::string(error.what()) + ": " + path.string());
     }
     return result;
 }

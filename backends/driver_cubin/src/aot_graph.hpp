@@ -68,9 +68,9 @@ private:
     };
 
     struct HostSlot {
-        std::vector<void*> inputs;
-        std::vector<void*> outputs;
-        void* yuv = nullptr;
+        std::vector<driver_cubin::PinnedHostBuffer> inputs;
+        std::vector<driver_cubin::PinnedHostBuffer> outputs;
+        driver_cubin::PinnedHostBuffer yuv;
         driver_cubin::Event completion;
         bool pending = false;
     };

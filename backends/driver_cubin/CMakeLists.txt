@@ -64,6 +64,7 @@ add_library(mlvc_driver_kernels STATIC "${MLVC_DRIVER_FATBIN_SOURCE}")
 set_target_properties(mlvc_driver_kernels PROPERTIES
     POSITION_INDEPENDENT_CODE ON)
 add_dependencies(mlvc_driver_kernels mlvc_driver_fatbin)
+mlvc_configure_target(mlvc_driver_kernels)
 mlvc_enable_ipo(mlvc_driver_kernels)
 
 add_library(mlvc_driver STATIC src/driver.cpp)
@@ -72,12 +73,14 @@ target_include_directories(mlvc_driver PUBLIC
     "${MLVC_DRIVER_SOURCE_DIR}/include"
     "${CUDAToolkit_INCLUDE_DIRS}")
 target_link_libraries(mlvc_driver PUBLIC CUDA::cuda_driver)
+mlvc_configure_target(mlvc_driver)
 mlvc_enable_ipo(mlvc_driver)
 
 add_executable(mlvc_driver_probe tools/probe_main.cpp)
 target_link_libraries(mlvc_driver_probe PRIVATE
     mlvc_driver mlvc_driver_kernels)
 target_link_options(mlvc_driver_probe PRIVATE "LINKER:--disable-new-dtags")
+mlvc_configure_target(mlvc_driver_probe)
 mlvc_enable_ipo(mlvc_driver_probe)
 
 add_library(mlvc_backend_driver_cubin STATIC
@@ -101,6 +104,7 @@ target_link_libraries(mlvc_backend_driver_cubin PRIVATE
     mlvc_driver
     mlvc_driver_kernels
     nlohmann_json::nlohmann_json)
+mlvc_configure_target(mlvc_backend_driver_cubin)
 mlvc_enable_ipo(mlvc_backend_driver_cubin)
 
 if(BUILD_TESTING)

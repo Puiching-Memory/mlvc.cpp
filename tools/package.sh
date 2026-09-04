@@ -329,6 +329,7 @@ package_backend() {
         -DMLVC_MODEL_ROOT="$MODEL_ROOT"
         -DMLVC_TEST_ASSETS_DIR="$ROOT/models/fixtures"
         -DMLVC_ENABLE_IPO=ON
+        -DMLVC_WARNINGS_AS_ERRORS=ON
         -DCMAKE_INSTALL_BINDIR=bin
         -DCMAKE_INSTALL_LIBDIR=lib
         -DCMAKE_INSTALL_INCLUDEDIR=include
@@ -500,6 +501,7 @@ package_driver_cubin() {
         -DMLVC_MODEL_ROOT="$MODEL_ROOT" \
         -DMLVC_TEST_ASSETS_DIR="$ROOT/models/fixtures" \
         -DMLVC_ENABLE_IPO=ON \
+        -DMLVC_WARNINGS_AS_ERRORS=ON \
         -DMLVC_EMBED_MODELS="$([[ "$SKIP_MODELS" -eq 0 ]] && echo ON || echo OFF)" \
         -DCMAKE_INSTALL_BINDIR=bin \
         -DCMAKE_INSTALL_LIBDIR=lib \

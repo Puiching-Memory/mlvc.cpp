@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -124,9 +125,9 @@ void test_yuv_views()
         reinterpret_cast<const char*>(expected.data()), expected.size());
     std::istringstream input(input_bytes, std::ios::binary);
     std::array<std::uint8_t, 12> storage{};
-    mlvc::MutableYuv420FrameView frame{
-        width, height, storage.data(), storage.data() + 8,
-        storage.data() + 10};
+    mlvc::MutableYuv420FrameView frame(
+        width, height, std::span(storage).first(8),
+        std::span(storage).subspan(8, 2), std::span(storage).subspan(10, 2));
     require(mlvc::read_yuv420_frame(input, frame),
             "cannot read into non-owning YUV view");
     require(storage == expected, "non-owning YUV read differs from source");
@@ -199,15 +200,9 @@ void test_mlvc_codec(const std::filesystem::path& assets)
     std::vector<mlvc::Float16Storage> direct_y1(y1.element_count());
     entropy.decode_into(
         payload, 21,
-        mlvc::MutableTensorView{"z_raw", z_shape,
-            mlvc::TensorDataType::kFloat16, direct_z.data(),
-            direct_z.size() * sizeof(direct_z.front())},
-        mlvc::MutableTensorView{"y_raw_0", y_shape,
-            mlvc::TensorDataType::kFloat16, direct_y0.data(),
-            direct_y0.size() * sizeof(direct_y0.front())},
-        mlvc::MutableTensorView{"y_raw_1", y_shape,
-            mlvc::TensorDataType::kFloat16, direct_y1.data(),
-            direct_y1.size() * sizeof(direct_y1.front())});
+        mlvc::MutableTensorView("z_raw", z_shape, direct_z),
+        mlvc::MutableTensorView("y_raw_0", y_shape, direct_y0),
+        mlvc::MutableTensorView("y_raw_1", y_shape, direct_y1));
     require(direct_z == std::get<std::vector<mlvc::Float16Storage>>(
                             decoded.z_raw.data) &&
             direct_y0 == std::get<std::vector<mlvc::Float16Storage>>(

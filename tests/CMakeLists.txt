@@ -1,8 +1,17 @@
+add_executable(mlvc_core_safety_tests unit/core_safety_tests.cpp)
+target_include_directories(mlvc_core_safety_tests PRIVATE
+    "${PROJECT_SOURCE_DIR}/core/include")
+target_link_libraries(mlvc_core_safety_tests PRIVATE mlvc_core)
+mlvc_configure_target(mlvc_core_safety_tests)
+mlvc_enable_ipo(mlvc_core_safety_tests)
+add_test(NAME mlvc_core_safety COMMAND mlvc_core_safety_tests)
+
 add_executable(mlvc_codec_tests unit/codec_tests.cpp)
 target_include_directories(mlvc_codec_tests PRIVATE
     "${PROJECT_SOURCE_DIR}/core/include")
 target_link_libraries(mlvc_codec_tests PRIVATE mlvc_core)
 target_link_options(mlvc_codec_tests PRIVATE "LINKER:--disable-new-dtags")
+mlvc_configure_target(mlvc_codec_tests)
 mlvc_enable_ipo(mlvc_codec_tests)
 
 add_executable(mlvc_c_api_tests unit/c_api_tests.cpp)
@@ -10,6 +19,7 @@ target_include_directories(mlvc_c_api_tests PRIVATE
     "${PROJECT_SOURCE_DIR}/public/include")
 target_link_libraries(mlvc_c_api_tests PRIVATE mlvc_codec)
 target_link_options(mlvc_c_api_tests PRIVATE "LINKER:--disable-new-dtags")
+mlvc_configure_target(mlvc_c_api_tests)
 mlvc_enable_ipo(mlvc_c_api_tests)
 
 add_test(NAME mlvc_c_api COMMAND mlvc_c_api_tests)
@@ -17,6 +27,7 @@ add_test(NAME mlvc_c_api COMMAND mlvc_c_api_tests)
 add_executable(mlvc_public_header_tests unit/public_header_tests.c)
 target_include_directories(mlvc_public_header_tests PRIVATE
     "${PROJECT_SOURCE_DIR}/public/include")
+mlvc_configure_target(mlvc_public_header_tests)
 add_test(NAME mlvc_public_header COMMAND mlvc_public_header_tests)
 
 if(EXISTS "${MLVC_TEST_ASSETS_DIR}/benchmarks/gray-q21/encoder/case.json"

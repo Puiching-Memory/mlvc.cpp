@@ -11,8 +11,21 @@ permissions:
 
 jobs:
   package:
-    name: build, test, and package
+    name: build, test, and package (${{ matrix.compiler }})
     runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - compiler: gcc
+            cc: gcc
+            cxx: g++
+          - compiler: clang
+            cc: clang
+            cxx: clang++
+    env:
+      CC: ${{ matrix.cc }}
+      CXX: ${{ matrix.cxx }}
 
     steps:
       - uses: actions/checkout@v4
@@ -23,7 +36,7 @@ jobs:
       - name: Install CUDA compiler toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y ca-certificates curl
+          sudo apt-get install -y ca-certificates clang curl
           curl --fail --location --retry 3 --output /tmp/cuda-keyring.deb \
             https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb
           sudo dpkg -i /tmp/cuda-keyring.deb
@@ -32,11 +45,22 @@ jobs:
           echo "/usr/local/cuda-13.3/bin" >> "$GITHUB_PATH"
 
       - name: Build, test, and create CI package
-        run: ./tools/package.sh --backend driver-cubin --jobs 2 --skip-gpu-tests --skip-models
+        run: |
+          ./tools/package.sh --backend driver-cubin --jobs 2 \
+            --build-root "build/ci-${{ matrix.compiler }}" \
+            --output-dir "packages/${{ matrix.compiler }}" \
+            --skip-gpu-tests --skip-models
+
+      - name: Run host sanitizer tests
+        if: matrix.compiler == 'gcc'
+        run: |
+          cmake --preset driver-cubin-sanitize
+          cmake --build --preset driver-cubin-sanitize --parallel 2
+          ctest --preset driver-cubin-sanitize
 
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
-          name: mlvc-cpp-driver-cubin-ci
-          path: packages/*-ci.tar.gz
+          name: mlvc-cpp-driver-cubin-ci-${{ matrix.compiler }}
+          path: packages/${{ matrix.compiler }}/*-ci.tar.gz
           if-no-files-found: error

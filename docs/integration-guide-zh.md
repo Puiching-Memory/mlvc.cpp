@@ -464,6 +464,7 @@ int main(void) {
     */
 
     mlvc_codec_stats stats;
+    mlvc_codec_stats_init(&stats);
     char error[1024];
     if (mlvc_encode(&options, &stats, error, sizeof(error)) != 0) {
         fprintf(stderr, "MLVC encode failed: %s\n", error);
@@ -479,6 +480,10 @@ int main(void) {
 Driver+cubin 的 C ABI 可用 `"embedded:mlvc-s-psnr-v1"` 选择小模型；其他三个后端
 可用 `"packaged:mlvc-s-psnr-v1"`。传入结构体的字符串指针必须在函数返回前保持
 有效。失败时函数返回 `-1`，错误写入调用方 buffer；C++ 异常不会跨过 C ABI。
+
+`mlvc_codec_options` 和 `mlvc_codec_stats` 都包含 `struct_size` 与 `abi_version`。
+调用方必须分别使用 `mlvc_codec_options_init()` 和 `mlvc_codec_stats_init()` 初始化，
+库会在读取或写入结构体前验证 ABI 版本和最小尺寸。
 
 `workspace_mib == 0` 使用库默认的 4096 MiB。`input_path` 或 `output_path` 可以是
 `"-"`，也可以是普通文件或 FIFO 路径。

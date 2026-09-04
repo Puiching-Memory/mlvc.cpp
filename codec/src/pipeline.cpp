@@ -208,6 +208,7 @@ Tensor make_q_index(int q_index)
 void validate_fp16_tensor(const Tensor& tensor, const std::vector<int64_t>& shape,
                           const char* name)
 {
+    tensor.validate();
     if (tensor.data_type() != TensorDataType::kFloat16 || tensor.shape != shape)
         throw std::runtime_error(std::string("backend output ") + name +
                                  " has unexpected shape or dtype");
@@ -260,6 +261,7 @@ void write_debug_tensors(const CodecOptions& options, const char* stage,
     nlohmann::json manifest = nlohmann::json::array();
     for (std::size_t index = 0; index < tensors.size(); ++index) {
         const Tensor& tensor = tensors[index];
+        tensor.validate();
         std::ostringstream filename;
         filename << direction << '-' << std::setw(2) << std::setfill('0') << index
                  << '-' << (tensor.name.empty() ? "unnamed" : tensor.name) << '.'
@@ -301,7 +303,7 @@ const TensorView& find_tensor_view(const std::vector<TensorView>& tensors,
 {
     const auto found = std::find_if(
         tensors.begin(), tensors.end(),
-        [&](const TensorView& tensor) { return tensor.name == name; });
+        [&](const TensorView& tensor) { return tensor.name() == name; });
     if (found == tensors.end())
         throw std::runtime_error("buffered backend output is missing " +
                                  std::string(name));
@@ -313,7 +315,7 @@ MutableTensorView find_tensor_view(
 {
     const auto found = std::find_if(
         tensors.begin(), tensors.end(),
-        [&](const MutableTensorView& tensor) { return tensor.name == name; });
+        [&](const MutableTensorView& tensor) { return tensor.name() == name; });
     if (found == tensors.end())
         throw std::runtime_error("buffered backend input is missing " +
                                  std::string(name));
@@ -324,9 +326,9 @@ void validate_fp16_tensor(TensorView tensor,
                           const std::vector<int64_t>& shape,
                           const char* name)
 {
-    if (tensor.data_type != TensorDataType::kFloat16 ||
-        !shape_matches(tensor.shape, shape) || !tensor.data ||
-        tensor.bytes != tensor.element_count() * sizeof(Float16Storage)) {
+    if (tensor.data_type() != TensorDataType::kFloat16 ||
+        !shape_matches(tensor.shape(), shape) ||
+        tensor.element_count() != checked_tensor_element_count(shape)) {
         throw std::runtime_error(std::string("backend output ") + name +
                                  " has unexpected shape or dtype");
     }

@@ -292,7 +292,7 @@ private:
 
 }  // namespace
 
-std::string_view compiled_backend_name() noexcept
+const char* compiled_backend_name_c_str() noexcept
 {
     return "onnxruntime";
 }

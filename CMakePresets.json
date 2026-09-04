@@ -55,6 +55,21 @@
         "MLVC_SELECTED_BACKEND": "tensorrt",
         "BUILD_TESTING": "OFF"
       }
+    },
+    {
+      "name": "driver-cubin-sanitize",
+      "displayName": "Driver+cubin Host Sanitizers",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "MLVC_SELECTED_BACKEND": "driver_cubin",
+        "MLVC_EMBED_MODELS": "OFF",
+        "MLVC_ENABLE_IPO": "OFF",
+        "MLVC_ENABLE_SANITIZERS": "ON",
+        "MLVC_WARNINGS_AS_ERRORS": "ON",
+        "BUILD_TESTING": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -73,12 +88,29 @@
     {
       "name": "tensorrt-release",
       "configurePreset": "tensorrt-release"
+    },
+    {
+      "name": "driver-cubin-sanitize",
+      "configurePreset": "driver-cubin-sanitize",
+      "targets": ["mlvc_core_safety_tests"]
     }
   ],
   "testPresets": [
     {
       "name": "driver-cubin-release",
       "configurePreset": "driver-cubin-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "driver-cubin-sanitize",
+      "configurePreset": "driver-cubin-sanitize",
+      "filter": {
+        "include": {
+          "name": "mlvc_core_safety"
+        }
+      },
       "output": {
         "outputOnFailure": true
       }

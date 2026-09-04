@@ -218,6 +218,46 @@ void DeviceBuffer::reset() noexcept
     state_.reset();
 }
 
+PinnedHostBuffer::PinnedHostBuffer(std::shared_ptr<DriverState> state,
+                                   void* data, std::size_t size)
+    : state_(std::move(state)), data_(data), size_(size)
+{
+}
+
+PinnedHostBuffer::~PinnedHostBuffer()
+{
+    reset();
+}
+
+PinnedHostBuffer::PinnedHostBuffer(PinnedHostBuffer&& other) noexcept
+    : state_(std::move(other.state_)),
+      data_(std::exchange(other.data_, nullptr)),
+      size_(std::exchange(other.size_, 0))
+{
+}
+
+PinnedHostBuffer& PinnedHostBuffer::operator=(PinnedHostBuffer&& other) noexcept
+{
+    if (this != &other) {
+        reset();
+        state_ = std::move(other.state_);
+        data_ = std::exchange(other.data_, nullptr);
+        size_ = std::exchange(other.size_, 0);
+    }
+    return *this;
+}
+
+void PinnedHostBuffer::reset() noexcept
+{
+    if (state_ && data_) {
+        if (cuCtxSetCurrent(state_->context) == CUDA_SUCCESS)
+            cuMemFreeHost(data_);
+    }
+    data_ = nullptr;
+    size_ = 0;
+    state_.reset();
+}
+
 Module::Module(std::shared_ptr<DriverState> state, abi::Module module)
     : state_(std::move(state)), module_(module)
 {
@@ -473,22 +513,17 @@ void Driver::synchronize() const
                        "cuStreamSynchronize");
 }
 
-void* Driver::allocate_host_pinned(std::size_t bytes) const
+PinnedHostBuffer Driver::allocate_host_pinned(std::size_t bytes) const
 {
     if (bytes == 0)
-        return nullptr;
+        throw std::runtime_error(
+            "driver-cubin: pinned allocation size must be positive");
     state_->make_current();
     void* pointer = nullptr;
-    CUresult result = cuMemHostAlloc(&pointer, bytes, CU_MEMHOSTALLOC_PORTABLE);
-    return result == CUDA_SUCCESS ? pointer : nullptr;
-}
-
-void Driver::free_host_pinned(void* pointer) const
-{
-    if (!pointer)
-        return;
-    state_->make_current();
-    cuMemFreeHost(pointer);
+    DriverState::check(
+        cuMemHostAlloc(&pointer, bytes, CU_MEMHOSTALLOC_PORTABLE),
+        "cuMemHostAlloc");
+    return PinnedHostBuffer(state_, pointer, bytes);
 }
 
 bool Driver::pin_host(const void* host_pointer, std::size_t bytes) const

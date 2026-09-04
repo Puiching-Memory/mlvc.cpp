@@ -28,12 +28,13 @@ struct ModelConfig {
     std::optional<int> reset_period;
     bool disable_feature_reset = false;
 
-    int feature_height() const noexcept;
-    int feature_width() const noexcept;
-    int latent_height() const noexcept;
-    int latent_width() const noexcept;
-    int hyperprior_height() const noexcept;
-    int hyperprior_width() const noexcept;
+    void validate() const;
+    int feature_height() const;
+    int feature_width() const;
+    int latent_height() const;
+    int latent_width() const;
+    int hyperprior_height() const;
+    int hyperprior_width() const;
     int frame_in_gop(int absolute_frame) const;
     int q_index_shift(int frame_index) const;
 };

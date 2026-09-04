@@ -18,12 +18,13 @@ target_include_directories(mlvc_core
 target_link_libraries(mlvc_core PRIVATE
     msrtc_rans
     nlohmann_json::nlohmann_json)
+mlvc_configure_target(mlvc_core)
 mlvc_enable_ipo(mlvc_core)
 
 if(MLVC_SELECTED_BACKEND STREQUAL "driver_cubin" AND MLVC_EMBED_MODELS)
-    file(GLOB_RECURSE MLVC_EMBEDDED_MODEL_INPUTS CONFIGURE_DEPENDS
-        LIST_DIRECTORIES false "${MLVC_MODEL_ROOT}/*")
-    if(NOT MLVC_EMBEDDED_MODEL_INPUTS)
+    file(GLOB MLVC_MODEL_MANIFESTS CONFIGURE_DEPENDS
+        LIST_DIRECTORIES false "${MLVC_MODEL_ROOT}/*/*/model_bundle.json")
+    if(NOT MLVC_MODEL_MANIFESTS)
         message(FATAL_ERROR
             "No canonical model bundles found below ${MLVC_MODEL_ROOT}")
     endif()
@@ -36,6 +37,8 @@ if(MLVC_SELECTED_BACKEND STREQUAL "driver_cubin" AND MLVC_EMBED_MODELS)
         "${MLVC_EMBEDDED_MODELS_DIR}/mlvc_embedded_models_index.inc")
     set(MLVC_EMBEDDED_MODELS_ASSEMBLY
         "${MLVC_EMBEDDED_MODELS_DIR}/mlvc_embedded_models.S")
+    set(MLVC_EMBEDDED_MODELS_DEPFILE
+        "${MLVC_EMBEDDED_MODELS_DIR}/mlvc_embedded_models.d")
     file(MAKE_DIRECTORY "${MLVC_EMBEDDED_MODELS_DIR}")
     configure_file(
         "${PROJECT_SOURCE_DIR}/cmake/EmbedModelData.S.in"
@@ -50,10 +53,12 @@ if(MLVC_SELECTED_BACKEND STREQUAL "driver_cubin" AND MLVC_EMBED_MODELS)
             --model-root "${MLVC_MODEL_ROOT}"
             --output-data "${MLVC_EMBEDDED_MODELS_BINARY}"
             --output-index "${MLVC_EMBEDDED_MODELS_INDEX}"
+            --depfile "${MLVC_EMBEDDED_MODELS_DEPFILE}"
         DEPENDS
-            ${MLVC_EMBEDDED_MODEL_INPUTS}
+            ${MLVC_MODEL_MANIFESTS}
             "${MLVC_PROFILE_FILE}"
             "${PROJECT_SOURCE_DIR}/tools/model_package.py"
+        DEPFILE "${MLVC_EMBEDDED_MODELS_DEPFILE}"
         COMMENT "Embedding validated driver-cubin model bundles"
         VERBATIM)
 

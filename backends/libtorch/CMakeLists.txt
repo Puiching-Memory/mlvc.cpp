@@ -6,6 +6,7 @@ target_include_directories(mlvc_backend_libtorch PRIVATE
 target_link_libraries(mlvc_backend_libtorch PRIVATE
     mlvc_runtime
     ${TORCH_LIBRARIES})
+mlvc_configure_target(mlvc_backend_libtorch)
 mlvc_enable_ipo(mlvc_backend_libtorch)
 
 file(GLOB _libtorch_runtime_libraries "${LIBTORCH_ROOT}/lib/*.so*")

@@ -177,11 +177,11 @@ All source builds are placed below the single top-level `build/` directory.
 Equivalent presets are provided for `libtorch`, `tensorrt`, and
 `driver-cubin`.
 
-CI runs on a standard Linux x86_64 runner. It builds the driver-cubin code,
-runs the portable tests, and creates a compile-only smoke package without
-model assets or GPU runtime checks. The full release packages still require
-the canonical model bundles and an NVIDIA build host; run the commands above
-for those packages.
+CI builds the driver-cubin code with both GCC and Clang, treats project warnings
+as errors, runs the portable tests, and creates compile-only smoke packages
+without model assets or GPU runtime checks. The GCC job also runs the host-only
+safety suite under AddressSanitizer and UndefinedBehaviorSanitizer. Full release
+packages still require the canonical model bundles and an NVIDIA build host.
 
 ## Usage
 
@@ -249,13 +249,19 @@ exceptions to cross the boundary:
 ```c
 #include <mlvc/codec.h>
 
-mlvc_codec_options options = {
-    .width = 640, .height = 360, .q_index = 21, .frames = 60,
-    .device_id = 0, .workspace_mib = 4096,
-    .input_path = "in.yuv", .output_path = "out.mlvc",
-    .model_dir = NULL, /* Use the package's default mlvc-psnr-v1 profile. */
-};
+mlvc_codec_options options;
+mlvc_codec_options_init(&options);
+options.width = 640;
+options.height = 360;
+options.q_index = 21;
+options.frames = 60;
+options.device_id = 0;
+options.workspace_mib = 4096;
+options.input_path = "in.yuv";
+options.output_path = "out.mlvc";
+options.model_dir = NULL; /* Use the package's default profile. */
 mlvc_codec_stats stats;
+mlvc_codec_stats_init(&stats);
 char error[512];
 if (mlvc_encode(&options, &stats, error, sizeof(error)) != 0) {
     /* error contains the diagnostic */
@@ -265,6 +271,8 @@ if (mlvc_encode(&options, &stats, error, sizeof(error)) != 0) {
 Set `options.device_id` to `1` in a separate `mlvc_decode` call to bind the
 decoder to the second GPU. A CMake consumer can use
 `find_package(mlvc_codec CONFIG REQUIRED)` and link `mlvc::mlvc_codec`.
+Both C structures carry `struct_size` and `abi_version`; always initialize
+them with the provided functions before calling the library.
 
 ## Codec compatibility
 

@@ -97,3 +97,27 @@ the match after validating the complete node dependency chain, consumer counts,
 channel Slice ranges, static shapes, and permitted arena aliases. The MLVC-S
 profile has 24 y channels, so it deliberately uses the generic schedule; on
 the A30 its smaller workload did not amortize the fused kernels' footprint.
+
+## 2026-09-04 decoder recurrent-feature output fusion
+
+The decoder contains an analogous recurrent update, but its scaled and blended
+halves remain live as reconstruction inputs before a later Concat produces the
+next feature state. Following the DLL's fused engine-output pattern,
+`mlvc_feature_update_outputs_fp16` recognizes the exact 11-node Slice/Sigmoid/
+binary chain and writes all three outputs in one launch. The later Concat is
+elided, including its two input-copy launches.
+
+The matcher validates operation order, dependencies, consumer counts, channel
+Slice bounds, tensor shapes and dtypes, the scalar gate constant, and permitted
+arena aliases. A host-visible feature uses a dedicated persistent output
+buffer because materializing it early into the original arena address would
+overwrite still-live reconstruction inputs. When `feature` is bound directly
+to the next invocation's `ref_feature`, the fused kernel preserves that state
+address instead of replacing it with the host-output buffer. On SM80 the kernel
+uses 34 registers per thread and no shared memory.
+
+This fusion reduced the standard decoder's measured endpoint latency by 1.96%
+and MLVC-S by 0.57% on A30, with byte-identical `x_hat` and `feature` outputs.
+By contrast, a measured `DepthToSpace(block=8)+Clip` fusion was removed: its
+approximately 0.09% endpoint gain did not justify an extra 1.35 MiB persistent
+buffer required by the existing lifetime overlap.

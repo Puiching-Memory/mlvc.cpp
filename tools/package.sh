@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # Build isolated NVIDIA GPU releases for all supported backends.
+# Use --skip-gpu-tests --skip-models only for compile-only CI smoke packages;
+# those packages are not deployable releases.
 #
 # Usage: ./tools/package.sh [--backend all|onnxruntime|libtorch|tensorrt|driver-cubin]
 #          [--build-root DIR] [--output-dir DIR] [--model-root DIR]
-#          [--jobs N] [--no-tar]
+#          [--jobs N] [--no-tar] [--skip-gpu-tests] [--skip-models]
 set -euo pipefail
 
 BACKEND="all"
@@ -13,6 +15,8 @@ MODEL_ROOT="models/canonical"
 BUILD_TYPE="Release"
 JOBS=""
 NO_TAR=0
+SKIP_GPU_TESTS=0
+SKIP_MODELS=0
 
 usage() {
     sed -n '2,6p' "$0"
@@ -26,6 +30,8 @@ while [[ $# -gt 0 ]]; do
         --model-root) MODEL_ROOT="${2:?--model-root needs a value}"; shift 2 ;;
         --jobs) JOBS="${2:?--jobs needs a value}"; shift 2 ;;
         --no-tar) NO_TAR=1; shift ;;
+        --skip-gpu-tests) SKIP_GPU_TESTS=1; shift ;;
+        --skip-models) SKIP_MODELS=1; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -36,6 +42,17 @@ case "$BACKEND" in
     onnxruntime|libtorch|tensorrt|driver-cubin) BACKENDS=("$BACKEND") ;;
     *) echo "error: unsupported backend: $BACKEND" >&2; exit 2 ;;
 esac
+
+if [[ "$SKIP_MODELS" -eq 1 ]]; then
+    [[ "$SKIP_GPU_TESTS" -eq 1 ]] || {
+        echo "error: --skip-models requires --skip-gpu-tests" >&2
+        exit 2
+    }
+    [[ "${#BACKENDS[@]}" -eq 1 && "${BACKENDS[0]}" == "driver-cubin" ]] || {
+        echo "error: --skip-models is only supported for driver-cubin" >&2
+        exit 2
+    }
+fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=tools/dependencies.env
@@ -55,11 +72,16 @@ if [[ "$(uname -s)" != "Linux" ]]; then
 fi
 command -v cmake >/dev/null || { echo "error: cmake is required" >&2; exit 1; }
 command -v nvcc >/dev/null || { echo "error: CUDA 13.3 toolkit is required" >&2; exit 1; }
-command -v nvidia-smi >/dev/null || { echo "error: nvidia-smi is required" >&2; exit 1; }
 for tool in ldd python3 sha256sum tar; do
     command -v "$tool" >/dev/null || { echo "error: $tool is required" >&2; exit 1; }
 done
-nvidia-smi -L >/dev/null || { echo "error: no usable NVIDIA GPU was detected" >&2; exit 1; }
+if [[ "$SKIP_GPU_TESTS" -eq 0 ]]; then
+    command -v nvidia-smi >/dev/null || { echo "error: nvidia-smi is required" >&2; exit 1; }
+    nvidia-smi -L >/dev/null || {
+        echo "error: no usable NVIDIA GPU was detected" >&2
+        exit 1
+    }
+fi
 [[ -f "$ROOT/third_party/mlvc/packages/msrtc_rans/CMakeLists.txt" &&
    -f "$ROOT/third_party/nlohmann_json/CMakeLists.txt" ]] || {
     echo "error: source submodules are missing; run tools/bootstrap.sh" >&2
@@ -172,14 +194,39 @@ done
 VERSION="$(sed -n 's/^project(mlvc_cpp VERSION \([0-9.]*\).*/\1/p' "$ROOT/CMakeLists.txt")"
 OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
 ARCH="$(uname -m)"
-DRIVER_VERSION="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | sed -n '1p')"
-DRIVER_CUDA_CAPABILITY="$(nvidia-smi | sed -n 's/.*CUDA Version: \([0-9.]*\).*/\1/p' | head -n 1)"
+DRIVER_VERSION="not-detected"
+DRIVER_CUDA_CAPABILITY="unknown"
 CUDA_TOOLKIT_VERSION="$(nvcc --version | sed -n 's/.*release \([^,]*\).*/\1/p' | head -n 1)"
 [[ "$CUDA_TOOLKIT_VERSION" == "$MLVC_CUDA_VERSION" ]] || {
     echo "error: CUDA $MLVC_CUDA_VERSION is required, found $CUDA_TOOLKIT_VERSION" >&2
     exit 1
 }
-GPU_NAMES="$(nvidia-smi --query-gpu=name --format=csv,noheader | LC_ALL=C sort -u | paste -sd ',' -)"
+GPU_NAMES="not-detected"
+if [[ "$SKIP_GPU_TESTS" -eq 0 ]]; then
+    DRIVER_VERSION="$(nvidia-smi --query-gpu=driver_version --format=csv,noheader | sed -n '1p')"
+    DRIVER_CUDA_CAPABILITY="$(nvidia-smi | sed -n 's/.*CUDA Version: \([0-9.]*\).*/\1/p' | head -n 1)"
+    GPU_NAMES="$(nvidia-smi --query-gpu=name --format=csv,noheader | LC_ALL=C sort -u | paste -sd ',' -)"
+fi
+
+CUDA_ROOT="$(dirname "$(dirname "$(readlink -f "$(command -v nvcc)")")")"
+CUDA_STUB_DIR="$CUDA_ROOT/targets/x86_64-linux/lib/stubs"
+
+run_on_host_or_cuda_stub() {
+    if [[ "$SKIP_GPU_TESTS" -eq 1 && -f "$CUDA_STUB_DIR/libcuda.so" ]]; then
+        LD_LIBRARY_PATH="$CUDA_STUB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$@"
+    else
+        "$@"
+    fi
+}
+
+run_basic_tests() {
+    if [[ "$SKIP_GPU_TESTS" -eq 1 ]]; then
+        run_on_host_or_cuda_stub ctest "$@" --exclude-regex '^mlvc_driver_cubin_probe$' \
+            --label-exclude gpu
+    else
+        ctest "$@"
+    fi
+}
 
 mkdir -p "$BUILD_ROOT" "$OUTPUT_DIR"
 
@@ -193,9 +240,15 @@ audit_linkage() {
         return 1
     fi
     if [[ "$report" == *"not found"* ]]; then
-        echo "error: unresolved dependency in $target" >&2
-        echo "$report" >&2
-        return 1
+        local unresolved
+        unresolved="$(grep 'not found' <<<"$report" |
+            grep -vE '^[[:space:]]*libcuda\.so\.1 => not found$' || true)"
+        if [[ "$SKIP_GPU_TESTS" -eq 0 || -n "$unresolved" ]]; then
+            echo "error: unresolved dependency in $target" >&2
+            echo "$report" >&2
+            return 1
+        fi
+        echo "note: allowing missing NVIDIA driver library while GPU tests are skipped: $target"
     fi
 }
 
@@ -279,6 +332,7 @@ package_backend() {
         -DCMAKE_INSTALL_BINDIR=bin
         -DCMAKE_INSTALL_LIBDIR=lib
         -DCMAKE_INSTALL_INCLUDEDIR=include
+        -DBUILD_TESTING=ON
     )
     case "$backend" in
         onnxruntime) configure_args+=("-DONNXRUNTIME_ROOT=$sdk_root") ;;
@@ -290,6 +344,10 @@ package_backend() {
     cmake "${configure_args[@]}"
     echo "==> building $backend"
     cmake --build "$build_dir" --config "$BUILD_TYPE" --parallel "$JOBS"
+    if [[ "$SKIP_GPU_TESTS" -eq 1 ]]; then
+        echo "==> running basic tests $backend"
+        run_basic_tests --test-dir "$build_dir" --output-on-failure
+    fi
 
     stage_root="$(mktemp -d "$OUTPUT_DIR/.stage-${backend}.XXXXXX")"
     STAGE_TO_CLEAN="$stage_root"
@@ -332,25 +390,33 @@ package_backend() {
         echo "error: packaged benchmark binary is missing: $benchmark_binary" >&2
         return 1
     }
-    local backend_list
-    backend_list="$(env -u LD_LIBRARY_PATH "$binary" --backend-name)"
-    [[ "$backend_list" == "$backend" ]] || {
-        echo "error: backend isolation check failed: $backend_list" >&2
-        return 1
-    }
-    local benchmark_backend
-    benchmark_backend="$(env -u LD_LIBRARY_PATH "$benchmark_binary" --backend-name)"
-    [[ "$benchmark_backend" == "$backend" ]] || {
-        echo "error: benchmark backend isolation check failed: $benchmark_backend" >&2
-        return 1
-    }
-    local packaged_profiles
-    packaged_profiles="$("$binary" --list-model-profiles |
-        LC_ALL=C sort | paste -sd ',' -)"
-    [[ "$packaged_profiles" == "mlvc-psnr-v1,mlvc-s-psnr-v1" ]] || {
-        echo "error: packaged model discovery failed: $packaged_profiles" >&2
-        return 1
-    }
+    if [[ "$SKIP_GPU_TESTS" -eq 0 ]]; then
+        local backend_list
+        backend_list="$(env -u LD_LIBRARY_PATH "$binary" --backend-name)"
+        [[ "$backend_list" == "$backend" ]] || {
+            echo "error: backend isolation check failed: $backend_list" >&2
+            return 1
+        }
+    else
+        echo "note: skipping packaged runtime smoke checks for $backend"
+    fi
+    if [[ "$SKIP_GPU_TESTS" -eq 0 ]]; then
+        local benchmark_backend
+        benchmark_backend="$(env -u LD_LIBRARY_PATH "$benchmark_binary" --backend-name)"
+        [[ "$benchmark_backend" == "$backend" ]] || {
+            echo "error: benchmark backend isolation check failed: $benchmark_backend" >&2
+            return 1
+        }
+    fi
+    if [[ "$SKIP_GPU_TESTS" -eq 0 ]]; then
+        local packaged_profiles
+        packaged_profiles="$("$binary" --list-model-profiles |
+            LC_ALL=C sort | paste -sd ',' -)"
+        [[ "$packaged_profiles" == "mlvc-psnr-v1,mlvc-s-psnr-v1" ]] || {
+            echo "error: packaged model discovery failed: $packaged_profiles" >&2
+            return 1
+        }
+    fi
     audit_linkage "$binary"
     audit_linkage "$benchmark_binary"
     audit_linkage "$codec_library" "$prefix/lib"
@@ -388,6 +454,7 @@ package_backend() {
         printf 'cuda_runtime_license=%s\n' "share/licenses/cuda/EULA.txt"
         printf 'model_root=share/mlvc/models\n'
         printf 'bundled_models=%s\n' "$bundled_models"
+        printf 'gpu_runtime_tests=%s\n' "$([[ "$SKIP_GPU_TESTS" -eq 0 ]] && echo true || echo false)"
     } > "$prefix/BUILD-MANIFEST.txt"
     finalize_package "$stage_root" "$prefix" "$product"
 }
@@ -396,8 +463,14 @@ audit_driver_linkage() {
     local target="$1" report
     report="$(ldd "$target")"
     if [[ "$report" == *"not found"* ]]; then
-        echo "$report" >&2
-        return 1
+        local unresolved
+        unresolved="$(grep 'not found' <<<"$report" |
+            grep -vE '^[[:space:]]*libcuda\.so\.1 => not found$' || true)"
+        if [[ "$SKIP_GPU_TESTS" -eq 0 || -n "$unresolved" ]]; then
+            echo "$report" >&2
+            return 1
+        fi
+        echo "note: allowing missing NVIDIA driver library while GPU tests are skipped: $target"
     fi
     if [[ "$report" != *"libcuda.so.1"* ]]; then
         echo "error: $target does not require the NVIDIA driver" >&2
@@ -416,6 +489,9 @@ package_driver_cubin() {
     local backend=driver-cubin
     local build_dir="$BUILD_ROOT/$backend"
     local product="mlvc_cpp-${VERSION}-${backend}-nvidia-${OS}-${ARCH}"
+    if [[ "$SKIP_MODELS" -eq 1 ]]; then
+        product+="-ci"
+    fi
 
     echo "==> configuring $backend"
     cmake -S "$ROOT" -B "$build_dir" \
@@ -424,13 +500,14 @@ package_driver_cubin() {
         -DMLVC_MODEL_ROOT="$MODEL_ROOT" \
         -DMLVC_TEST_ASSETS_DIR="$ROOT/models/fixtures" \
         -DMLVC_ENABLE_IPO=ON \
+        -DMLVC_EMBED_MODELS="$([[ "$SKIP_MODELS" -eq 0 ]] && echo ON || echo OFF)" \
         -DCMAKE_INSTALL_BINDIR=bin \
         -DCMAKE_INSTALL_LIBDIR=lib \
         -DCMAKE_INSTALL_INCLUDEDIR=include \
         -DBUILD_TESTING=ON
     echo "==> building and testing $backend"
     cmake --build "$build_dir" --config "$BUILD_TYPE" --parallel "$JOBS"
-    ctest --test-dir "$build_dir" --output-on-failure
+    run_basic_tests --test-dir "$build_dir" --output-on-failure
 
     local stage_root prefix
     stage_root="$(mktemp -d "$OUTPUT_DIR/.stage-${backend}.XXXXXX")"
@@ -462,6 +539,8 @@ package_driver_cubin() {
     for binary in "$demo" "$benchmark" "$probe" "$codec_library"; do
         audit_driver_linkage "$binary"
     done
+    local bundled_models="none"
+    if [[ "$SKIP_GPU_TESTS" -eq 0 ]]; then
     [[ "$("$demo" --backend-name)" == "$backend" ]] || {
         echo "error: packaged codec is not the $backend variant" >&2
         return 1
@@ -470,7 +549,6 @@ package_driver_cubin() {
         echo "error: packaged benchmark is not the $backend variant" >&2
         return 1
     }
-    local bundled_models
     bundled_models="$("$demo" --list-model-profiles |
         LC_ALL=C sort | paste -sd ',' -)"
     [[ "$bundled_models" == "mlvc-psnr-v1,mlvc-s-psnr-v1" ]] || {
@@ -482,6 +560,9 @@ package_driver_cubin() {
         return 1
     }
     "$probe" --iterations 100 >/dev/null
+    else
+        echo "note: skipping packaged runtime smoke checks for $backend"
+    fi
 
     local fatbin="$build_dir/generated/driver_cubin/fatbin/mlvc_driver_kernels.fatbin"
     local embedded_models="$build_dir/generated/embedded-models/mlvc_driver_models.bin"
@@ -489,16 +570,23 @@ package_driver_cubin() {
         echo "error: generated driver fatbin is missing: $fatbin" >&2
         return 1
     }
-    [[ -f "$embedded_models" ]] || {
-        echo "error: embedded model image is missing: $embedded_models" >&2
-        return 1
-    }
+    if [[ "$SKIP_MODELS" -eq 0 ]]; then
+        [[ -f "$embedded_models" ]] || {
+            echo "error: embedded model image is missing: $embedded_models" >&2
+            return 1
+        }
+    fi
     {
         printf 'name=%s\n' "$product"
         printf 'version=%s\n' "$VERSION"
         printf 'backend=driver-cubin\n'
-        printf 'codec_pipeline=complete\n'
-        printf 'aot_graphs=MLVCEncoder,MLVCDecoder\n'
+        if [[ "$SKIP_MODELS" -eq 0 ]]; then
+            printf 'codec_pipeline=complete\n'
+            printf 'aot_graphs=MLVCEncoder,MLVCDecoder\n'
+        else
+            printf 'codec_pipeline=compile-only\n'
+            printf 'aot_graphs=omitted-ci\n'
+        fi
         printf 'codec_library=%s\n' "$(basename "$codec_library")"
         printf 'codec_api=c-abi,cxx\n'
         printf 'floating_point=fp16-only\n'
@@ -507,11 +595,19 @@ package_driver_cubin() {
         printf 'build_driver=%s\n' "$DRIVER_VERSION"
         printf 'fatbin_sha256=%s\n' "$(sha256sum "$fatbin" | cut -d' ' -f1)"
         printf 'fatbin_targets=sm_75,sm_80,sm_86,sm_89,compute_89\n'
-        printf 'model_storage=embedded:lib/libmlvc_codec.so\n'
+        if [[ "$SKIP_MODELS" -eq 0 ]]; then
+            printf 'model_storage=embedded:lib/libmlvc_codec.so\n'
+        else
+            printf 'model_storage=omitted-ci\n'
+        fi
         printf 'bundled_models=%s\n' "$bundled_models"
-        printf 'embedded_models_bytes=%s\n' "$(stat -c '%s' "$embedded_models")"
-        printf 'embedded_models_sha256=%s\n' \
-            "$(sha256sum "$embedded_models" | cut -d' ' -f1)"
+        printf 'gpu_runtime_tests=%s\n' "$([[ "$SKIP_GPU_TESTS" -eq 0 ]] && echo true || echo false)"
+        printf 'models_embedded=%s\n' "$([[ "$SKIP_MODELS" -eq 0 ]] && echo true || echo false)"
+        if [[ "$SKIP_MODELS" -eq 0 ]]; then
+            printf 'embedded_models_bytes=%s\n' "$(stat -c '%s' "$embedded_models")"
+            printf 'embedded_models_sha256=%s\n' \
+                "$(sha256sum "$embedded_models" | cut -d' ' -f1)"
+        fi
     } > "$prefix/BUILD-MANIFEST.txt"
 
     finalize_package "$stage_root" "$prefix" "$product"

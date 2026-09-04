@@ -22,6 +22,8 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 option(MLVC_ENABLE_IPO "Enable interprocedural optimization in Release builds" ON)
+option(MLVC_EMBED_MODELS
+    "Embed canonical model bundles in driver-cubin builds" ON)
 set(MLVC_SELECTED_BACKEND "onnxruntime" CACHE STRING
     "Inference backend: onnxruntime, libtorch, tensorrt, or driver_cubin")
 set_property(CACHE MLVC_SELECTED_BACKEND PROPERTY STRINGS

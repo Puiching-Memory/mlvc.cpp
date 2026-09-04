@@ -17,10 +17,16 @@ void AotGraph::execute_schedule()
 {
     const auto& nodes = manifest_.at("nodes");
     for (std::size_t index = 0; index < nodes.size();) {
-        if (try_execute_y0_tail(nodes, index))
+        if (std::find(elided_schedule_nodes_.begin(),
+                      elided_schedule_nodes_.end(), index) !=
+            elided_schedule_nodes_.end()) {
+            ++index;
+        } else if (try_execute_y0_tail(nodes, index))
             index += 19;
         else if (try_execute_y1_tail(nodes, index))
             index += 15;
+        else if (try_execute_feature_update_outputs(nodes, index))
+            index += 11;
         else if (try_execute_feature_update(nodes, index))
             index += 12;
         else if (try_execute_pointwise_reglu(nodes, index))
@@ -540,4 +546,3 @@ void AotGraph::execute(const json& node, const Value* output_override,
 }
 
 }  // namespace mlvc::driver_cubin_backend
-

@@ -17,7 +17,8 @@ extern "C" const std::size_t mlvc_driver_kernels_fatbin_size;
 namespace mlvc {
 namespace {
 
-class DriverCubinBackend final : public InferenceBackend {
+class DriverCubinBackend final : public InferenceBackend,
+                                 public BufferedCodecBackend {
 public:
     explicit DriverCubinBackend(BackendOptions options)
         : options_(std::move(options)), driver_(options_.device_id),
@@ -50,7 +51,68 @@ public:
         graph_->reset_state();
     }
 
+    void configure_codec_io(const CodecIoConfig& config) override
+    {
+        require_graph().configure_codec_io(config);
+    }
+
+    std::size_t codec_slot_count() const noexcept override
+    {
+        return graph_ ? graph_->codec_slot_count() : 0;
+    }
+
+    MutableYuv420FrameView encoder_input_yuv(std::size_t slot) override
+    {
+        return require_graph().encoder_input_yuv(slot);
+    }
+
+    void submit_encoder(std::size_t slot, int shifted_q) override
+    {
+        require_graph().submit_encoder(slot, shifted_q);
+    }
+
+    std::vector<TensorView> encoder_outputs(
+        std::size_t slot) const override
+    {
+        return require_graph().encoder_outputs(slot);
+    }
+
+    std::vector<MutableTensorView> decoder_inputs(
+        std::size_t slot) override
+    {
+        return require_graph().decoder_inputs(slot);
+    }
+
+    void submit_decoder(std::size_t slot, int shifted_q) override
+    {
+        require_graph().submit_decoder(slot, shifted_q);
+    }
+
+    Yuv420FrameView decoder_output_yuv(std::size_t slot) const override
+    {
+        return require_graph().decoder_output_yuv(slot);
+    }
+
+    void wait_codec_slot(std::size_t slot) override
+    {
+        require_graph().wait_codec_slot(slot);
+    }
+
 private:
+    driver_cubin_backend::AotGraph& require_graph()
+    {
+        if (!graph_)
+            throw std::runtime_error("driver-cubin: load() must be called first");
+        return *graph_;
+    }
+
+    const driver_cubin_backend::AotGraph& require_graph() const
+    {
+        if (!graph_)
+            throw std::runtime_error("driver-cubin: load() must be called first");
+        return *graph_;
+    }
+
     BackendOptions options_;
     driver_cubin::Driver driver_;
     driver_cubin::Module module_;

@@ -16,6 +16,7 @@ set(MLVC_DRIVER_KERNEL_SOURCES
     "${MLVC_DRIVER_KERNEL_DIR}/module.cu"
     "${MLVC_DRIVER_KERNEL_DIR}/activation.cu"
     "${MLVC_DRIVER_KERNEL_DIR}/common.cuh"
+    "${MLVC_DRIVER_KERNEL_DIR}/codec_io.cu"
     "${MLVC_DRIVER_KERNEL_DIR}/cutlass.cu"
     "${MLVC_DRIVER_KERNEL_DIR}/depthwise_conv.cu"
     "${MLVC_DRIVER_KERNEL_DIR}/elementwise.cu"
@@ -54,6 +55,7 @@ add_custom_command(
         -P "${PROJECT_SOURCE_DIR}/cmake/EmbedBinary.cmake"
     DEPENDS
         mlvc_driver_fatbin
+        "${MLVC_DRIVER_FATBIN}"
         "${PROJECT_SOURCE_DIR}/cmake/EmbedBinary.cmake"
     COMMENT "Embedding driver-cubin fatbin"
     VERBATIM)
@@ -104,6 +106,7 @@ mlvc_enable_ipo(mlvc_backend_driver_cubin)
 if(BUILD_TESTING)
     add_test(NAME mlvc_driver_cubin_probe
         COMMAND mlvc_driver_probe --iterations 100)
+    set_tests_properties(mlvc_driver_cubin_probe PROPERTIES LABELS "gpu")
 endif()
 
 install(TARGETS mlvc_driver_probe RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

@@ -14,8 +14,8 @@ AotGraph::AotGraph(const std::filesystem::path& model_dir,
                    const std::string& model_name,
                    const ModelExecutionConfig& execution_config,
                    driver_cubin::Driver& driver,
-                   const driver_cubin::Module& module)
-    : driver_(driver), module_(module)
+    const driver_cubin::Module& module)
+    : driver_(driver), module_(module), model_name_(model_name)
 {
     load_model(model_dir, model_name);
     plan_input_slice_aliases();

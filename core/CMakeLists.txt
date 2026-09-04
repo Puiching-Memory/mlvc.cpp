@@ -20,7 +20,7 @@ target_link_libraries(mlvc_core PRIVATE
     nlohmann_json::nlohmann_json)
 mlvc_enable_ipo(mlvc_core)
 
-if(MLVC_SELECTED_BACKEND STREQUAL "driver_cubin")
+if(MLVC_SELECTED_BACKEND STREQUAL "driver_cubin" AND MLVC_EMBED_MODELS)
     file(GLOB_RECURSE MLVC_EMBEDDED_MODEL_INPUTS CONFIGURE_DEPENDS
         LIST_DIRECTORIES false "${MLVC_MODEL_ROOT}/*")
     if(NOT MLVC_EMBEDDED_MODEL_INPUTS)

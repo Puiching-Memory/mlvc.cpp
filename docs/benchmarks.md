@@ -1,4 +1,4 @@
-# NVIDIA A30 FP16 backend benchmark - updated 2026-09-03
+# NVIDIA A30 FP16 backend benchmark - updated 2026-09-04
 
 This report separates model-level host-roundtrip latency from codec-level
 throughput. The two measurements exercise different boundaries and must not be
@@ -83,6 +83,30 @@ model profiles produced byte-identical output tensor files with the fusion
 enabled and disabled. This focused A/B is additive to, rather than a
 replacement for, the multi-backend table above.
 
+### 2026-09-04 decoder recurrent-feature output fusion
+
+The decoder now recognizes the corresponding 11-node recurrent-feature chain
+and fuses it with the later feature Concat. The kernel materializes the scaled
+and blended tensors required by reconstruction and writes the concatenated
+feature directly, replacing 11 pointwise kernels and both Concat copy launches.
+
+A controlled A/B on the same A30 alternated eight runs per variant. Each run
+used 50 warm-up iterations and 500 measured iterations.
+
+| Profile | Unfused mean of run medians ms | Fused mean of run medians ms | Improvement |
+| ------- | -----------------------------: | ---------------------------: | ----------: |
+| MLVC    |                       3.288624 |                     3.224106 |       1.96% |
+| MLVC-S  |                       5.845329 |                     5.812108 |       0.57% |
+
+Nsight Systems measured the new kernel at approximately 21.4 us on the
+standard profile and an aggregate GPU kernel-time reduction of roughly 0.09 ms
+per inference. Fused and unfused `x_hat` and `feature` files were byte-identical
+for both profiles.
+
+A `DepthToSpace(block=8)+Clip` fusion was also implemented and measured, then
+removed. It improved endpoint latency by only about 0.09% while requiring an
+additional 1.35 MiB persistent buffer to avoid an existing arena overlap.
+
 ### 2026-09-04 y-latent quantization and prior-tail fusion
 
 The standard encoder profile now fuses the y0 and y1 quantization/prior-update
@@ -142,14 +166,20 @@ file I/O, inference, and required synchronization. The codec keeps
 
 | Backend      | Encode fps (three runs)  | Median | Decode fps (three runs)  | Median | Stream bytes |
 | ------------ | ------------------------ | -----: | ------------------------ | -----: | -----------: |
-| Driver+cubin | 108.99 / 113.03 / 112.52 | 112.52 | 116.47 / 120.62 / 121.87 | 120.62 |       13,959 |
-| TensorRT     | 99.12 / 95.73 / 96.67    |  96.67 | 94.59 / 95.37 / 94.40    |  94.59 |       14,192 |
+| Driver+cubin | 248.90 / 356.62 / 355.75 | 355.75 | 398.02 / 395.69 / 396.37 | 396.37 |       13,959 |
+| TensorRT     | 117.68 / 106.84 / 108.13 | 108.13 | 125.01 / 104.32 / 107.03 | 107.03 |       14,032 |
 
-On this sequence, Driver+cubin is 16.4% faster than TensorRT for encode and
-27.5% faster for decode. Keeping the reference feature on the device also
-improved Driver+cubin from 96.89 to 112.52 fps for encode (+16.1%) and from
-103.14 to 120.62 fps for decode (+16.9%) relative to the previous host
-roundtrip implementation.
+The Driver+cubin codec path now uses two persistent pinned host slots, direct
+non-owning tensor and YUV views, GPU YUV conversion, direct entropy decode into
+backend input storage, cached entropy indices and scratch buffers, and reused
+rANS streams. On this sequence it is 229.0% faster than TensorRT for encode and
+270.3% faster for decode. Relative to the previous Driver+cubin medians of
+112.52 and 120.62 fps, the complete host-pipeline work improved encode by
+216.2% and decode by 228.6%.
+
+A separate 480-frame run, which amortizes first-use scheduling and graph
+capture, measured 386.05 fps encode and 407.52 fps decode. The optimized paths
+crossed all GOP resets in that run without changing the deterministic stream.
 
 ### Determinism and codec checks
 
@@ -159,10 +189,11 @@ backend:
 | Backend      | Encoded stream SHA-256                                             | Decoded YUV SHA-256                                                |
 | ------------ | ------------------------------------------------------------------ | ------------------------------------------------------------------ |
 | Driver+cubin | `9eaa181552fc13497125e040b8ff64fafdb37b76e691d219193ffae7ee6d48e3` | `9ca7d3112fb5019fdc4ef0aa51615dabb4d0f264006d1057367a3e118b2afd28` |
-| TensorRT     | `5b5d97d65529441d6cac3dcd55c12a13e4fd92e7af2045a1fd655cc25eca5b54` | `035fba4b45cb0a27a48add0ecb0e71c46676fcff8d36975d15a1cd4536d8dabe` |
+| TensorRT     | `996acc996cb48ea70633e6f5221f263d056ee6d92bcb3d669c35c86f913389d2` | `eece579befde7a9dd38743e941c44a1ae5c5eabda157d24073ee2f708cb4f9b4` |
 
-Driver+cubin also passed a separate 100-frame host-state versus device-state
-comparison with byte-identical output, including the GOP reset at frame 64.
+Driver+cubin also passed a separate 65-frame fast-path versus debug-path
+comparison with byte-identical bitstream and decoded YUV, including the GOP
+reset at frame 64.
 The backend-specific streams are different because their non-entropy feature
 calculations are not bit-exact. In this test, the Driver+cubin stream is 1.6%
 smaller than the TensorRT stream; there is no evidence of entropy divergence or
@@ -176,8 +207,8 @@ make that claim for all content, Q indices, or long-running reference states.
   higher, while decoder throughput is 6.8% higher (mean latency is 6.4% lower).
 - ONNX Runtime and libtorch are approximately 2.1x slower than the fastest
   backend in this model-level test.
-- At the full-codec boundary, Driver+cubin is 16.4% faster for encode and 27.5%
-  faster for decode than TensorRT on the measured 48-frame sequence.
+- At the full-codec boundary, Driver+cubin is 229.0% faster for encode and
+  270.3% faster for decode than TensorRT on the measured 48-frame sequence.
 - The exact entropy latents and deterministic codec output address the observed
   test cases, but do not replace multi-sequence, multi-Q, multi-GPU conformance
   and rate-distortion testing.
@@ -187,14 +218,14 @@ make that claim for all content, Q indices, or long-running reference states.
 
 ## General Optimization Headroom
 
-1. Write inputs directly into persistent pinned buffers to remove the remaining
-   pageable-to-pinned host copy.
-2. Double-buffer frame state and overlap CPU work, transfers, and GPU execution.
-3. Move YUV conversion or scaling to the GPU only where end-to-end profiling
-   shows a material codec benefit.
-4. Expand benchmarks across real sequences, Q indices, model profiles, frame
+1. Optimize or replace the remaining rANS encode/decode core, now the largest
+   named CPU hotspot after YUV conversion and staging moved off the host path.
+2. Reduce scale-extraction work further or fuse it with entropy index
+   preparation; it accounts for approximately 6.5% of encode and 8.8% of
+   decode CPU samples in the current `perf` profiles.
+3. Expand benchmarks across real sequences, Q indices, model profiles, frame
    types, longer GOP histories, and supported GPU architectures.
-5. Gate future changes on codec byte determinism, latent correctness, decoded
+4. Gate future changes on codec byte determinism, latent correctness, decoded
    metrics, bitrate, and end-to-end throughput.
 
 Per-layer code generation, large families of specialized kernel variants, and

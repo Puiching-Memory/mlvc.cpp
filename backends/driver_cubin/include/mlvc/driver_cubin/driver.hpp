@@ -27,6 +27,27 @@ struct DeviceInfo {
 
 class DriverState;
 
+class Event final {
+public:
+    Event() = default;
+    ~Event();
+
+    Event(const Event&) = delete;
+    Event& operator=(const Event&) = delete;
+    Event(Event&& other) noexcept;
+    Event& operator=(Event&& other) noexcept;
+
+    explicit operator bool() const noexcept { return event_ != nullptr; }
+
+private:
+    friend class Driver;
+    Event(std::shared_ptr<DriverState> state, abi::Event event);
+    void reset() noexcept;
+
+    std::shared_ptr<DriverState> state_;
+    abi::Event event_ = nullptr;
+};
+
 class ExecutableGraph final {
 public:
     ExecutableGraph() = default;
@@ -107,6 +128,7 @@ public:
     const DeviceInfo& device_info() const noexcept;
 
     DeviceBuffer allocate(std::size_t bytes) const;
+    Event create_event() const;
     void* allocate_host_pinned(std::size_t bytes) const;
     void free_host_pinned(void* pointer) const;
     bool pin_host(const void* host_pointer, std::size_t bytes) const;
@@ -134,6 +156,8 @@ public:
     void begin_capture() const;
     ExecutableGraph end_capture() const;
     void launch_graph(const ExecutableGraph& graph) const;
+    void record(Event& event) const;
+    void synchronize(const Event& event) const;
     void synchronize() const;
 
 private:

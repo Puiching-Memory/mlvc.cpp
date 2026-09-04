@@ -39,35 +39,73 @@ bool read_yuv420_frame(std::istream& input, int width, int height,
                         std::vector<std::uint8_t>(uv_size),
                         std::vector<std::uint8_t>(uv_size)};
 
-    input.read(reinterpret_cast<char*>(frame.y.data()),
-               static_cast<std::streamsize>(frame.y.size()));
-    if (input.gcount() == 0) {
+    if (!read_yuv420_frame(input, mutable_yuv420_view(frame))) {
         frame = {};
         return false;
     }
-    if (input.gcount() != static_cast<std::streamsize>(frame.y.size()))
+    return true;
+}
+
+bool read_yuv420_frame(std::istream& input, MutableYuv420FrameView frame)
+{
+    validate_dimensions(frame.width, frame.height);
+    if (!frame.y || !frame.u || !frame.v)
+        throw std::runtime_error("YUV420 destination planes must not be null");
+    const std::size_t y_size =
+        static_cast<std::size_t>(frame.width) * frame.height;
+    const std::size_t uv_size = y_size / 4;
+
+    input.read(reinterpret_cast<char*>(frame.y),
+               static_cast<std::streamsize>(y_size));
+    if (input.gcount() == 0) {
+        return false;
+    }
+    if (input.gcount() != static_cast<std::streamsize>(y_size))
         throw std::runtime_error("truncated Y plane in input YUV file");
-    input.read(reinterpret_cast<char*>(frame.u.data()),
-               static_cast<std::streamsize>(frame.u.size()));
-    if (input.gcount() != static_cast<std::streamsize>(frame.u.size()))
+    input.read(reinterpret_cast<char*>(frame.u),
+               static_cast<std::streamsize>(uv_size));
+    if (input.gcount() != static_cast<std::streamsize>(uv_size))
         throw std::runtime_error("truncated U plane in input YUV file");
-    input.read(reinterpret_cast<char*>(frame.v.data()),
-               static_cast<std::streamsize>(frame.v.size()));
-    if (input.gcount() != static_cast<std::streamsize>(frame.v.size()))
+    input.read(reinterpret_cast<char*>(frame.v),
+               static_cast<std::streamsize>(uv_size));
+    if (input.gcount() != static_cast<std::streamsize>(uv_size))
         throw std::runtime_error("truncated V plane in input YUV file");
     return true;
 }
 
 void write_yuv420_frame(std::ostream& output, const Yuv420Frame& frame)
 {
-    output.write(reinterpret_cast<const char*>(frame.y.data()),
-                 static_cast<std::streamsize>(frame.y.size()));
-    output.write(reinterpret_cast<const char*>(frame.u.data()),
-                 static_cast<std::streamsize>(frame.u.size()));
-    output.write(reinterpret_cast<const char*>(frame.v.data()),
-                 static_cast<std::streamsize>(frame.v.size()));
+    write_yuv420_frame(output, yuv420_view(frame));
+}
+
+void write_yuv420_frame(std::ostream& output, Yuv420FrameView frame)
+{
+    validate_dimensions(frame.width, frame.height);
+    if (!frame.y || !frame.u || !frame.v)
+        throw std::runtime_error("YUV420 source planes must not be null");
+    const std::size_t y_size =
+        static_cast<std::size_t>(frame.width) * frame.height;
+    const std::size_t uv_size = y_size / 4;
+    output.write(reinterpret_cast<const char*>(frame.y),
+                 static_cast<std::streamsize>(y_size));
+    output.write(reinterpret_cast<const char*>(frame.u),
+                 static_cast<std::streamsize>(uv_size));
+    output.write(reinterpret_cast<const char*>(frame.v),
+                 static_cast<std::streamsize>(uv_size));
     if (!output)
         throw std::runtime_error("failed to write YUV output frame");
+}
+
+Yuv420FrameView yuv420_view(const Yuv420Frame& frame) noexcept
+{
+    return Yuv420FrameView{frame.width, frame.height, frame.y.data(),
+                           frame.u.data(), frame.v.data()};
+}
+
+MutableYuv420FrameView mutable_yuv420_view(Yuv420Frame& frame) noexcept
+{
+    return MutableYuv420FrameView{frame.width, frame.height, frame.y.data(),
+                                  frame.u.data(), frame.v.data()};
 }
 
 FramePadding frame_padding(int width, int height,

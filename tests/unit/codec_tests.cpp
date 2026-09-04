@@ -5,6 +5,7 @@
 #include "mlvc/core/yuv.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
@@ -111,6 +112,31 @@ void test_half_conversion()
     }
 }
 
+void test_yuv_views()
+{
+    constexpr int width = 4;
+    constexpr int height = 2;
+    std::array<std::uint8_t, 12> expected{};
+    for (std::size_t i = 0; i < expected.size(); ++i)
+        expected[i] = static_cast<std::uint8_t>(i * 17U);
+
+    const std::string input_bytes(
+        reinterpret_cast<const char*>(expected.data()), expected.size());
+    std::istringstream input(input_bytes, std::ios::binary);
+    std::array<std::uint8_t, 12> storage{};
+    mlvc::MutableYuv420FrameView frame{
+        width, height, storage.data(), storage.data() + 8,
+        storage.data() + 10};
+    require(mlvc::read_yuv420_frame(input, frame),
+            "cannot read into non-owning YUV view");
+    require(storage == expected, "non-owning YUV read differs from source");
+
+    std::ostringstream output(std::ios::binary);
+    mlvc::write_yuv420_frame(output, static_cast<mlvc::Yuv420FrameView>(frame));
+    require(output.str() == input_bytes,
+            "non-owning YUV write differs from source");
+}
+
 void test_mlvc_codec(const std::filesystem::path& assets)
 {
     auto model_dir = assets.parent_path() / "canonical/mlvc-psnr-v1/640x368";
@@ -165,6 +191,30 @@ void test_mlvc_codec(const std::filesystem::path& assets)
             "y0 rANS round trip mismatch");
     require(fp16_numerically_equal(decoded.y_raw_1, y1),
             "y1 rANS round trip mismatch");
+
+    const std::array<std::int64_t, 4> z_shape{1, 128, 3, 5};
+    const std::array<std::int64_t, 4> y_shape{1, 64, 23, 40};
+    std::vector<mlvc::Float16Storage> direct_z(z.element_count());
+    std::vector<mlvc::Float16Storage> direct_y0(y0.element_count());
+    std::vector<mlvc::Float16Storage> direct_y1(y1.element_count());
+    entropy.decode_into(
+        payload, 21,
+        mlvc::MutableTensorView{"z_raw", z_shape,
+            mlvc::TensorDataType::kFloat16, direct_z.data(),
+            direct_z.size() * sizeof(direct_z.front())},
+        mlvc::MutableTensorView{"y_raw_0", y_shape,
+            mlvc::TensorDataType::kFloat16, direct_y0.data(),
+            direct_y0.size() * sizeof(direct_y0.front())},
+        mlvc::MutableTensorView{"y_raw_1", y_shape,
+            mlvc::TensorDataType::kFloat16, direct_y1.data(),
+            direct_y1.size() * sizeof(direct_y1.front())});
+    require(direct_z == std::get<std::vector<mlvc::Float16Storage>>(
+                            decoded.z_raw.data) &&
+            direct_y0 == std::get<std::vector<mlvc::Float16Storage>>(
+                             decoded.y_raw_0.data) &&
+            direct_y1 == std::get<std::vector<mlvc::Float16Storage>>(
+                             decoded.y_raw_1.data),
+            "decode_into differs from owning entropy decode");
 
     mlvc::Tensor x_hat{"x_hat", {1, 3, 368, 640},
         read_fp16(decoder_case / "expected-00-x_hat.fp16.raw")};
@@ -266,6 +316,7 @@ int main(int argc, char** argv)
         if (argc != 2)
             throw std::runtime_error("usage: mlvc_codec_tests ASSETS_ROOT");
         test_half_conversion();
+        test_yuv_views();
         test_mlvc_codec(std::filesystem::path(argv[1]));
         test_mlvc_s_codec(std::filesystem::path(argv[1]));
         std::cout << "codec tests passed\n";

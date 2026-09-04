@@ -538,6 +538,190 @@ bool AotGraph::try_execute_feature_update(const json& nodes, std::size_t index)
     return true;
 }
 
+bool AotGraph::try_execute_feature_update_outputs(
+    const json& nodes, std::size_t index)
+{
+    if (index + 10 >= nodes.size())
+        return false;
+    static constexpr std::array<const char*, 11> operations{
+        "Slice", "Slice", "Slice", "Sigmoid", "Sigmoid", "Mul",
+        "Sub", "Mul", "Add", "Mul", "Mul"};
+    for (std::size_t offset = 0; offset < operations.size(); ++offset) {
+        if (nodes.at(index + offset).at("op") != operations[offset])
+            return false;
+    }
+
+    auto inputs = [&](std::size_t offset) {
+        return nodes.at(index + offset).at("inputs")
+            .get<std::vector<std::string>>();
+    };
+    auto output = [&](std::size_t offset) -> std::string {
+        const auto names = nodes.at(index + offset).at("outputs")
+            .get<std::vector<std::string>>();
+        return names.size() == 1 ? names[0] : std::string{};
+    };
+    auto consumer_count = [&](const std::string& name) {
+        std::size_t count = 0;
+        for (const auto& candidate : nodes) {
+            const auto candidate_inputs = candidate.at("inputs")
+                .get<std::vector<std::string>>();
+            count += static_cast<std::size_t>(std::count(
+                candidate_inputs.begin(), candidate_inputs.end(), name));
+        }
+        return count;
+    };
+
+    const auto slice0_inputs = inputs(0);
+    const auto slice1_inputs = inputs(1);
+    const auto slice2_inputs = inputs(2);
+    if (slice0_inputs.empty() || slice1_inputs.empty() ||
+        slice2_inputs.empty() || slice0_inputs[0] != slice1_inputs[0] ||
+        slice0_inputs[0] != slice2_inputs[0]) {
+        return false;
+    }
+    const std::string slice0 = output(0);
+    const std::string slice1 = output(1);
+    const std::string slice2 = output(2);
+    const std::string sigmoid0 = output(3);
+    const std::string sigmoid1 = output(4);
+    const std::string weighted1 = output(5);
+    const std::string inverse_gate = output(6);
+    const std::string weighted0 = output(7);
+    const std::string blended = output(8);
+    const std::string gated = output(9);
+    const std::string scaled = output(10);
+    if (slice0.empty() || slice1.empty() || slice2.empty() ||
+        sigmoid0.empty() || sigmoid1.empty() || weighted1.empty() ||
+        inverse_gate.empty() || weighted0.empty() || blended.empty() ||
+        gated.empty() || scaled.empty() ||
+        inputs(3) != std::vector<std::string>{slice1} ||
+        inputs(4) != std::vector<std::string>{slice2} ||
+        inputs(5).size() != 2 || inputs(5)[0] != sigmoid0 ||
+        inputs(6).size() != 2 || inputs(6)[1] != sigmoid0 ||
+        inputs(7) != std::vector<std::string>{inverse_gate, slice0} ||
+        inputs(8) != std::vector<std::string>{weighted1, weighted0} ||
+        inputs(9) != std::vector<std::string>{sigmoid1, blended} ||
+        inputs(10).size() != 2 || inputs(10)[0] != gated) {
+        return false;
+    }
+
+    std::size_t concat_index = nodes.size();
+    std::string result_name;
+    for (std::size_t candidate_index = index + operations.size();
+         candidate_index < nodes.size(); ++candidate_index) {
+        const json& candidate = nodes.at(candidate_index);
+        if (candidate.at("op") != "Concat")
+            continue;
+        const auto candidate_inputs = candidate.at("inputs")
+            .get<std::vector<std::string>>();
+        const auto candidate_outputs = candidate.at("outputs")
+            .get<std::vector<std::string>>();
+        if (candidate_inputs != std::vector<std::string>{scaled, blended} ||
+            candidate_outputs.size() != 1 ||
+            candidate.at("attributes").value("axis", 0) != 1) {
+            continue;
+        }
+        if (concat_index != nodes.size())
+            return false;
+        concat_index = candidate_index;
+        result_name = candidate_outputs[0];
+    }
+    if (concat_index == nodes.size() || result_name.empty())
+        return false;
+
+    const std::array<std::pair<const std::string*, std::size_t>, 11>
+        expected_consumers{{
+            {&slice0, 1}, {&slice1, 1}, {&slice2, 1}, {&sigmoid0, 2},
+            {&sigmoid1, 1}, {&weighted1, 1}, {&inverse_gate, 1},
+            {&weighted0, 1}, {&blended, 2}, {&gated, 1}, {&scaled, 2}}};
+    for (const auto& [name, expected] : expected_consumers) {
+        if (consumer_count(*name) != expected)
+            return false;
+    }
+
+    const Value& source = value(slice0_inputs[0]);
+    const Value& first = value(slice0);
+    const Value& history = value(inputs(5)[1]);
+    const Value& scale = value(inputs(10)[1]);
+    const Value& scaled_value = value(scaled);
+    const Value& blended_value = value(blended);
+    Value& result = values_.at(result_name);
+    if (source.dtype != "fp16" || first.dtype != "fp16" ||
+        history.dtype != "fp16" || scale.dtype != "fp16" ||
+        scaled_value.dtype != "fp16" || blended_value.dtype != "fp16" ||
+        result.dtype != "fp16" || source.shape.size() != 4 ||
+        first.shape.size() != 4 || result.shape.size() != 4 ||
+        first.shape[0] != source.shape[0] ||
+        source.shape[1] != first.shape[1] * 3 ||
+        result.shape[0] != first.shape[0] ||
+        result.shape[1] != first.shape[1] * 2 ||
+        result.shape[2] != first.shape[2] ||
+        result.shape[3] != first.shape[3] || history.shape != first.shape ||
+        scale.shape != std::vector<int64_t>{1, first.shape[1], 1, 1} ||
+        scaled_value.shape != first.shape || blended_value.shape != first.shape ||
+        value(slice1).shape != first.shape || value(slice2).shape != first.shape ||
+        scalar_fp16(inputs(6)[0]) != 1.0F) {
+        return false;
+    }
+    for (std::size_t offset = 3; offset <= 10; ++offset) {
+        if (value(output(offset)).dtype != "fp16" ||
+            value(output(offset)).shape != first.shape) {
+            return false;
+        }
+    }
+
+    int channels = static_cast<int>(first.shape[1]);
+    if (!is_channel_slice(nodes.at(index), 0, channels) ||
+        !is_channel_slice(nodes.at(index + 1), channels, channels * 2) ||
+        !is_channel_slice(nodes.at(index + 2), channels * 2, channels * 3) ||
+        ranges_overlap(scaled_value, blended_value) ||
+        ranges_overlap(blended_value, source) ||
+        (ranges_overlap(scaled_value, source) &&
+         scaled_value.address != source.address) ||
+        ranges_overlap(scaled_value, history) ||
+        ranges_overlap(blended_value, history)) {
+        return false;
+    }
+
+    const auto output_iterator = std::find(
+        output_names_.begin(), output_names_.end(), result_name);
+    const bool bound_state_output =
+        output_iterator != output_names_.end() &&
+        is_state_output(static_cast<std::size_t>(
+            std::distance(output_names_.begin(), output_iterator)));
+    if (!bound_state_output) {
+        auto [buffer, inserted] =
+            feature_update_output_buffers_.try_emplace(concat_index);
+        if (inserted) {
+            buffer->second = driver_.allocate(
+                element_count(result.shape) * dtype_bytes(result.dtype));
+        }
+        result.address = buffer->second.address();
+    }
+    if (std::find(elided_schedule_nodes_.begin(),
+                  elided_schedule_nodes_.end(), concat_index) ==
+        elided_schedule_nodes_.end()) {
+        elided_schedule_nodes_.push_back(concat_index);
+    }
+
+    DeviceAddress source_address = source.address;
+    DeviceAddress history_address = history.address;
+    DeviceAddress scale_address = scale.address;
+    DeviceAddress scaled_address = scaled_value.address;
+    DeviceAddress blended_address = blended_value.address;
+    DeviceAddress result_address = result.address;
+    int batch_count = static_cast<int>(first.shape[0]);
+    int spatial_count = static_cast<int>(first.shape[2] * first.shape[3]);
+    void* parameters[] = {
+        &source_address, &history_address, &scale_address, &scaled_address,
+        &blended_address, &result_address, &batch_count, &channels,
+        &spatial_count};
+    const std::size_t pairs = static_cast<std::size_t>(batch_count) *
+        channels * ((spatial_count + 1) / 2);
+    launch_linear(feature_update_outputs_, pairs, parameters);
+    return true;
+}
+
 bool AotGraph::try_execute_pointwise_epilogue(const json& nodes, std::size_t index)
 {
     if (driver_.device_info().compute_major < 8 || index + 1 >= nodes.size())

@@ -105,6 +105,42 @@ public:
     DeviceInfo info;
 };
 
+Event::Event(std::shared_ptr<DriverState> state, abi::Event event)
+    : state_(std::move(state)), event_(event)
+{
+}
+
+Event::~Event()
+{
+    reset();
+}
+
+Event::Event(Event&& other) noexcept
+    : state_(std::move(other.state_)),
+      event_(std::exchange(other.event_, nullptr))
+{
+}
+
+Event& Event::operator=(Event&& other) noexcept
+{
+    if (this != &other) {
+        reset();
+        state_ = std::move(other.state_);
+        event_ = std::exchange(other.event_, nullptr);
+    }
+    return *this;
+}
+
+void Event::reset() noexcept
+{
+    if (state_ && event_) {
+        if (cuCtxSetCurrent(state_->context) == CUDA_SUCCESS)
+            cuEventDestroy(event_);
+    }
+    event_ = nullptr;
+    state_.reset();
+}
+
 ExecutableGraph::ExecutableGraph(std::shared_ptr<DriverState> state,
                                  abi::GraphExec graph)
     : state_(std::move(state)), graph_(graph)
@@ -254,6 +290,15 @@ DeviceBuffer Driver::allocate(std::size_t bytes) const
     return DeviceBuffer(state_, address, bytes);
 }
 
+Event Driver::create_event() const
+{
+    state_->make_current();
+    abi::Event event = nullptr;
+    DriverState::check(cuEventCreate(&event, abi::kEventFlags),
+                       "cuEventCreate");
+    return Event(state_, event);
+}
+
 Module Driver::load_module(std::span<const std::byte> image) const
 {
     if (image.empty())
@@ -401,6 +446,24 @@ void Driver::launch_graph(const ExecutableGraph& graph) const
     state_->make_current();
     DriverState::check(cuGraphLaunch(graph.graph_, state_->stream),
                        "cuGraphLaunch");
+}
+
+void Driver::record(Event& event) const
+{
+    if (!event.event_ || event.state_.get() != state_.get())
+        throw std::runtime_error("driver-cubin: invalid completion event");
+    state_->make_current();
+    DriverState::check(cuEventRecord(event.event_, state_->stream),
+                       "cuEventRecord");
+}
+
+void Driver::synchronize(const Event& event) const
+{
+    if (!event.event_ || event.state_.get() != state_.get())
+        throw std::runtime_error("driver-cubin: invalid completion event");
+    state_->make_current();
+    DriverState::check(cuEventSynchronize(event.event_),
+                       "cuEventSynchronize");
 }
 
 void Driver::synchronize() const

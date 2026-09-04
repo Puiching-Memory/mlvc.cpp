@@ -162,12 +162,12 @@ Four separate GPU backends implement `mlvc::InferenceBackend`
 (`runtime/include/mlvc/runtime/backend.hpp`). A release compiles exactly one
 via the `MLVC_SELECTED_BACKEND` CMake setting:
 
-| Backend        | Model artifacts              | Execution       | Notes                                                                             |
-| -------------- | ---------------------------- | --------------- | --------------------------------------------------------------------------------- |
-| `onnxruntime`  | `MLVC{Encoder,Decoder}.onnx` | CUDA 13 EP      | ONNX Runtime 1.26.0                                                               |
-| `libtorch`     | `MLVC{Encoder,Decoder}.ts`   | CUDA 13         | libtorch 2.13.0 cu130; needs separate TorchScript exports                         |
-| `tensorrt`     | `MLVC{Encoder,Decoder}.onnx` | CUDA 13         | TensorRT 11.2; hardware-specific engines are cached per GPU                       |
-| `driver_cubin` | embedded AOT model image     | CUDA Driver API | Embedded fatbin and AOT data; no inference framework                              |
+| Backend        | Model artifacts              | Execution       | Notes                                                       |
+| -------------- | ---------------------------- | --------------- | ----------------------------------------------------------- |
+| `onnxruntime`  | `MLVC{Encoder,Decoder}.onnx` | CUDA 13 EP      | ONNX Runtime 1.26.0                                         |
+| `libtorch`     | `MLVC{Encoder,Decoder}.ts`   | CUDA 13         | libtorch 2.13.0 cu130; needs separate TorchScript exports   |
+| `tensorrt`     | `MLVC{Encoder,Decoder}.onnx` | CUDA 13         | TensorRT 11.2; hardware-specific engines are cached per GPU |
+| `driver_cubin` | embedded AOT model image     | CUDA Driver API | Embedded fatbin and AOT data; no inference framework        |
 
 `ModelExecutionConfig::state_bindings` declares output-to-input state loops when
 the model is loaded. Bound state tensors are omitted from `run()`'s host input
@@ -190,18 +190,18 @@ The Driver+cubin implementation is kept under `backends/driver_cubin` and does
 not expose its CUDA, CUTLASS, JSON, or AOT types through the installed SDK. Its
 source modules have one-way responsibilities:
 
-| Module | Responsibility |
-| ------ | -------------- |
-| `backend.cpp` | Implements the backend factory and owns one loaded AOT graph |
-| `model_loader.cpp` | Loads the embedded graph manifest and weight image |
-| `graph_ir.cpp` | Provides graph value, dtype, shape, and scalar accessors |
-| `graph_validator.cpp` | Validates state bindings, slices, and alias ranges |
-| `memory_planner.cpp` | Plans input aliases and reusable epilogue/concat workspaces |
-| `fusion_registry.cpp` | Matches complete fusion dependency chains and launches them |
-| `execution_plan.cpp` | Lowers unmatched nodes to validated kernel launches |
-| `kernel_registry.cpp` | Resolves fatbin entry points and their resource attributes |
-| `cuda_graph_executor.cpp` | Owns staging, state reset, graph capture, and replay |
-| `driver.cpp` | Wraps CUDA Driver API handles and allocations with RAII |
+| Module                    | Responsibility                                               |
+| ------------------------- | ------------------------------------------------------------ |
+| `backend.cpp`             | Implements the backend factory and owns one loaded AOT graph |
+| `model_loader.cpp`        | Loads the embedded graph manifest and weight image           |
+| `graph_ir.cpp`            | Provides graph value, dtype, shape, and scalar accessors     |
+| `graph_validator.cpp`     | Validates state bindings, slices, and alias ranges           |
+| `memory_planner.cpp`      | Plans input aliases and reusable epilogue/concat workspaces  |
+| `fusion_registry.cpp`     | Matches complete fusion dependency chains and launches them  |
+| `execution_plan.cpp`      | Lowers unmatched nodes to validated kernel launches          |
+| `kernel_registry.cpp`     | Resolves fatbin entry points and their resource attributes   |
+| `cuda_graph_executor.cpp` | Owns staging, state reset, graph capture, and replay         |
+| `driver.cpp`              | Wraps CUDA Driver API handles and allocations with RAII      |
 
 `aot_graph.hpp` is the private contract shared by these translation units. The
 runtime path is therefore `load -> validate/plan -> capture -> replay`; model

@@ -15,6 +15,7 @@
 // q_index_shifted.
 
 #include "mlvc/core/tensor.hpp"
+#include "mlvc/core/yuv.hpp"
 
 #include <cstddef>
 #include <memory>
@@ -60,6 +61,39 @@ public:
     virtual std::vector<Tensor> run(const std::vector<Tensor>& inputs) = 0;
 
     virtual void reset_state() = 0;
+};
+
+// Optional fast path used by fixed-shape backends that can keep persistent
+// pinned host buffers and insert codec conversion kernels around inference.
+// Requests are submitted in stream order; a slot must be waited before its
+// host buffers are reused.
+struct CodecIoConfig {
+    int width = 0;
+    int height = 0;
+    int model_width = 0;
+    int model_height = 0;
+    float pixel_range = 1.0F;
+    FramePadding padding;
+    std::size_t slots = 2;
+};
+
+class BufferedCodecBackend {
+public:
+    virtual ~BufferedCodecBackend() = default;
+
+    virtual void configure_codec_io(const CodecIoConfig& config) = 0;
+    virtual std::size_t codec_slot_count() const noexcept = 0;
+
+    virtual MutableYuv420FrameView encoder_input_yuv(std::size_t slot) = 0;
+    virtual void submit_encoder(std::size_t slot, int shifted_q) = 0;
+    virtual std::vector<TensorView> encoder_outputs(std::size_t slot) const = 0;
+
+    virtual std::vector<MutableTensorView> decoder_inputs(
+        std::size_t slot) = 0;
+    virtual void submit_decoder(std::size_t slot, int shifted_q) = 0;
+    virtual Yuv420FrameView decoder_output_yuv(std::size_t slot) const = 0;
+
+    virtual void wait_codec_slot(std::size_t slot) = 0;
 };
 
 // Exactly one implementation of these symbols is linked into each release.

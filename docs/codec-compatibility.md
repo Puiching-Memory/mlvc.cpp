@@ -117,10 +117,10 @@ python3 tests/conformance/run_codec_conformance.py --diagnostic \
 NVIDIA A30 used for the 2026-09-02 release audit, the TensorRT profile-scoped
 engine produced the following 100-frame results:
 
-| Profile | Encode fps | Decode official stream fps | Decode self stream fps | Official-stream min PSNR | Self-stream min PSNR | Max self YUV error | Strict failures (official/self) |
-| ------- | ---------: | -------------------------: | ---------------------: | ------------------------: | -------------------: | -----------------: | -----------------------------: |
-| `mlvc-psnr-v1` | 69.98 | 72.85 | 95.70 | 63.522 dB | 60.447 dB | 2 | 0 / 32 |
-| `mlvc-s-psnr-v1` | 109.72 | 116.65 | 146.38 | 59.421 dB | 49.096 dB | 4 | 9 / 100 |
+| Profile          | Encode fps | Decode official stream fps | Decode self stream fps | Official-stream min PSNR | Self-stream min PSNR | Max self YUV error | Strict failures (official/self) |
+| ---------------- | ---------: | -------------------------: | ---------------------: | -----------------------: | -------------------: | -----------------: | ------------------------------: |
+| `mlvc-psnr-v1`   |      69.98 |                      72.85 |                  95.70 |                63.522 dB |            60.447 dB |                  2 |                          0 / 32 |
+| `mlvc-s-psnr-v1` |     109.72 |                     116.65 |                 146.38 |                59.421 dB |            49.096 dB |                  4 |                         9 / 100 |
 
 Both profiles preserved the unshifted `q_index=21` on all 100 containers and
 reset their feature DPB at frames 0 and 64, matching the official GOP schedule.

@@ -17,9 +17,11 @@ using Module = CUmodule;
 using Function = CUfunction;
 using Graph = CUgraph;
 using GraphExec = CUgraphExec;
+using Event = CUevent;
 
 inline constexpr Result kSuccess = CUDA_SUCCESS;
 inline constexpr unsigned int kStreamNonBlocking = CU_STREAM_NON_BLOCKING;
+inline constexpr unsigned int kEventFlags = CU_EVENT_DISABLE_TIMING;
 inline constexpr CUstreamCaptureMode kStreamCaptureThreadLocal =
     CU_STREAM_CAPTURE_MODE_THREAD_LOCAL;
 inline constexpr CUdevice_attribute kComputeCapabilityMajor =

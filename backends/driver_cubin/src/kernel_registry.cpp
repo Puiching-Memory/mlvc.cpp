@@ -8,6 +8,8 @@ void AotGraph::register_kernels()
     binary_contiguous_ = module_.function("mlvc_binary_contiguous_fp16");
     unary_ = module_.function("mlvc_unary_fp16");
     feature_update_ = module_.function("mlvc_feature_update_fp16");
+    feature_update_outputs_ =
+        module_.function("mlvc_feature_update_outputs_fp16");
     y0_tail_ = module_.function("mlvc_y0_tail_fp16");
     y1_tail_ = module_.function("mlvc_y1_tail_fp16");
     reglu_ = module_.function("mlvc_reglu_fp16");
@@ -86,6 +88,8 @@ void AotGraph::register_kernels()
     concat_ = module_.function("mlvc_concat_copy_fp16");
     depth_to_space_ = module_.function("mlvc_depth_to_space_fp16");
     space_to_depth_ = module_.function("mlvc_space_to_depth_fp16");
+    yuv420_to_nchw_ = module_.function("mlvc_yuv420_to_nchw_fp16");
+    nchw_to_yuv420_ = module_.function("mlvc_nchw_to_yuv420");
 }
 
 }  // namespace mlvc::driver_cubin_backend

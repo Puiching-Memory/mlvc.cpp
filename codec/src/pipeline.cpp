@@ -18,6 +18,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
@@ -288,6 +289,201 @@ void write_debug_tensors(const CodecOptions& options, const char* stage,
                                  manifest_path.string());
 }
 
+bool shape_matches(std::span<const int64_t> actual,
+                   const std::vector<int64_t>& expected)
+{
+    return actual.size() == expected.size() &&
+        std::equal(actual.begin(), actual.end(), expected.begin());
+}
+
+const TensorView& find_tensor_view(const std::vector<TensorView>& tensors,
+                                   std::string_view name)
+{
+    const auto found = std::find_if(
+        tensors.begin(), tensors.end(),
+        [&](const TensorView& tensor) { return tensor.name == name; });
+    if (found == tensors.end())
+        throw std::runtime_error("buffered backend output is missing " +
+                                 std::string(name));
+    return *found;
+}
+
+MutableTensorView find_tensor_view(
+    const std::vector<MutableTensorView>& tensors, std::string_view name)
+{
+    const auto found = std::find_if(
+        tensors.begin(), tensors.end(),
+        [&](const MutableTensorView& tensor) { return tensor.name == name; });
+    if (found == tensors.end())
+        throw std::runtime_error("buffered backend input is missing " +
+                                 std::string(name));
+    return *found;
+}
+
+void validate_fp16_tensor(TensorView tensor,
+                          const std::vector<int64_t>& shape,
+                          const char* name)
+{
+    if (tensor.data_type != TensorDataType::kFloat16 ||
+        !shape_matches(tensor.shape, shape) || !tensor.data ||
+        tensor.bytes != tensor.element_count() * sizeof(Float16Storage)) {
+        throw std::runtime_error(std::string("backend output ") + name +
+                                 " has unexpected shape or dtype");
+    }
+}
+
+CodecIoConfig make_codec_io_config(const CodecOptions& options,
+                                   const ModelConfig& config)
+{
+    CodecIoConfig result;
+    result.width = options.width;
+    result.height = options.height;
+    result.model_width = config.model_width;
+    result.model_height = config.model_height;
+    result.pixel_range = config.pixel_range;
+    result.padding = frame_padding(options.width, options.height,
+                                   config.model_width, config.model_height);
+    result.slots = 2;
+    return result;
+}
+
+CodecStats encode_buffered(const CodecOptions& options,
+                           const ModelConfig& config,
+                           EntropyCodec& entropy,
+                           InferenceBackend& backend,
+                           BufferedCodecBackend& buffered,
+                           std::istream& input, std::ostream& output,
+                           bool stream_output)
+{
+    buffered.configure_codec_io(make_codec_io_config(options, config));
+    const std::size_t slots = buffered.codec_slot_count();
+    if (slots < 2)
+        throw std::runtime_error("buffered backend requires at least two slots");
+
+    const auto started = std::chrono::steady_clock::now();
+    CodecStats stats;
+    int submitted = 0;
+    auto consume = [&](std::size_t slot) {
+        buffered.wait_codec_slot(slot);
+        const std::vector<TensorView> outputs = buffered.encoder_outputs(slot);
+        const TensorView& z = find_tensor_view(outputs, "z_raw");
+        const TensorView& y0 = find_tensor_view(outputs, "y_raw_0");
+        const TensorView& y1 = find_tensor_view(outputs, "y_raw_1");
+        validate_fp16_tensor(z,
+            {1, config.hyperprior_channels, config.hyperprior_height(),
+             config.hyperprior_width()}, "z_raw");
+        const std::vector<int64_t> y_shape{
+            1, config.latent_channels / 2,
+            config.latent_height(), config.latent_width()};
+        validate_fp16_tensor(y0, y_shape, "y_raw_0");
+        validate_fp16_tensor(y1, y_shape, "y_raw_1");
+
+        EncodedFrame encoded;
+        encoded.q_index = options.q_index;
+        encoded.payload = entropy.encode(y1, y0, z, options.q_index);
+        write_encoded_frame(output, encoded);
+        if (stream_output)
+            output.flush();
+        if (!output)
+            throw std::runtime_error("failed to flush output bitstream");
+        ++stats.frames;
+        stats.input_bytes += yuv420_frame_bytes(options.width, options.height);
+        stats.output_bytes += encoded.payload.size() + 8;
+    };
+
+    while (options.frames == 0 || submitted < options.frames) {
+        if (submitted - stats.frames == static_cast<int>(slots))
+            consume(static_cast<std::size_t>(stats.frames) % slots);
+        const std::size_t slot = static_cast<std::size_t>(submitted) % slots;
+        MutableYuv420FrameView frame = buffered.encoder_input_yuv(slot);
+        if (!read_yuv420_frame(input, frame))
+            break;
+
+        const int gop_frame = config.frame_in_gop(submitted);
+        if (gop_frame == 0)
+            backend.reset_state();
+        const int shifted_q = options.q_index + config.q_index_shift(gop_frame);
+        if (shifted_q < 0 || shifted_q >= config.total_qp_num)
+            throw std::runtime_error("shifted q-index is outside the model range");
+        buffered.submit_encoder(slot, shifted_q);
+        ++submitted;
+    }
+    while (stats.frames < submitted)
+        consume(static_cast<std::size_t>(stats.frames) % slots);
+
+    output.flush();
+    if (!output)
+        throw std::runtime_error("failed to finalize output bitstream");
+    if (!stream_output)
+        stats.output_bytes = regular_file_size(options.output_path);
+    stats.elapsed_seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - started).count();
+    return stats;
+}
+
+CodecStats decode_buffered(const CodecOptions& options,
+                           const ModelConfig& config,
+                           EntropyCodec& entropy,
+                           InferenceBackend& backend,
+                           BufferedCodecBackend& buffered,
+                           std::istream& input, std::ostream& output,
+                           bool stream_output)
+{
+    buffered.configure_codec_io(make_codec_io_config(options, config));
+    const std::size_t slots = buffered.codec_slot_count();
+    if (slots < 2)
+        throw std::runtime_error("buffered backend requires at least two slots");
+
+    const auto started = std::chrono::steady_clock::now();
+    CodecStats stats;
+    int submitted = 0;
+    auto consume = [&](std::size_t slot) {
+        buffered.wait_codec_slot(slot);
+        write_yuv420_frame(output, buffered.decoder_output_yuv(slot));
+        if (stream_output)
+            output.flush();
+        if (!output)
+            throw std::runtime_error("failed to flush output YUV");
+        ++stats.frames;
+        stats.output_bytes += yuv420_frame_bytes(options.width, options.height);
+    };
+
+    EncodedFrame encoded;
+    while ((options.frames == 0 || submitted < options.frames) &&
+           read_encoded_frame(input, encoded)) {
+        if (submitted - stats.frames == static_cast<int>(slots))
+            consume(static_cast<std::size_t>(stats.frames) % slots);
+        if (encoded.q_index < 0 || encoded.q_index >= config.qp_num)
+            throw std::runtime_error("bitstream q-index is outside the model range");
+        const int gop_frame = config.frame_in_gop(submitted);
+        if (gop_frame == 0)
+            backend.reset_state();
+        const int shifted_q = encoded.q_index + config.q_index_shift(gop_frame);
+        if (shifted_q < 0 || shifted_q >= config.total_qp_num)
+            throw std::runtime_error("shifted q-index is outside the model range");
+
+        const std::size_t slot = static_cast<std::size_t>(submitted) % slots;
+        const std::vector<MutableTensorView> inputs =
+            buffered.decoder_inputs(slot);
+        MutableTensorView z = find_tensor_view(inputs, "z_raw");
+        MutableTensorView y0 = find_tensor_view(inputs, "y_raw_0");
+        MutableTensorView y1 = find_tensor_view(inputs, "y_raw_1");
+        entropy.decode_into(encoded.payload, encoded.q_index, z, y0, y1);
+        buffered.submit_decoder(slot, shifted_q);
+        stats.input_bytes += encoded.payload.size() + 8;
+        ++submitted;
+    }
+    while (stats.frames < submitted)
+        consume(static_cast<std::size_t>(stats.frames) % slots);
+
+    output.flush();
+    if (!output)
+        throw std::runtime_error("failed to finalize output YUV");
+    stats.elapsed_seconds = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - started).count();
+    return stats;
+}
+
 }  // namespace
 
 std::vector<std::string> available_model_profiles()
@@ -329,6 +525,13 @@ CodecStats encode_video(const CodecOptions& options)
     }
     if (!*output)
         throw std::runtime_error("cannot create output bitstream: " + options.output_path);
+
+    if (options.debug_dir.empty()) {
+        if (auto* buffered = dynamic_cast<BufferedCodecBackend*>(backend.get())) {
+            return encode_buffered(options, config, entropy, *backend, *buffered,
+                                   *input, *output, stream_output);
+        }
+    }
 
     const auto started = std::chrono::steady_clock::now();
     CodecStats stats;
@@ -440,6 +643,13 @@ CodecStats decode_video(const CodecOptions& options)
     }
     if (!*output)
         throw std::runtime_error("cannot create output YUV: " + options.output_path);
+
+    if (options.debug_dir.empty()) {
+        if (auto* buffered = dynamic_cast<BufferedCodecBackend*>(backend.get())) {
+            return decode_buffered(options, config, entropy, *backend, *buffered,
+                                   *input, *output, stream_output);
+        }
+    }
 
     const auto started = std::chrono::steady_clock::now();
     CodecStats stats;

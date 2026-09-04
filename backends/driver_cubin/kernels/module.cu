@@ -4,6 +4,7 @@
 #include "elementwise.cu"
 #include "recurrent_feature.cu"
 #include "quantization_tail.cu"
+#include "codec_io.cu"
 #include "layout.cu"
 #include "activation.cu"
 #include "generic_conv.cu"

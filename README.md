@@ -177,7 +177,11 @@ All source builds are placed below the single top-level `build/` directory.
 Equivalent presets are provided for `libtorch`, `tensorrt`, and
 `driver-cubin`.
 
-CI and release builds run on a Linux x86_64 NVIDIA self-hosted runner.
+CI runs on a standard Linux x86_64 runner. It builds the driver-cubin code,
+runs the portable tests, and creates a compile-only smoke package without
+model assets or GPU runtime checks. The full release packages still require
+the canonical model bundles and an NVIDIA build host; run the commands above
+for those packages.
 
 ## Usage
 

@@ -51,11 +51,28 @@ public:
 
     void reset_state();
     std::vector<Tensor> run(const std::vector<Tensor>& inputs);
+    void configure_codec_io(const CodecIoConfig& config);
+    std::size_t codec_slot_count() const noexcept;
+    MutableYuv420FrameView encoder_input_yuv(std::size_t slot);
+    void submit_encoder(std::size_t slot, int shifted_q);
+    std::vector<TensorView> encoder_outputs(std::size_t slot) const;
+    std::vector<MutableTensorView> decoder_inputs(std::size_t slot);
+    void submit_decoder(std::size_t slot, int shifted_q);
+    Yuv420FrameView decoder_output_yuv(std::size_t slot) const;
+    void wait_codec_slot(std::size_t slot);
 
 private:
     struct StateBinding {
         std::size_t input_index;
         std::size_t output_index;
+    };
+
+    struct HostSlot {
+        std::vector<void*> inputs;
+        std::vector<void*> outputs;
+        void* yuv = nullptr;
+        driver_cubin::Event completion;
+        bool pending = false;
     };
 
     void load_model(const std::filesystem::path& model_dir,
@@ -75,8 +92,13 @@ private:
     static bool ranges_overlap(const Value& lhs, const Value& rhs);
 
     void register_kernels();
-    void ensure_input_staging();
-    void ensure_output_staging();
+    void ensure_host_slots(std::size_t count);
+    HostSlot& host_slot(std::size_t slot);
+    const HostSlot& host_slot(std::size_t slot) const;
+    void enqueue_model();
+    void enqueue_outputs(HostSlot& slot);
+    void set_q_index(HostSlot& slot, int shifted_q);
+    void finish_submit(HostSlot& slot);
 
     const Value& value(const std::string& name) const;
 
@@ -101,6 +123,8 @@ private:
     void execute_schedule();
     bool try_execute_y0_tail(const json& nodes, std::size_t index);
     bool try_execute_y1_tail(const json& nodes, std::size_t index);
+    bool try_execute_feature_update_outputs(const json& nodes,
+                                            std::size_t index);
     bool try_execute_feature_update(const json& nodes, std::size_t index);
     bool try_execute_pointwise_epilogue(const json& nodes, std::size_t index);
     bool try_execute_reglu(const json& nodes, std::size_t index);
@@ -126,6 +150,7 @@ private:
 
     driver_cubin::Driver& driver_;
     const driver_cubin::Module& module_;
+    std::string model_name_;
     json manifest_;
     std::vector<std::byte> weights_host_;
     driver_cubin::DeviceBuffer weights_device_;
@@ -133,8 +158,12 @@ private:
     driver_cubin::DeviceBuffer reglu_buffer_;
     driver_cubin::DeviceBuffer spatial_input_buffer_;
     driver_cubin::DeviceBuffer spatial_output_buffer_;
+    driver_cubin::DeviceBuffer codec_yuv_device_;
+    driver_cubin::DeviceBuffer codec_byte_lut_device_;
     std::vector<driver_cubin::DeviceBuffer> epilogue_buffers_;
     std::vector<driver_cubin::DeviceBuffer> concat_buffers_;
+    std::unordered_map<std::size_t, driver_cubin::DeviceBuffer>
+        feature_update_output_buffers_;
     std::unordered_map<std::size_t, driver_cubin::DeviceBuffer>
         cutlass_parameter_buffers_;
     std::unordered_map<
@@ -154,16 +183,17 @@ private:
     std::vector<driver_cubin::DeviceBuffer> input_buffers_;
     std::vector<std::string> input_names_;
     std::vector<std::size_t> aliased_input_slices_;
+    std::vector<std::size_t> elided_schedule_nodes_;
     std::vector<std::string> direct_concat_values_;
     std::vector<std::string> output_names_;
     std::vector<StateBinding> state_bindings_;
-    std::vector<void*> input_staging_;
-    std::vector<void*> output_staging_;
+    std::vector<HostSlot> host_slots_;
     std::unordered_map<std::string, Value> values_;
     driver_cubin::abi::Function binary_ = nullptr;
     driver_cubin::abi::Function binary_contiguous_ = nullptr;
     driver_cubin::abi::Function unary_ = nullptr;
     driver_cubin::abi::Function feature_update_ = nullptr;
+    driver_cubin::abi::Function feature_update_outputs_ = nullptr;
     driver_cubin::abi::Function y0_tail_ = nullptr;
     driver_cubin::abi::Function y1_tail_ = nullptr;
     driver_cubin::abi::Function reglu_ = nullptr;
@@ -211,6 +241,10 @@ private:
     driver_cubin::abi::Function concat_ = nullptr;
     driver_cubin::abi::Function depth_to_space_ = nullptr;
     driver_cubin::abi::Function space_to_depth_ = nullptr;
+    driver_cubin::abi::Function yuv420_to_nchw_ = nullptr;
+    driver_cubin::abi::Function nchw_to_yuv420_ = nullptr;
+    CodecIoConfig codec_io_;
+    bool codec_io_configured_ = false;
     bool cutlass_parameters_ready_ = false;
     bool state_initialized_ = false;
     driver_cubin::ExecutableGraph executable_graph_;

@@ -99,7 +99,7 @@ split-model implementation and add `--diagnostic` to keep all per-frame and
 per-tensor measurements when a contract check fails:
 
 ```bash
-(cd third_party/mlvc && uv run ../../tools/model_reference.py \
+(cd third_party/mlvc && uv run --frozen ../../tools/model_reference.py \
     --model-dir "$PWD/../../models/canonical/mlvc-psnr-v1/640x368" \
     --input "$PWD/../../models/fixtures/references/mlvc-psnr-v1/gray-q21-2f/input.yuv" \
     --width 640 --height 360 --frames 100 --q-index 21 \

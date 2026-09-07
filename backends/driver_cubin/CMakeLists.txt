@@ -30,6 +30,11 @@ set(MLVC_DRIVER_KERNEL_SOURCES
     "${MLVC_DRIVER_KERNEL_DIR}/spatial_conv.cu"
     "${MLVC_DRIVER_KERNEL_DIR}/tensor_ops.cu"
     "${MLVC_DRIVER_SOURCE_DIR}/include/mlvc/driver_cubin/cutlass.hpp")
+# Track vendored headers so submodule updates invalidate the generated fatbin.
+file(GLOB_RECURSE MLVC_CUTLASS_HEADERS CONFIGURE_DEPENDS
+    "${MLVC_CUTLASS_DIR}/include/*.h"
+    "${MLVC_CUTLASS_DIR}/include/*.hpp"
+    "${MLVC_CUTLASS_DIR}/include/*.cuh")
 file(MAKE_DIRECTORY "${MLVC_DRIVER_FATBIN_DIR}")
 add_custom_command(
     OUTPUT "${MLVC_DRIVER_FATBIN}"
@@ -40,6 +45,7 @@ add_custom_command(
         --output "${MLVC_DRIVER_FATBIN}"
     DEPENDS
         ${MLVC_DRIVER_KERNEL_SOURCES}
+        ${MLVC_CUTLASS_HEADERS}
         "${MLVC_DRIVER_TOOL_DIR}/build_fatbin.sh"
     COMMENT "Building driver-cubin CUDA fatbin"
     VERBATIM)
@@ -114,3 +120,5 @@ if(BUILD_TESTING)
 endif()
 
 install(TARGETS mlvc_driver_probe RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(FILES "${MLVC_CUTLASS_DIR}/LICENSE.txt"
+    DESTINATION "share/licenses/cutlass")

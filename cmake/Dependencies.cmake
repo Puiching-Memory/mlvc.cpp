@@ -94,6 +94,12 @@ elseif(MLVC_SELECTED_BACKEND STREQUAL "tensorrt")
     message(STATUS "Backend tensorrt 11.2: ${NVINFER_LIBRARY}")
 
 elseif(MLVC_SELECTED_BACKEND STREQUAL "driver_cubin")
+    set(MLVC_CUTLASS_DIR "${PROJECT_SOURCE_DIR}/third_party/cutlass")
+    if(NOT EXISTS "${MLVC_CUTLASS_DIR}/include/cutlass/cutlass.h")
+        message(FATAL_ERROR
+            "CUTLASS source submodule is missing. Run: "
+            "git submodule update --init --recursive --depth 1")
+    endif()
     find_package(CUDAToolkit 13.3 REQUIRED)
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     enable_language(ASM)

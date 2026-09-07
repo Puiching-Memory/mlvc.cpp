@@ -63,6 +63,7 @@ provide a driver compatible with the CUDA dependencies recorded in
 | NVIDIA Driver API             | Driver+cubin backend                 | Only `libcuda.so.1` is required in its deployed package    |
 | `msrtc_rans`                  | rANS entropy coding                  | From the pinned `microsoft/mlvc` Git submodule             |
 | nlohmann/json 3.11.3          | JSON parsing (PMF tables / metadata) | Pinned Git submodule                                       |
+| CUTLASS 4.8.0dev              | Driver+cubin CUDA kernels            | Pinned NVIDIA/cutlass Git submodule (`v4.8.0dev`)          |
 | CMake >= 3.23, C++20 compiler | Build                                |                                                            |
 
 MLVC exported model artifacts are produced by the official converter. The
@@ -78,14 +79,22 @@ time, then embeds their metadata, PMFs, AOT schedules, and weights in
 The unified conversion tool provides subcommands for both framework artifact
 formats. Run it from `third_party/mlvc`:
 
+Use `uv run --frozen` (and `uv sync --frozen --inexact` for explicit setup)
+to consume the upstream lockfile without rewriting it. Plain `uv run` can
+re-resolve dependencies using local index/mirror settings and make the source
+submodule dirty. `--frozen` keeps the package versions and download sources
+recorded in `uv.lock`; it does not redirect them to a locally configured mirror.
+`--inexact` preserves separately installed packages such as `msrtc-rans` and
+`onnxruntime-gpu` when synchronizing an existing conversion environment.
+
 ```bash
-uv run ../../tools/model_convert.py onnx export \
+uv run --frozen ../../tools/model_convert.py onnx export \
     --model-version dmc61sbr_reglu --model-type onnx \
     --target-device generic --torch-device cuda --precision fp16 \
     --weights-path /absolute/path/to/mlvc-psnr-v1.ckpt \
     --no-validate-conversion
 
-uv run ../../tools/model_convert.py torchscript export \
+uv run --frozen ../../tools/model_convert.py torchscript export \
     --model-version dmc61sbr_reglu --model-type torch \
     --torch-device cuda --precision fp16 \
     --weights-path /absolute/path/to/mlvc-psnr-v1.ckpt \
@@ -104,7 +113,7 @@ are authoritative:
 
 ```bash
 REPO="$(pwd)"
-(cd third_party/mlvc && uv run ../../tools/model_aot.py \
+(cd third_party/mlvc && uv run --frozen ../../tools/model_aot.py \
     --model-dir "$REPO/models/generated/exports/mlvc-psnr-v1/onnx-generic/640x368" \
     --output-dir /tmp/mlvc-aot)
 ./tools/model_package.py assemble --profile mlvc-psnr-v1 \
@@ -146,7 +155,10 @@ driver fatbin is generated in the build tree by CMake from
 
 For source-only development setup, run `./tools/bootstrap.sh`. This executes
 `git submodule update --init --recursive --depth 1`; `.gitmodules` also marks
-both source dependencies as shallow. ONNX Runtime and libtorch are downloaded
+all source dependencies as shallow. CUTLASS is built from the pinned
+`v4.8.0dev` tag (the upstream 4.8 development version, not a final `v4.8.0`
+release); no `libcutlass-dev` apt package is required.
+ONNX Runtime and libtorch are downloaded
 SDK inputs and remain git-ignored; TensorRT is installed from NVIDIA's system
 repository. The one supported version matrix lives in `tools/dependencies.env`.
 GPU bootstrap installs missing Ubuntu build tools before acquiring the SDKs.
@@ -281,7 +293,7 @@ the recurrent feature DPB), then run the formal compatibility target:
 
 ```bash
 REPO="$(pwd)"
-(cd third_party/mlvc && uv run ../../tools/model_reference.py \
+(cd third_party/mlvc && uv run --frozen ../../tools/model_reference.py \
     --model-dir "$REPO/models/canonical/mlvc-psnr-v1/640x368" \
     --input "$REPO/input.yuv" --width 640 --height 360 --frames 2 --q-index 21 \
     --output-dir "$REPO/models/fixtures/references/mlvc-psnr-v1/gray-q21-2f")
@@ -420,6 +432,7 @@ models/generated/            Ignored converter/export/cache outputs
 models/profiles/profiles.json Model profile registry
 third_party/mlvc/            microsoft/mlvc shallow Git submodule
 third_party/nlohmann_json/   nlohmann/json shallow Git submodule
+third_party/cutlass/         NVIDIA CUTLASS shallow Git submodule
 third_party/onnxruntime/     ONNX Runtime (fetched by script, git-ignored)
 third_party/libtorch/        libtorch (fetched by script, git-ignored)
 docs/design.md               Pipeline design notes (ONNX IO, entropy coding, GOP)

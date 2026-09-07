@@ -5,6 +5,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 NVCC="${NVCC:-/usr/local/cuda-13.3/bin/nvcc}"
+CUTLASS_INCLUDE_DIR="$ROOT/third_party/cutlass/include"
 OUTPUT=""
 
 while [[ $# -gt 0 ]]; do
@@ -31,6 +32,11 @@ fi
     exit 1
 }
 
+[[ -f "$CUTLASS_INCLUDE_DIR/cutlass/cutlass.h" ]] || {
+    echo "error: CUTLASS source submodule is missing; run git submodule update --init --recursive --depth 1" >&2
+    exit 1
+}
+
 mkdir -p "$(dirname "$OUTPUT")"
 temporary="$(mktemp "$OUTPUT.tmp.XXXXXX")"
 trap 'rm -f "$temporary"' EXIT
@@ -38,7 +44,7 @@ trap 'rm -f "$temporary"' EXIT
 "$NVCC" --fatbin -O3 --std=c++20 --expt-relaxed-constexpr \
     -I"$ROOT/backends/driver_cubin/include" \
     -I"$ROOT/backends/driver_cubin/kernels" \
-    -I/usr/include \
+    -I"$CUTLASS_INCLUDE_DIR" \
     -Xcompiler=-Wno-template-body \
     -gencode arch=compute_75,code=sm_75 \
     -gencode arch=compute_80,code=sm_80 \

@@ -122,6 +122,50 @@ aliases used by the standard profile. MLVC-S is intentionally left on the
 generic tail because its 24-channel workload is too small for a stable fused
 latency win on the A30.
 
+### 2026-09-08 CUTLASS f16-accumulator GEMMs evaluated and reverted; L2 swizzle kept opt-in
+
+Two CUTLASS pointwise-GEMM variants were implemented, wired into the backend
+behind environment switches, and measured end to end: half-precision
+(f16-accumulate HMMA) kernels, and an L2 threadblock swizzle
+(`swizzle_log_tile`, grid `{tiles_m * 2^l, ceil(tiles_n / 2^l)}`). Correctness
+was checked per kernel against a CPU reference (`mlvc_cutlass_kernel_tests`,
+90 GEMM + 4 convolution cases) and per model through the codec conformance
+harness in diagnostic mode.
+
+The f16-accumulator path failed the codec accuracy contract and has been
+removed. On the standard profile the encoder frame-0 payload was no longer
+bit-exact, roundtrip PSNR fell from 65.10/64.73 dB to 52.89/52.46 dB, the
+maximum decoded YUV sample error rose from 1 to 3, and 4 of 28 debug tensors
+exceeded the contract. The MLVC-S profile degraded similarly (frame 0
+61.41 dB to 56.61 dB, max error 1 to 4). The doubling of tensor-core peak did
+not translate into a useful trade at this accuracy cost.
+
+The swizzle path is mathematically neutral: kernel-unit error vs. the f32
+baseline is exactly zero and both conformance profiles pass the strict
+contract at `log_tile` 2 and 3. It remains available as the opt-in
+`MLVC_CUTLASS_LOG_TILE=0..3` environment switch, but it is off by default.
+
+End-to-end latency (A30, SM clocks locked at 1440 MHz, 20 warm-up + 200
+measured iterations, p50 ms) showed no variant effect beyond noise:
+
+| Case                    | Default |  f16acc | Swizzle l3 | f16acc+l3 |
+| ----------------------- | ------: | ------: | ---------: | --------: |
+| gray-q21 encoder        |  7.4277 |  7.3811 |     7.4854 |    7.4109 |
+| gray-q21 decoder        |  9.8371 |  9.7760 |     9.7264 |    9.7228 |
+| mlvc-s-gray-q21 encoder | 16.8896 | 16.9610 |    16.9835 |   16.9753 |
+| mlvc-s-gray-q21 decoder | 15.6273 | 15.6212 |    15.5541 |   15.5513 |
+
+Kernel microbenchmarks showed gains only on the largest reductions (e.g.
+512x3680x512 residual: f16acc +37%, f16acc+swizzle +140%); shapes below
+roughly 30 us per launch are launch-latency bound and do not discriminate
+variants. The pointwise GEMMs are not the endpoint bottleneck for either
+profile, so neither variant changed end-to-end latency by more than about
+1.2%.
+
+Clock locking matters for this kind of comparison: an earlier unlocked run
+produced bidirectional swings of several hundred percent on small shapes from
+DVFS ramp alone.
+
 ## Accuracy
 
 The reference is the upstream PyTorch conversion-loop output rounded to FP16.

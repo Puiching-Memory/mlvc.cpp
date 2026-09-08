@@ -226,6 +226,20 @@ private:
         cutlass_pointwise_spatial_wide_residual_init_ = nullptr;
     driver_cubin::abi::Function cutlass_pointwise_spatial_wide_residual_ =
         nullptr;
+    driver_cubin::abi::Function cutlass_pointwise_swizzle_init_ = nullptr;
+    driver_cubin::abi::Function cutlass_pointwise_leaky_relu_swizzle_init_ =
+        nullptr;
+    driver_cubin::abi::Function cutlass_pointwise_residual_swizzle_init_ =
+        nullptr;
+    driver_cubin::abi::Function cutlass_pointwise_medium_swizzle_init_ =
+        nullptr;
+    driver_cubin::abi::Function
+        cutlass_pointwise_medium_leaky_relu_swizzle_init_ = nullptr;
+    driver_cubin::abi::Function
+        cutlass_pointwise_medium_residual_swizzle_init_ = nullptr;
+    driver_cubin::abi::Function
+        cutlass_pointwise_spatial_wide_residual_swizzle_init_ = nullptr;
+    int cutlass_log_tile_ = 0;
     driver_cubin::abi::Function cutlass_spatial_convolution_init_ = nullptr;
     driver_cubin::abi::Function cutlass_spatial_convolution_ = nullptr;
     driver_cubin::abi::Function transpose_ = nullptr;

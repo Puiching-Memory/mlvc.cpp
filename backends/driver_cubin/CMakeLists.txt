@@ -122,6 +122,20 @@ if(BUILD_TESTING)
     add_test(NAME mlvc_driver_cubin_probe
         COMMAND mlvc_driver_probe --iterations 100)
     set_tests_properties(mlvc_driver_cubin_probe PROPERTIES LABELS "gpu")
+
+    add_executable(mlvc_cutlass_kernel_tests
+        "${PROJECT_SOURCE_DIR}/tests/unit/cutlass_kernel_tests.cpp")
+    target_include_directories(mlvc_cutlass_kernel_tests PRIVATE
+        "${MLVC_DRIVER_SOURCE_DIR}/include"
+        "${PROJECT_SOURCE_DIR}/core/include")
+    target_link_libraries(mlvc_cutlass_kernel_tests PRIVATE
+        mlvc_driver mlvc_driver_kernels)
+    target_link_options(mlvc_cutlass_kernel_tests PRIVATE
+        "LINKER:--disable-new-dtags")
+    mlvc_configure_target(mlvc_cutlass_kernel_tests)
+    mlvc_enable_ipo(mlvc_cutlass_kernel_tests)
+    add_test(NAME mlvc_cutlass_kernels COMMAND mlvc_cutlass_kernel_tests)
+    set_tests_properties(mlvc_cutlass_kernels PROPERTIES LABELS "gpu")
 endif()
 
 install(TARGETS mlvc_driver_probe RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

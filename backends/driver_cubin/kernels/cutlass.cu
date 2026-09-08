@@ -164,14 +164,15 @@ template <typename Kernel, typename OutputOp>
 __device__ __forceinline__ void initialize_pointwise(
     void* params_storage, const Element* input, const Element* weight,
     Element* output, int out_channels, int spatial_count, int in_channels,
-    OutputOp output_op, int tile_rows = 128, int tile_columns = 64)
+    OutputOp output_op, int tile_rows = 128, int tile_columns = 64,
+    int log_tile = 0)
 {
     auto* params = static_cast<typename Kernel::Params*>(params_storage);
     params->problem_size = {out_channels, spatial_count, in_channels};
     params->grid_tiled_shape = {
         (out_channels + tile_rows - 1) / tile_rows,
         (spatial_count + tile_columns - 1) / tile_columns, 1};
-    params->swizzle_log_tile = 0;
+    params->swizzle_log_tile = log_tile;
     params->mode = cutlass::gemm::GemmUniversalMode::kGemm;
     params->batch_count = 1;
     params->gemm_k_size = in_channels;
@@ -219,6 +220,34 @@ static_assert(sizeof(typename MediumLeakyReluKernel::SharedStorage) == 49152);
 static_assert(sizeof(typename MediumResidualKernel::SharedStorage) == 49152);
 static_assert(sizeof(typename SpatialWideResidualKernel::SharedStorage) == 61440);
 static_assert(sizeof(typename SpatialConvKernel::SharedStorage) == 73728);
+
+template <typename Kernel, typename CallbacksParams>
+__device__ __forceinline__ void pointwise_init_body(
+    void* params_storage, const Element* input, const Element* weight,
+    Element* output, int out_channels, int spatial_count, int in_channels,
+    const CallbacksParams& callbacks_params, int tile_rows, int tile_columns,
+    int log_tile)
+{
+#if __CUDA_ARCH__ >= 800
+    if (blockIdx.x != 0 || threadIdx.x != 0)
+        return;
+    initialize_pointwise<Kernel>(
+        params_storage, input, weight, output, out_channels, spatial_count,
+        in_channels, callbacks_params, tile_rows, tile_columns, log_tile);
+#else
+    (void)params_storage;
+    (void)input;
+    (void)weight;
+    (void)output;
+    (void)out_channels;
+    (void)spatial_count;
+    (void)in_channels;
+    (void)callbacks_params;
+    (void)tile_rows;
+    (void)tile_columns;
+    (void)log_tile;
+#endif
+}
 
 }  // namespace
 
@@ -642,3 +671,52 @@ extern "C" __global__ void mlvc_cutlass_pointwise_residual_fp16(
     (void)params;
 #endif
 }
+
+#define MLVC_POINTWISE_INIT(ExportName, KernelType, CallbacksType,           \
+                            TileRows, TileColumns, ...)                        \
+extern "C" __global__ void ExportName(                                         \
+    void* params_storage, const Element* input, const Element* weight,         \
+    const Element* bias, const Element* residual, Element* output,             \
+    int out_channels, int spatial_count, int in_channels, int log_tile)        \
+{                                                                              \
+    const auto stride = cute::Stride<int64_t, cute::_1, int64_t>{              \
+        int64_t(spatial_count), cute::_1{},                                    \
+        int64_t(out_channels) * spatial_count};                                \
+    pointwise_init_body<KernelType>(                                           \
+        params_storage, input, weight, output, out_channels, spatial_count,    \
+        in_channels, typename CallbacksType::Params{__VA_ARGS__}, TileRows,    \
+        TileColumns, log_tile);                                                \
+}
+
+// L2-swizzle variants reuse the base kernels; only the parameter
+// initialization differs (nonzero swizzle_log_tile).
+MLVC_POINTWISE_INIT(mlvc_cutlass_pointwise_swizzle_init_fp16,
+                    BiasKernel, BiasCallbacks, 128, 64,
+                    {{}, {bias, Element(0), {}}, {}}, {output, stride})
+MLVC_POINTWISE_INIT(mlvc_cutlass_pointwise_leaky_relu_swizzle_init_fp16,
+                    LeakyReluKernel, LeakyReluCallbacks, 128, 64,
+                    {{{}, {bias, Element(0), {}}, {}}, {}}, {output, stride})
+MLVC_POINTWISE_INIT(mlvc_cutlass_pointwise_residual_swizzle_init_fp16,
+                    ResidualKernel, ResidualCallbacks, 128, 64,
+                    {{{}, {bias, Element(0), {}}, {}},
+                     {const_cast<Element*>(residual), Element(0), stride}, {}},
+                    {output, stride})
+MLVC_POINTWISE_INIT(mlvc_cutlass_pointwise_medium_swizzle_init_fp16,
+                    MediumBiasKernel, MediumBiasCallbacks, 128, 128,
+                    {{}, {bias, Element(0), {}}, {}}, {output, stride})
+MLVC_POINTWISE_INIT(mlvc_cutlass_pointwise_medium_leaky_relu_swizzle_init_fp16,
+                    MediumLeakyReluKernel, MediumLeakyReluCallbacks, 128, 128,
+                    {{{}, {bias, Element(0), {}}, {}}, {}}, {output, stride})
+MLVC_POINTWISE_INIT(mlvc_cutlass_pointwise_medium_residual_swizzle_init_fp16,
+                    MediumResidualKernel, MediumResidualCallbacks, 128, 128,
+                    {{{}, {bias, Element(0), {}}, {}},
+                     {const_cast<Element*>(residual), Element(0), stride}, {}},
+                    {output, stride})
+MLVC_POINTWISE_INIT(
+    mlvc_cutlass_pointwise_spatial_wide_residual_swizzle_init_fp16,
+    SpatialWideResidualKernel, SpatialWideResidualCallbacks, 64, 256,
+    {{{}, {bias, Element(0), {}}, {}},
+     {const_cast<Element*>(residual), Element(0), stride}, {}},
+    {output, stride})
+
+#undef MLVC_POINTWISE_INIT

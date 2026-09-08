@@ -154,35 +154,65 @@ bool AotGraph::launch_cutlass_pointwise(
           in_channels >= 256));
     const bool use_spatial_wide_tile =
         epilogue == 2 && spatial_count >= 3000 && in_channels >= 512;
+    // medium_stage4 has no swizzle init variant; swizzle mode uses the
+    // 3-stage medium tile instead.
     const bool use_medium_stage4_tile =
-        epilogue == 0 && use_medium_tile && spatial_count >= 3000;
-    driver_cubin::abi::Function init = use_medium_stage4_tile
-        ? cutlass_pointwise_medium_stage4_init_
-        : use_medium_tile ? cutlass_pointwise_medium_init_
-                          : cutlass_pointwise_init_;
-    driver_cubin::abi::Function function = use_medium_stage4_tile
-        ? cutlass_pointwise_medium_stage4_
-        : use_medium_tile ? cutlass_pointwise_medium_
-                          : cutlass_pointwise_;
+        epilogue == 0 && use_medium_tile && spatial_count >= 3000 &&
+        cutlass_log_tile_ == 0;
+
+    enum PointwiseVariant {
+        kBias,
+        kLeakyRelu,
+        kResidual,
+        kMediumBias,
+        kMediumStage4Bias,
+        kMediumLeakyRelu,
+        kMediumResidual,
+        kSpatialWideResidual
+    };
+    PointwiseVariant variant = use_medium_stage4_tile ? kMediumStage4Bias
+        : use_medium_tile                         ? kMediumBias
+                                                  : kBias;
     if (epilogue == 1) {
-        init = use_medium_tile
-            ? cutlass_pointwise_medium_leaky_relu_init_
-            : cutlass_pointwise_leaky_relu_init_;
-        function = use_medium_tile
-            ? cutlass_pointwise_medium_leaky_relu_
-            : cutlass_pointwise_leaky_relu_;
+        variant = use_medium_tile ? kMediumLeakyRelu : kLeakyRelu;
     } else if (epilogue == 2) {
-        if (use_spatial_wide_tile) {
-            init = cutlass_pointwise_spatial_wide_residual_init_;
-            function = cutlass_pointwise_spatial_wide_residual_;
-        } else {
-            init = use_medium_tile
-                ? cutlass_pointwise_medium_residual_init_
-                : cutlass_pointwise_residual_init_;
-            function = use_medium_tile
-                ? cutlass_pointwise_medium_residual_
-                : cutlass_pointwise_residual_;
-        }
+        variant = use_spatial_wide_tile ? kSpatialWideResidual
+            : use_medium_tile           ? kMediumResidual
+                                        : kResidual;
+    }
+
+    const std::array<driver_cubin::abi::Function, 8> base_init{
+        cutlass_pointwise_init_, cutlass_pointwise_leaky_relu_init_,
+        cutlass_pointwise_residual_init_, cutlass_pointwise_medium_init_,
+        cutlass_pointwise_medium_stage4_init_,
+        cutlass_pointwise_medium_leaky_relu_init_,
+        cutlass_pointwise_medium_residual_init_,
+        cutlass_pointwise_spatial_wide_residual_init_};
+    const std::array<driver_cubin::abi::Function, 8> base_main{
+        cutlass_pointwise_, cutlass_pointwise_leaky_relu_,
+        cutlass_pointwise_residual_, cutlass_pointwise_medium_,
+        cutlass_pointwise_medium_stage4_, cutlass_pointwise_medium_leaky_relu_,
+        cutlass_pointwise_medium_residual_,
+        cutlass_pointwise_spatial_wide_residual_};
+    const std::array<driver_cubin::abi::Function, 8> swizzle_init{
+        cutlass_pointwise_swizzle_init_,
+        cutlass_pointwise_leaky_relu_swizzle_init_,
+        cutlass_pointwise_residual_swizzle_init_,
+        cutlass_pointwise_medium_swizzle_init_, nullptr,
+        cutlass_pointwise_medium_leaky_relu_swizzle_init_,
+        cutlass_pointwise_medium_residual_swizzle_init_,
+        cutlass_pointwise_spatial_wide_residual_swizzle_init_};
+
+    driver_cubin::abi::Function init;
+    driver_cubin::abi::Function function;
+    int log_tile = 0;
+    if (cutlass_log_tile_ > 0) {
+        init = swizzle_init[variant];
+        function = base_main[variant];
+        log_tile = cutlass_log_tile_;
+    } else {
+        init = base_init[variant];
+        function = base_main[variant];
     }
 
     const std::size_t node_index = node.at("index").get<std::size_t>();
@@ -193,8 +223,11 @@ bool AotGraph::launch_cutlass_pointwise(
         DeviceAddress params_storage = found->second.address();
         void* init_parameters[] = {
             &params_storage, &input, &weight, &bias, &residual, &output,
-            &out_channels, &spatial_count, &in_channels};
-        driver_.launch(init, {1, 1, 1}, {1, 1, 1}, 0, init_parameters);
+            &out_channels, &spatial_count, &in_channels, &log_tile};
+        driver_.launch(
+            init, {1, 1, 1}, {1, 1, 1}, 0,
+            std::span<void*>(init_parameters,
+                             cutlass_log_tile_ > 0 ? 10 : 9));
         auto [host_params, host_params_inserted] =
             cutlass_host_parameters_.try_emplace(node_index);
         if (!host_params_inserted)
@@ -210,16 +243,27 @@ bool AotGraph::launch_cutlass_pointwise(
         throw std::runtime_error(
             "driver-cubin: missing CUTLASS host parameters");
     void* parameters[] = {host_params->second.data()};
+    const unsigned int tile_rows =
+        variant == kSpatialWideResidual ? 64U : 128U;
+    const unsigned int tile_columns =
+        variant == kSpatialWideResidual
+            ? 256U
+            : (variant >= kMediumBias && variant <= kMediumResidual) ? 128U
+                                                                     : 64U;
+    unsigned int grid_rows = divide_up(out_channels, tile_rows);
+    unsigned int grid_columns = divide_up(spatial_count, tile_columns);
+    if (log_tile > 0) {
+        const unsigned int group = 1U << log_tile;
+        grid_rows *= group;
+        grid_columns = divide_up(grid_columns, group);
+    }
     driver_.launch(
-        function,
-        {divide_up(out_channels, use_spatial_wide_tile ? 64 : 128),
-         divide_up(spatial_count,
-                   use_spatial_wide_tile ? 256 : use_medium_tile ? 128 : 64),
-         1},
-        {128, 1, 1},
-        use_spatial_wide_tile ? 61440U
-            : use_medium_stage4_tile ? 65536U
-            : use_medium_tile ? 49152U : 36864U,
+        function, {grid_rows, grid_columns, 1}, {128, 1, 1},
+        variant == kMediumStage4Bias ? 65536U
+            : variant == kSpatialWideResidual ? 61440U
+            : (variant >= kMediumBias && variant <= kMediumResidual)
+                ? 49152U
+                : 36864U,
         parameters);
     return true;
 }

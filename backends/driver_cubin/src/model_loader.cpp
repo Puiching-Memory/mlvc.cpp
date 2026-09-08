@@ -3,6 +3,7 @@
 #include "model_assets.hpp"
 
 #include <algorithm>
+#include <cstdlib>
 #include <filesystem>
 #include <stdexcept>
 #include <string>
@@ -17,6 +18,9 @@ AotGraph::AotGraph(const std::filesystem::path& model_dir,
     const driver_cubin::Module& module)
     : driver_(driver), module_(module), model_name_(model_name)
 {
+    // Opt-in L2 threadblock swizzle for the CUTLASS pointwise GEMMs.
+    if (const char* env = std::getenv("MLVC_CUTLASS_LOG_TILE"))
+        cutlass_log_tile_ = std::clamp(std::atoi(env), 0, 3);
     load_model(model_dir, model_name);
     plan_input_slice_aliases();
     plan_epilogue_buffers();

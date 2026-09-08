@@ -64,6 +64,22 @@ void AotGraph::register_kernels()
             "mlvc_cutlass_pointwise_spatial_wide_residual_fp16");
         driver_.set_max_dynamic_shared_memory(
             cutlass_pointwise_spatial_wide_residual_, 61440U);
+        cutlass_pointwise_swizzle_init_ =
+            module_.function("mlvc_cutlass_pointwise_swizzle_init_fp16");
+        cutlass_pointwise_leaky_relu_swizzle_init_ = module_.function(
+            "mlvc_cutlass_pointwise_leaky_relu_swizzle_init_fp16");
+        cutlass_pointwise_residual_swizzle_init_ = module_.function(
+            "mlvc_cutlass_pointwise_residual_swizzle_init_fp16");
+        cutlass_pointwise_medium_swizzle_init_ = module_.function(
+            "mlvc_cutlass_pointwise_medium_swizzle_init_fp16");
+        cutlass_pointwise_medium_leaky_relu_swizzle_init_ = module_.function(
+            "mlvc_cutlass_pointwise_medium_leaky_relu_swizzle_init_fp16");
+        cutlass_pointwise_medium_residual_swizzle_init_ = module_.function(
+            "mlvc_cutlass_pointwise_medium_residual_swizzle_init_fp16");
+        cutlass_pointwise_spatial_wide_residual_swizzle_init_ =
+            module_.function(
+                "mlvc_cutlass_pointwise_spatial_wide_residual_swizzle_init_"
+                "fp16");
         cutlass_spatial_convolution_init_ =
             module_.function("mlvc_cutlass_spatial_conv_init_fp16");
         cutlass_spatial_convolution_ =

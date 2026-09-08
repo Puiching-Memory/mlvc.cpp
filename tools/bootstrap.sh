@@ -78,7 +78,9 @@ fetch_cuda() {
     "${PRIVILEGE[@]}" dpkg -i "$keyring"
     rm -f -- "$keyring"
     "${PRIVILEGE[@]}" apt-get update
-    "${PRIVILEGE[@]}" apt-get install -y cuda-toolkit-13-3
+    # cuda-toolkit metapackage does not pull in CUPTI, which the libtorch SDK
+    # closure ships; install the runtime package alongside the toolkit.
+    "${PRIVILEGE[@]}" apt-get install -y cuda-toolkit-13-3 cuda-cupti-13-3
     [[ -x "$cuda_root/bin/nvcc" ]] || {
         echo "error: CUDA installation failed" >&2
         return 1
@@ -216,7 +218,13 @@ fetch_libtorch() {
         "nvidia_nvshmem_cu13-${MLVC_NVSHMEM_WHEEL_VERSION}-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" \
         "$MLVC_NVSHMEM_WHEEL_SHA256"
 
-    cp -a "/usr/local/cuda-${MLVC_CUDA_VERSION}/extras/CUPTI/lib64"/libcupti.so* "$sdk/lib/"
+    # The runfile installer ships CUPTI under extras/CUPTI/lib64, while the
+    # cuda-cupti deb package installs into targets/x86_64-linux/lib.
+    local cupti_dir="/usr/local/cuda-${MLVC_CUDA_VERSION}/extras/CUPTI/lib64"
+    if ! compgen -G "$cupti_dir/libcupti.so*" >/dev/null; then
+        cupti_dir="/usr/local/cuda-${MLVC_CUDA_VERSION}/targets/x86_64-linux/lib"
+    fi
+    cp -a "$cupti_dir"/libcupti.so* "$sdk/lib/"
     cp -a "/usr/local/cuda-${MLVC_CUDA_VERSION}/EULA.txt" \
         "$sdk/LICENSE.cuda-toolkit-$MLVC_CUDA_VERSION.txt"
     local pytorch_license="$sdk/LICENSE.pytorch.txt"

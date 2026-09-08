@@ -38,5 +38,14 @@ if(MLVC_SELECTED_BACKEND STREQUAL "libtorch")
         "LINKER:-rpath-link,${LIBTORCH_ROOT}/lib")
 endif()
 
+if(MLVC_SELECTED_BACKEND STREQUAL "driver_cubin")
+    # Same purpose as the libtorch branch above: CI links on driverless hosts
+    # and needs the toolkit stub to satisfy libcuda.so.1 at link time.
+    target_link_options(mlvc_tool_demo PRIVATE
+        "LINKER:-rpath-link,${CUDAToolkit_LIBRARY_DIR}/stubs")
+    target_link_options(mlvc_tool_benchmark PRIVATE
+        "LINKER:-rpath-link,${CUDAToolkit_LIBRARY_DIR}/stubs")
+endif()
+
 install(TARGETS mlvc_tool_demo mlvc_tool_benchmark
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

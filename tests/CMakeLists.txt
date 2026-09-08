@@ -19,6 +19,12 @@ target_include_directories(mlvc_c_api_tests PRIVATE
     "${PROJECT_SOURCE_DIR}/public/include")
 target_link_libraries(mlvc_c_api_tests PRIVATE mlvc_codec)
 target_link_options(mlvc_c_api_tests PRIVATE "LINKER:--disable-new-dtags")
+if(MLVC_SELECTED_BACKEND STREQUAL "driver_cubin")
+    # Hosts without an NVIDIA driver lack libcuda.so.1; resolve the codec's
+    # transitive dependency against the toolkit stub at link time.
+    target_link_options(mlvc_c_api_tests PRIVATE
+        "LINKER:-rpath-link,${CUDAToolkit_LIBRARY_DIR}/stubs")
+endif()
 mlvc_configure_target(mlvc_c_api_tests)
 mlvc_enable_ipo(mlvc_c_api_tests)
 

@@ -86,6 +86,11 @@ add_executable(mlvc_driver_probe tools/probe_main.cpp)
 target_link_libraries(mlvc_driver_probe PRIVATE
     mlvc_driver mlvc_driver_kernels)
 target_link_options(mlvc_driver_probe PRIVATE "LINKER:--disable-new-dtags")
+# The codec library links the CUDA driver API through CUDA::cuda_driver; on
+# driverless CI hosts the probe needs the toolkit stub to resolve the
+# transitive libcuda.so.1 dependency at link time.
+target_link_options(mlvc_driver_probe PRIVATE
+    "LINKER:-rpath-link,${CUDAToolkit_LIBRARY_DIR}/stubs")
 mlvc_configure_target(mlvc_driver_probe)
 mlvc_enable_ipo(mlvc_driver_probe)
 

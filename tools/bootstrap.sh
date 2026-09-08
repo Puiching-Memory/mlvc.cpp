@@ -67,24 +67,37 @@ fetch_cuda() {
     local cuda_root="/usr/local/cuda-$MLVC_CUDA_VERSION"
     if [[ -x "$cuda_root/bin/nvcc" && -f "$cuda_root/lib64/libcudart.so.13" ]]; then
         echo "Already present: $cuda_root"
-        return
+    else
+        require_ubuntu_2604
+        configure_privilege
+        local keyring
+        keyring="$(mktemp --suffix=.deb)"
+        curl "${CURL_OPTIONS[@]}" --output "$keyring" \
+            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb
+        "${PRIVILEGE[@]}" dpkg -i "$keyring"
+        rm -f -- "$keyring"
+        "${PRIVILEGE[@]}" apt-get update
+        # cuda-toolkit metapackage does not pull in CUPTI, which the libtorch SDK
+        # closure ships; install the runtime package alongside the toolkit.
+        "${PRIVILEGE[@]}" apt-get install -y cuda-toolkit-13-3 cuda-cupti-13-3
+        [[ -x "$cuda_root/bin/nvcc" ]] || {
+            echo "error: CUDA installation failed" >&2
+            return 1
+        }
+        echo "Installed: $cuda_root"
     fi
-    require_ubuntu_2604
-    configure_privilege
-    local keyring
-    keyring="$(mktemp --suffix=.deb)"
-    curl "${CURL_OPTIONS[@]}" --output "$keyring" \
-        https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb
-    "${PRIVILEGE[@]}" dpkg -i "$keyring"
-    rm -f -- "$keyring"
-    "${PRIVILEGE[@]}" apt-get update
-    # cuda-toolkit metapackage does not pull in CUPTI, which the libtorch SDK
-    # closure ships; install the runtime package alongside the toolkit.
-    "${PRIVILEGE[@]}" apt-get install -y cuda-toolkit-13-3 cuda-cupti-13-3
-    [[ -x "$cuda_root/bin/nvcc" ]] || {
-        echo "error: CUDA installation failed" >&2
-        return 1
-    }
+    # Driverless hosts only have the unversioned stub (SONAME libcuda.so.1), so
+    # -Wl,-rpath-link cannot locate the codec's DT_NEEDED libcuda.so.1 by name.
+    # Alias the stub in both deb-layout locations to make CI links succeed.
+    local stub_dir
+    for stub_dir in "$cuda_root/lib64/stubs" \
+                    "$cuda_root/targets/x86_64-linux/lib/stubs"; do
+        [[ -f "$stub_dir/libcuda.so" ]] &&
+            "${PRIVILEGE[@]}" ln -sf libcuda.so "$stub_dir/libcuda.so.1"
+    done
+    # Without nvcc on PATH, cmake's enable_language(CUDA) fails during the
+    # libtorch configuration; surface it to later CI steps.
+    [[ -z "${GITHUB_PATH:-}" ]] || echo "$cuda_root/bin" >> "$GITHUB_PATH"
 }
 
 fetch_onnxruntime() {

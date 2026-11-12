@@ -28,7 +28,6 @@ def parse_args() -> argparse.Namespace:
         help="filesystem bundle used to verify an embedded model",
     )
     parser.add_argument("--reference-dir", type=Path, required=True)
-    parser.add_argument("--engine-cache-dir", type=Path)
     parser.add_argument("--result", type=Path)
     parser.add_argument(
         "--diagnostic",
@@ -70,8 +69,6 @@ def run_codec(
     ]
     if command == "encode":
         cmd.extend(["--q-index", str(manifest["q_index"])])
-    if args.engine_cache_dir:
-        cmd.extend(["--engine-cache-dir", str(args.engine_cache_dir.resolve())])
     if debug_dir:
         cmd.extend(["--debug-dir", str(debug_dir)])
     subprocess.run(cmd, check=True)

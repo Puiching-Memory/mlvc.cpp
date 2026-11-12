@@ -72,8 +72,10 @@ directional evidence, not portable launch parameters.
 
 Unlike the inspected DLL, mlvc.cpp intentionally requires the NVIDIA driver at
 program load time. It does not dynamically fall back when the driver is absent.
-The release package must not contain or depend on CUDA Runtime, cuDNN, cuBLAS,
-TensorRT, ONNX Runtime, or libtorch.
+The release package must not contain or depend on CUDA Runtime or inference
+framework libraries. Model preparation loads the registered original checkpoint
+and official network code directly; its AOT graph schema 2 retains native
+pixel shuffle/unshuffle channel order.
 
 NVIDIA CUDA headers remain subject to the NVIDIA software license. They are
 used from the build host's CUDA Toolkit and are not copied into the package.

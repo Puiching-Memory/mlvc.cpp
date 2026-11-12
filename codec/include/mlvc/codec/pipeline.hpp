@@ -12,13 +12,11 @@ struct CodecOptions {
     int q_index = 21;
     int frames = 0;
     int device_id = 0;
-    std::size_t workspace_size = std::size_t{4} << 30;
     // A path of "-" selects stdin/stdout.  POSIX named FIFOs are also
     // supported for live frame-by-frame operation.
     std::string input_path;
     std::string output_path;
     std::string model_dir;
-    std::string engine_cache_dir;
     std::string debug_dir;
 };
 

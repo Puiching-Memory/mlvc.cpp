@@ -9,6 +9,7 @@ import json
 import shutil
 import struct
 import sys
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -19,9 +20,8 @@ sys.path.insert(0, str(VIDEO_ROOT))
 
 import numpy as np  # noqa: E402
 
+from model_source import load_model  # noqa: E402
 from conversion._frame_loop import FrameLoop  # noqa: E402
-from conversion._split_model import load_split_model  # noqa: E402
-from conversion.types import OnnxExecutionProvider, RuntimeParams  # noqa: E402
 from conversion.utils import read_video_frames  # noqa: E402
 
 
@@ -36,17 +36,13 @@ def sha256(path: Path) -> str:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model-dir", type=Path, required=True)
+    parser.add_argument("--checkpoint", type=Path, required=True)
     parser.add_argument("--input", type=Path, required=True)
     parser.add_argument("--width", type=int, required=True)
     parser.add_argument("--height", type=int, required=True)
     parser.add_argument("--frames", type=int, default=2)
     parser.add_argument("--q-index", type=int, default=21)
     parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument(
-        "--execution-provider",
-        choices=["cuda", "cpu"],
-        default="cuda",
-    )
     return parser.parse_args()
 
 
@@ -142,15 +138,18 @@ def main() -> None:
         shutil.rmtree(output_dir)
     output_dir.mkdir(parents=True)
 
-    provider = (
-        OnnxExecutionProvider.CUDA
-        if args.execution_provider == "cuda"
-        else OnnxExecutionProvider.CPU
+    import torch
+    torch.set_num_threads(min(torch.get_num_threads(), 8))
+    metadata = json.loads((model_dir / "metadata.json").read_text(encoding="utf-8"))
+    shape = metadata["params"]["split_model_params"]
+    _, split_model, gaussian, estimator = load_model(
+        metadata["name"], args.checkpoint, shape["model_width"], shape["model_height"]
     )
-    split_model = load_split_model(
-        model_dir,
-        RuntimeParams(onnx_execution_provider=provider),
-    )
+    for filename, table in (("gaussian_pmf.json", gaussian),
+                            ("bit_estimator_pmf.json", estimator)):
+        packaged = json.loads((model_dir / filename).read_text(encoding="utf-8"))
+        if packaged != asdict(table):
+            raise ValueError(f"checkpoint entropy tables differ from bundle: {filename}")
     frame_loop_output = output_dir / "python-output"
     results = FrameLoop(
         split_model,
@@ -206,7 +205,7 @@ def main() -> None:
     manifest = {
         "schema_version": 1,
         "reference_implementation": "microsoft/mlvc-python-split-model",
-        "execution_provider": args.execution_provider,
+        "execution_provider": "pytorch-cpu-fp16",
         "profile": metadata["name"],
         "model_version": metadata["params"]["full_model_params"]["model_version"],
         "model_metadata_sha256": sha256(model_dir / "metadata.json"),

@@ -1,9 +1,9 @@
 #pragma once
 
-// Stable C ABI for the portable MLVC codec library.
+// C ABI version 2 for the MLVC Driver+cubin codec library.
 //
 // The encoder and decoder are intentionally separate entry points. Each call
-// creates its selected backend on options->device_id, so applications can run
+// creates a Driver+cubin runtime on options->device_id, so applications can run
 // one encoder on one GPU and one decoder on another GPU in parallel.
 
 #include <stddef.h>
@@ -16,7 +16,7 @@ extern "C" {
 #  define MLVC_CODEC_NOEXCEPT
 #endif
 
-#define MLVC_CODEC_ABI_VERSION 1u
+#define MLVC_CODEC_ABI_VERSION 2u
 
 #if defined(_WIN32)
 #  define MLVC_CODEC_API __declspec(dllexport)
@@ -34,16 +34,13 @@ typedef struct mlvc_codec_options {
     int q_index;
     int frames;
     int device_id;
-    // Zero selects the library default (4096 MiB).
-    uint64_t workspace_mib;
     const char* input_path;
     const char* output_path;
     const char* model_dir;
-    const char* engine_cache_dir;
     const char* debug_dir;
 } mlvc_codec_options;
 
-#define MLVC_CODEC_OPTIONS_V1_SIZE \
+#define MLVC_CODEC_OPTIONS_V2_SIZE \
     ((uint32_t)(offsetof(mlvc_codec_options, debug_dir) + \
                 sizeof(((mlvc_codec_options*)0)->debug_dir)))
 
@@ -56,15 +53,14 @@ typedef struct mlvc_codec_stats {
     double elapsed_seconds;
 } mlvc_codec_stats;
 
-#define MLVC_CODEC_STATS_V1_SIZE \
+#define MLVC_CODEC_STATS_V2_SIZE \
     ((uint32_t)(offsetof(mlvc_codec_stats, elapsed_seconds) + \
                 sizeof(((mlvc_codec_stats*)0)->elapsed_seconds)))
 
 // Fill an options struct with the same defaults as the CLI. Input/output path
 // pointers remain null and must be supplied by the caller. Packaged releases
 // use their bundled mlvc-psnr-v1 model when model_dir remains null.
-// "embedded:<profile>" selects a driver-cubin profile and
-// "packaged:<profile>" selects a file-based packaged profile.
+// "embedded:<profile>" selects an embedded profile; a directory selects an AOT bundle.
 MLVC_CODEC_API void mlvc_codec_options_init(
     mlvc_codec_options* options) MLVC_CODEC_NOEXCEPT;
 
@@ -74,8 +70,7 @@ MLVC_CODEC_API void mlvc_codec_options_init(
 MLVC_CODEC_API void mlvc_codec_stats_init(
     mlvc_codec_stats* stats) MLVC_CODEC_NOEXCEPT;
 
-// Returns the backend compiled into this package ("tensorrt" for the
-// TensorRT release).
+// Returns "driver-cubin".
 MLVC_CODEC_API const char* mlvc_backend_name(void) MLVC_CODEC_NOEXCEPT;
 
 // Return 0 on success.  On failure return -1 and write a human-readable error

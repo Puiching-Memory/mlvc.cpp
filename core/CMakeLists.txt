@@ -21,7 +21,7 @@ target_link_libraries(mlvc_core PRIVATE
 mlvc_configure_target(mlvc_core)
 mlvc_enable_ipo(mlvc_core)
 
-if(MLVC_SELECTED_BACKEND STREQUAL "driver_cubin" AND MLVC_EMBED_MODELS)
+if(MLVC_EMBED_MODELS)
     file(GLOB MLVC_MODEL_MANIFESTS CONFIGURE_DEPENDS
         LIST_DIRECTORIES false "${MLVC_MODEL_ROOT}/*/*/model_bundle.json")
     if(NOT MLVC_MODEL_MANIFESTS)

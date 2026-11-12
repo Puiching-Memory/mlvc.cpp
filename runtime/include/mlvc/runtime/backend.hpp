@@ -1,18 +1,5 @@
 #pragma once
-// Inference backend abstraction.
-//
-// The MLVC neural parts (MLVCEncoder / MLVCDecoder graphs, see docs/design.md)
-// are packaged in four separate NVIDIA GPU builds:
-//
-//   - onnxruntime: ONNX graphs via ONNX Runtime CUDA EP
-//   - libtorch:    TorchScript exports via libtorch (requires the converter to
-//                  export TorchScript in addition to ONNX)
-//   - tensorrt:    ONNX graphs parsed and built into TensorRT engines (NVIDIA)
-//   - driver_cubin: fixed-shape AOT graph dispatched through the CUDA Driver API
-//
-// Each release compiles exactly one backend. Floating-point model tensors are
-// always fp16. Int32 remains available for control inputs such as
-// q_index_shifted.
+// Fixed-shape Driver+cubin graph execution and codec I/O contracts.
 
 #include "mlvc/core/tensor.hpp"
 #include "mlvc/core/yuv.hpp"
@@ -28,8 +15,6 @@ namespace mlvc {
 struct BackendOptions {
     std::string model_dir;
     int device_id = 0;
-    std::size_t workspace_size = std::size_t{4} << 30;
-    std::string engine_cache_dir;
 };
 
 // Feeds one model output directly into an input of the next invocation. The
@@ -96,7 +81,7 @@ public:
     virtual void wait_codec_slot(std::size_t slot) = 0;
 };
 
-// Exactly one implementation of these symbols is linked into each release.
+// Driver+cubin runtime entry points.
 const char* compiled_backend_name_c_str() noexcept;
 inline std::string_view compiled_backend_name() noexcept
 {

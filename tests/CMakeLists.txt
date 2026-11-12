@@ -19,12 +19,9 @@ target_include_directories(mlvc_c_api_tests PRIVATE
     "${PROJECT_SOURCE_DIR}/public/include")
 target_link_libraries(mlvc_c_api_tests PRIVATE mlvc_codec)
 target_link_options(mlvc_c_api_tests PRIVATE "LINKER:--disable-new-dtags")
-if(MLVC_SELECTED_BACKEND STREQUAL "driver_cubin")
-    # Hosts without an NVIDIA driver lack libcuda.so.1; resolve the codec's
-    # transitive dependency against the toolkit stub at link time.
-    target_link_options(mlvc_c_api_tests PRIVATE
-        "LINKER:-rpath-link,${CUDAToolkit_LIBRARY_DIR}/stubs")
-endif()
+# Resolve the codec's transitive driver dependency on driverless build hosts.
+target_link_options(mlvc_c_api_tests PRIVATE
+    "LINKER:-rpath-link,${CUDAToolkit_LIBRARY_DIR}/stubs")
 mlvc_configure_target(mlvc_c_api_tests)
 mlvc_enable_ipo(mlvc_c_api_tests)
 
@@ -36,43 +33,27 @@ target_include_directories(mlvc_public_header_tests PRIVATE
 mlvc_configure_target(mlvc_public_header_tests)
 add_test(NAME mlvc_public_header COMMAND mlvc_public_header_tests)
 
-if(EXISTS "${MLVC_TEST_ASSETS_DIR}/benchmarks/gray-q21/encoder/case.json"
-   AND EXISTS "${MLVC_MODEL_ROOT}/mlvc-psnr-v1/640x368/metadata.json")
-    add_test(NAME mlvc_codec_reference
-        COMMAND mlvc_codec_tests "${MLVC_TEST_ASSETS_DIR}")
-else()
-    message(STATUS
-        "Portable codec fixtures not found under ${MLVC_TEST_ASSETS_DIR}; "
-        "mlvc_codec_reference will not be registered")
-endif()
+add_test(NAME mlvc_model_package
+    COMMAND "${Python3_EXECUTABLE}"
+        "${PROJECT_SOURCE_DIR}/tests/unit/model_package_tests.py")
 
 set(_mlvc_conformance_script
     "${PROJECT_SOURCE_DIR}/tests/conformance/run_codec_conformance.py")
 if(EXISTS "${MLVC_TEST_ASSETS_DIR}/references/mlvc-psnr-v1/gray-q21-2f/reference.json"
    AND EXISTS "${MLVC_TEST_ASSETS_DIR}/references/mlvc-s-psnr-v1/gray-q21-2f/reference.json")
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
+    add_test(NAME mlvc_codec_reference
+        COMMAND mlvc_codec_tests "${MLVC_TEST_ASSETS_DIR}" "${MLVC_MODEL_ROOT}")
     foreach(_mlvc_profile mlvc-psnr-v1 mlvc-s-psnr-v1)
         set(_mlvc_model_dir
             "${MLVC_MODEL_ROOT}/${_mlvc_profile}/640x368")
         set(_mlvc_reference_dir
             "${MLVC_TEST_ASSETS_DIR}/references/${_mlvc_profile}/gray-q21-2f")
-        if(MLVC_SELECTED_BACKEND STREQUAL "driver_cubin")
-            set(_mlvc_conformance_args
-                --binary "$<TARGET_FILE:mlvc_tool_demo>"
-                --model-dir "embedded:${_mlvc_profile}"
-                --bundle-dir "${_mlvc_model_dir}"
-                --reference-dir "${_mlvc_reference_dir}")
-        else()
-            set(_mlvc_conformance_args
-                --binary "$<TARGET_FILE:mlvc_tool_demo>"
-                --model-dir "${_mlvc_model_dir}"
-                --reference-dir "${_mlvc_reference_dir}")
-        endif()
-        if(MLVC_SELECTED_BACKEND STREQUAL "tensorrt"
-           AND MLVC_TEST_ENGINE_CACHE_DIR)
-            list(APPEND _mlvc_conformance_args
-                --engine-cache-dir "${MLVC_TEST_ENGINE_CACHE_DIR}")
-        endif()
+        set(_mlvc_conformance_args
+            --binary "$<TARGET_FILE:mlvc_tool_demo>"
+            --model-dir "embedded:${_mlvc_profile}"
+            --bundle-dir "${_mlvc_model_dir}"
+            --reference-dir "${_mlvc_reference_dir}")
         add_test(NAME "mlvc_codec_conformance_${_mlvc_profile}"
             COMMAND "${Python3_EXECUTABLE}" "${_mlvc_conformance_script}"
                     ${_mlvc_conformance_args})

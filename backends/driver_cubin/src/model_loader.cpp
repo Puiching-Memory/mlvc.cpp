@@ -39,7 +39,7 @@ void AotGraph::load_model(const std::filesystem::path& model_dir,
         std::filesystem::path("aot") / model_name;
     manifest_ = json::parse(detail::read_model_text(
         model_dir, graph_dir / "graph.json"));
-    if (manifest_.at("schema_version").get<int>() != 1)
+    if (manifest_.at("schema_version").get<int>() != 2)
         throw std::runtime_error("driver-cubin: unsupported AOT graph schema");
     weights_host_ = detail::read_model_binary(
         model_dir, graph_dir / "weights.bin");

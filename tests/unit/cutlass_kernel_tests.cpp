@@ -40,6 +40,54 @@ DeviceBuffer upload(Driver& driver, const std::vector<Half>& values)
     return buffer;
 }
 
+void check_native_pixel_layout(Driver& driver, Module& module)
+{
+    // Three channels distinguish native channel-first layout from block-first
+    // layout. Exercise both factors used by the checkpoint model family.
+    for (int factor : {2, 8}) {
+        int channels = 3, height = factor * 2, width = factor * 3;
+        int count = 2 * channels * height * width;
+        std::vector<Half> input(static_cast<std::size_t>(count));
+        for (int i = 0; i < count; ++i)
+            input[static_cast<std::size_t>(i)] = float_to_half(static_cast<float>(i));
+        auto device_input = upload(driver, input);
+        auto shuffled = driver.allocate(input.size() * sizeof(Half));
+        auto restored = driver.allocate(input.size() * sizeof(Half));
+        auto pi = device_input.address();
+        auto ps = shuffled.address();
+        auto pr = restored.address();
+        void* unshuffle[] = {&pi, &ps, &count, &channels, &height, &width, &factor};
+        driver.launch(module.function("mlvc_space_to_depth_fp16"),
+                      {static_cast<unsigned>((count + 255) / 256), 1, 1},
+                      {256, 1, 1}, 0, unshuffle);
+        std::vector<Half> actual(input.size());
+        driver.download(actual.data(), ps, actual.size() * sizeof(Half));
+        std::size_t output = 0;
+        for (int n = 0; n < 2; ++n)
+            for (int c = 0; c < channels; ++c)
+                for (int by = 0; by < factor; ++by)
+                    for (int bx = 0; bx < factor; ++bx)
+                        for (int y = 0; y < height / factor; ++y)
+                            for (int x = 0; x < width / factor; ++x) {
+                                const int index = ((n * channels + c) * height +
+                                    y * factor + by) * width + x * factor + bx;
+                                if (actual[output++] != input[static_cast<std::size_t>(index)])
+                                    throw std::runtime_error("native pixel_unshuffle channel order mismatch");
+                            }
+        channels *= factor * factor;
+        height /= factor;
+        width /= factor;
+        int mode = 1; // Native CRD pixel_shuffle.
+        void* shuffle[] = {&ps, &pr, &count, &channels, &height, &width, &factor, &mode};
+        driver.launch(module.function("mlvc_depth_to_space_fp16"),
+                      {static_cast<unsigned>((count + 255) / 256), 1, 1},
+                      {256, 1, 1}, 0, shuffle);
+        driver.download(actual.data(), pr, actual.size() * sizeof(Half));
+        if (actual != input)
+            throw std::runtime_error("native pixel shuffle round trip mismatch");
+    }
+}
+
 struct Variant {
     const char* name;
     int m, n, stages, epilogue;
@@ -247,6 +295,7 @@ int main(int argc, char** argv)
             return 77;
         auto module = driver.load_module({reinterpret_cast<const std::byte*>(mlvc_driver_kernels_fatbin),
                                          mlvc_driver_kernels_fatbin_size});
+        check_native_pixel_layout(driver, module);
         const Variant variants[] = {
             {"mlvc_cutlass_pointwise", 128, 64, 3, 0},
             {"mlvc_cutlass_pointwise_leaky_relu", 128, 64, 3, 1},

@@ -5,46 +5,42 @@ Reference: microsoft/mlvc `video/conversion` split-model deployment path
 `dmc61sbr_mini_reglu`/`mlvc-s-psnr-v1`.
 
 This repository re-implements the same pipeline in C++: neural graphs run on
-one selected backend, while preprocessing, scale extraction, frame state, and
-entropy coding are backend-independent.
+Driver+cubin, while the shared codec owns frame state, scale extraction,
+entropy coding, and the bitstream container.
 
 ---
 
 ## 1. Model artifacts
 
-Produced by the official converter:
+The original registered checkpoint and official model code are the only model
+inputs. `tools/model_source.py` validates the checkpoint SHA-256, constructs the
+official split model, and obtains canonical PMF tables from FP32 parameters.
+`tools/model_aot.py` then captures fixed-shape eager FP16 operations directly
+through PyTorch dispatch. Constant-only work is folded offline; unreachable
+branches are pruned before lowering. Unsupported live operators fail explicitly.
 
-```
-python video/convert.py export \
-  --model-version dmc61sbr_reglu \
-  --model-type onnx --target-device generic \
-  --split-type dmc61sbr_e1d1 \
-  --model-width 640 --model-height 368 \
-  --output-path <dir>
-```
+The generated source directory contains:
 
-Outputs (per input size, here `640x368`):
+| File                                       | Role                                                                  |
+| ------------------------------------------ | --------------------------------------------------------------------- |
+| `metadata.json`                            | Profile identity, fixed dimensions, GOP, QP, and tensor configuration |
+| `gaussian_pmf.json`                        | Quantized Gaussian PMF tables for y coding                            |
+| `bit_estimator_pmf.json`                   | Quantized bit-estimator PMF tables for z coding                       |
+| `aot/manifest.json`                        | Checkpoint provenance and graph summary                               |
+| `aot/MLVCEncoder/{graph.json,weights.bin}` | Encoder schedule and weights                                          |
+| `aot/MLVCDecoder/{graph.json,weights.bin}` | Decoder schedule and weights                                          |
+| `benchmark-MLVC*.npz`                      | Captured eager inputs and outputs for model benchmarks                |
 
-| File                     | Role                                          |
-| ------------------------ | --------------------------------------------- |
-| `MLVCEncoder.onnx`       | Encoder graph                                 |
-| `MLVCDecoder.onnx`       | Decoder graph                                 |
-| `gaussian_pmf.json`      | Quantized Gaussian PMF tables (y coding)      |
-| `bit_estimator_pmf.json` | Quantized bit-estimator PMF tables (z coding) |
-| `metadata.json`          | Model params (dims, GOP, scales, ...)         |
-| `MLVCEncoder.ts`         | Optional libtorch encoder                     |
-| `MLVCDecoder.ts`         | Optional libtorch decoder                     |
-| `aot/`                   | Optional Driver+cubin graph schedules/weights |
-| `model_bundle.json`      | Canonical artifact hashes and codec contract  |
+`tools/model_package.py assemble` creates a canonical bundle with hashes for
+exactly the eight metadata/PMF/AOT artifacts. Embedding validates both registered
+profiles and writes the read-only model image. Benchmark snapshots remain outside
+the deployment bundle. Both metadata and PMFs come from the same checkpoint.
 
-`tools/model_package.py assemble` copies all backend formats into a single
-canonical directory. Its metadata and PMF tables always come from one ONNX
-export. This prevents backend-specific PMF rounding from making streams
-undecodable by another package. `tools/model_convert.py verify` validates
-checkpoint/profile parameter mapping; the bundle tool validates model identity
-and every artifact hash.
+AOT graph schema 2 uses native channel-first pixel shuffle/unshuffle (CRD).
+Weights retain the original PyTorch channel order. Older AOT graphs are rejected;
+they must be regenerated. No intermediate framework model file is used.
 
-### ONNX IO (verified, `opset 18`, FP16 weights)
+### Fixed graph I/O (FP16)
 
 Encoder:
 
@@ -156,33 +152,22 @@ Reference: `FrameLoop` (`video/conversion/_frame_loop.py`) with model defaults:
   (2x2 average downsample) → x255 → bytes.
 - `pixel_range=1.0`, so the graph works directly in [0,1].
 
-## 7. Inference backends
+## 7. Driver+cubin execution
 
-Four separate GPU backends implement `mlvc::InferenceBackend`
-(`runtime/include/mlvc/runtime/backend.hpp`). A release compiles exactly one
-via the `MLVC_SELECTED_BACKEND` CMake setting:
+The only runtime implements `mlvc::InferenceBackend` in
+`runtime/include/mlvc/runtime/backend.hpp`. It executes embedded AOT graph data
+using the CUDA Driver API. CUDA Toolkit and CUTLASS are build-host inputs.
 
-| Backend        | Model artifacts              | Execution       | Notes                                                       |
-| -------------- | ---------------------------- | --------------- | ----------------------------------------------------------- |
-| `onnxruntime`  | `MLVC{Encoder,Decoder}.onnx` | CUDA 13 EP      | ONNX Runtime 1.26.0                                         |
-| `libtorch`     | `MLVC{Encoder,Decoder}.ts`   | CUDA 13         | libtorch 2.13.0 cu130; needs separate TorchScript exports   |
-| `tensorrt`     | `MLVC{Encoder,Decoder}.onnx` | CUDA 13         | TensorRT 11.2; hardware-specific engines are cached per GPU |
-| `driver_cubin` | embedded AOT model image     | CUDA Driver API | Embedded fatbin and AOT data; no inference framework        |
+`ModelExecutionConfig::state_bindings` declares output-to-input state loops.
+Bound state tensors are omitted from `run()` host inputs and outputs and are
+zeroed by `reset_state()` at GOP boundaries. The final feature output aliases
+the persistent reference input allocation. Normal codec execution uses two pinned
+host slots, GPU YUV conversion, and bounded CPU/GPU overlap. The synchronous
+host-visible path remains available for tensor debugging and model benchmarks.
 
-`ModelExecutionConfig::state_bindings` declares output-to-input state loops when
-the model is loaded. Bound state tensors are omitted from `run()`'s host input
-and output lists and are zeroed through `reset_state()` at GOP boundaries. The
-codec binds encoder and decoder `feature -> ref_feature` loops by default:
-
-- Driver+cubin aliases the final feature output to its persistent input buffer.
-- TensorRT ping-pongs the two I/O device buffers without a D2D copy.
-- ONNX Runtime uses CUDA I/O binding and feeds the device output value back.
-- libtorch retains the CUDA output tensor for the next invocation.
-
-Only tensors consumed or produced by CPU stages cross the backend boundary.
-Those tensors preserve fp16 or int32 storage; FP32 and TF32 execution remain
-unsupported. `--debug-dir` deliberately disables state binding so every model
-input and output, including `ref_feature` and `feature`, can be dumped.
+Only CPU-consumed tensors cross the backend boundary. `--debug-dir` disables
+state binding so both reference and feature tensors can be dumped. FP16 is the
+only neural floating-point storage type; model controls use int32.
 
 ### Driver+cubin internal boundaries
 
@@ -235,55 +220,15 @@ are written below the build tree.
 - [x] Formal `mlvc_codec_compatibility` build target
 - [x] Device-resident recurrent feature state with GOP reset coverage
 
-## 9. General performance path
+## 9. Performance boundaries
 
-Removing the CUDA runtime is a deployment choice, not automatically a speed
-optimization. Optimizations are kept model- and GPU-independent wherever
-possible:
+The normal codec path keeps reference features on the GPU, uses persistent pinned
+staging and two frame slots, performs YUV conversion on the GPU, and replays its
+fixed schedule with CUDA Graphs. CPU rANS consumes host-visible quantized latents.
+Further work should be evaluated against complete codec latency as well as
+model-only timing and must preserve every FP16 materialization point.
 
-1. Keep reconstructed features/DPB tensors on the GPU between frames (done).
-2. Use persistent pinned staging for unavoidable host/device transfers (done
-   for Driver+cubin and TensorRT).
-3. Run YUV conversion, padding, scale extraction, and suitable quantization
-   kernels on the same stream; transfer only data consumed by CPU rANS.
-4. Overlap CPU entropy/YUV work with GPU inference using bounded frame queues
-   and double-buffered host boundaries.
-5. Capture fixed-shape execution where the backend supports it; Driver+cubin
-   already replays a CUDA Graph after warm-up.
-6. Keep FP16 as the only floating-point model precision and validate every
-   optimized path against captured Python outputs and codec-level metrics.
-
-## 10. Driver-only AOT cubin direction
-
-The fourth experimental execution path removes inference-framework and CUDA
-Runtime dependencies from the deployed package. CUDA Toolkit remains an
-offline build dependency for kernel generation; the runtime links only the
-NVIDIA Driver API (`libcuda.so.1` on Linux).
-
-The fatbin contains `sm_75`, `sm_80`, `sm_86`, and `sm_89` cubins plus a
-`compute_89` PTX fallback. It includes the original bit-copy diagnostic and all
-operators present in both profiles: Conv (including grouped/depthwise and
-pointwise forms), Add/Mul/Sub, Concat/Slice/Gather, LeakyRelu/Clip/Sigmoid,
-Reciprocal/Round, DepthToSpace, and SpaceToDepth.
-
-`tools/model_aot.py` performs static ONNX shape inference, rejects any
-operator or dtype without a runtime kernel, serializes aligned weights, and
-plans reusable intermediate lifetimes in one arena. At build time,
-`tools/model_package.py embed` validates both canonical profiles and links
-their metadata, PMFs, graphs, and weights into a read-only ELF segment. The C++
-backend uploads weights once and dispatches every node through `cuLaunchKernel`.
-Both complete Encoder/Decoder graphs for MLVC and MLVC-S pass the same
-official-Python codec target as the framework backends. The deployed ELFs link
-`libcuda.so.1` but no `libcudart`, cuDNN, cuBLAS, TensorRT, ONNX Runtime, or
-libtorch.
-
-Dense pointwise convolution uses four-warp WMMA tiles with FP32 accumulation;
-dense spatial convolution uses WMMA implicit GEMM; depthwise convolution has a
-barrier-free direct kernel. Other shapes retain the readable generic fallback.
-The recurrent feature stays device-resident across frames and the steady-state
-schedule is replayed as a CUDA Graph. Further work is limited to general data
-movement and pipeline scheduling improvements rather than per-model layer code
-generation or architecture-specific autotuning tables.
-
-The normative compatibility rules and current reference-fixture procedure are
-in [`codec-compatibility.md`](codec-compatibility.md).
+The direct-checkpoint graph differs from earlier conversion-tool schedules.
+Historical timing is not a performance claim for this graph. Validate compiled
+graphs against eager outputs, then run codec conformance on the actual GPU.
+See [codec-compatibility.md](codec-compatibility.md).

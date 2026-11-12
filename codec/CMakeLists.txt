@@ -18,10 +18,9 @@ target_include_directories(mlvc_codec
 target_link_libraries(mlvc_codec PRIVATE
     mlvc_core
     mlvc_runtime
-    mlvc_backend_selected
+    mlvc_backend_driver_cubin
     msrtc_rans
-    nlohmann_json::nlohmann_json
-    ${CMAKE_DL_LIBS})
+    nlohmann_json::nlohmann_json)
 mlvc_configure_target(mlvc_codec)
 mlvc_enable_ipo(mlvc_codec)
 

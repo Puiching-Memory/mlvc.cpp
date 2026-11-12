@@ -25,7 +25,7 @@ void print_usage(const char* argv0)
         "       [--model-dir DIR | --model-profile NAME] [--frames N]\n"
         "       [--device-id N]\n"
         "       [--decode-device-id N]\n"
-        "  common: [--engine-cache-dir DIR] [--workspace-mib N] [--debug-dir DIR]\n"
+        "  common: [--debug-dir DIR]\n"
         "  stream: use '-' for stdin/stdout; named FIFO paths are also supported\n",
         argv0, argv0, argv0, argv0);
 }
@@ -41,19 +41,6 @@ int parse_integer(const char* text, const char* option, bool allow_zero)
     } catch (const std::exception&) {
     }
     throw std::runtime_error(std::string(option) + " has an invalid value");
-}
-
-std::size_t parse_workspace_size(const char* text)
-{
-    try {
-        std::size_t parsed = 0;
-        const unsigned long long mib = std::stoull(text, &parsed);
-        if (text[parsed] == '\0' && mib > 0 &&
-            mib <= (std::numeric_limits<std::size_t>::max() >> 20))
-            return static_cast<std::size_t>(mib) << 20;
-    } catch (const std::exception&) {
-    }
-    throw std::runtime_error("--workspace-mib must be a positive integer");
 }
 
 }  // namespace
@@ -101,12 +88,8 @@ int main(int argc, char** argv)
                 options.model_dir = value();
             } else if (std::strcmp(argv[i], "--model-profile") == 0) {
                 model_profile = value();
-            } else if (std::strcmp(argv[i], "--engine-cache-dir") == 0) {
-                options.engine_cache_dir = value();
             } else if (std::strcmp(argv[i], "--debug-dir") == 0) {
                 options.debug_dir = value();
-            } else if (std::strcmp(argv[i], "--workspace-mib") == 0) {
-                options.workspace_size = parse_workspace_size(value());
             } else if (std::strcmp(argv[i], "--input") == 0) {
                 options.input_path = value();
             } else if (std::strcmp(argv[i], "--output") == 0) {
@@ -130,9 +113,7 @@ int main(int argc, char** argv)
             if (!options.model_dir.empty())
                 throw std::runtime_error(
                     "--model-dir and --model-profile are mutually exclusive");
-            options.model_dir = mlvc::compiled_backend_name() == "driver-cubin"
-                ? "embedded:" + model_profile
-                : "packaged:" + model_profile;
+            options.model_dir = "embedded:" + model_profile;
         }
 
         const mlvc::CodecStats stats = command == "encode"

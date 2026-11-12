@@ -25,27 +25,17 @@ target_include_directories(mlvc_tool_benchmark PRIVATE
 target_link_libraries(mlvc_tool_benchmark PRIVATE
     mlvc_core
     mlvc_runtime
-    mlvc_backend_selected
+    mlvc_backend_driver_cubin
     nlohmann_json::nlohmann_json)
 target_link_options(mlvc_tool_benchmark PRIVATE "LINKER:--disable-new-dtags")
 mlvc_configure_target(mlvc_tool_benchmark)
 mlvc_enable_ipo(mlvc_tool_benchmark)
 
-if(MLVC_SELECTED_BACKEND STREQUAL "libtorch")
-    target_link_options(mlvc_tool_demo PRIVATE
-        "LINKER:-rpath-link,${LIBTORCH_ROOT}/lib")
-    target_link_options(mlvc_tool_benchmark PRIVATE
-        "LINKER:-rpath-link,${LIBTORCH_ROOT}/lib")
-endif()
-
-if(MLVC_SELECTED_BACKEND STREQUAL "driver_cubin")
-    # Same purpose as the libtorch branch above: CI links on driverless hosts
-    # and needs the toolkit stub to satisfy libcuda.so.1 at link time.
-    target_link_options(mlvc_tool_demo PRIVATE
-        "LINKER:-rpath-link,${CUDAToolkit_LIBRARY_DIR}/stubs")
-    target_link_options(mlvc_tool_benchmark PRIVATE
-        "LINKER:-rpath-link,${CUDAToolkit_LIBRARY_DIR}/stubs")
-endif()
+# Resolve the driver SONAME against the toolkit stub on driverless build hosts.
+target_link_options(mlvc_tool_demo PRIVATE
+    "LINKER:-rpath-link,${CUDAToolkit_LIBRARY_DIR}/stubs")
+target_link_options(mlvc_tool_benchmark PRIVATE
+    "LINKER:-rpath-link,${CUDAToolkit_LIBRARY_DIR}/stubs")
 
 install(TARGETS mlvc_tool_demo mlvc_tool_benchmark
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

@@ -10,6 +10,6 @@ int main(void)
     mlvc_codec_stats_init(&stats);
     puts(mlvc_backend_name());
     return options.width == 640 && options.height == 360 &&
-                   stats.struct_size == MLVC_CODEC_STATS_V1_SIZE
+                   stats.struct_size == MLVC_CODEC_STATS_V2_SIZE
         ? 0 : 1;
 }

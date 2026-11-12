@@ -1,0 +1,14 @@
+# Offline checkpoint compiler and official Python reference tooling.
+torch==2.10.0
+numpy
+scipy
+pandas
+pillow
+tqdm
+tabulate
+pyyaml
+dataclasses-json
+python-dotenv
+azure-identity
+azure-storage-blob
+azure-ai-ml

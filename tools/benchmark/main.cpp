@@ -56,8 +56,6 @@ void print_usage(const char* argv0)
         "  --device-id N             CUDA device index (default: 0)\n"
         "  --warmup N                warm-up iterations (default: 10)\n"
         "  --iterations N            measured iterations (default: 100)\n"
-        "  --engine-cache-dir DIR    TensorRT engine cache directory\n"
-        "  --workspace-mib N         TensorRT workspace MiB (default: 4096)\n"
         "  --result FILE             write result JSON instead of stdout only\n"
         "  --save-outputs DIR        save final output tensors as raw files\n"
         "  --max-abs-error VALUE     fail if an FP16 output exceeds this error\n"
@@ -118,14 +116,6 @@ CliOptions parse_cli(int argc, char** argv)
                 parse_unsigned<std::size_t>(value(argument), argument, true);
         } else if (argument == "--iterations") {
             options.iterations = parse_unsigned<std::size_t>(value(argument), argument, false);
-        } else if (argument == "--engine-cache-dir") {
-            options.backend.engine_cache_dir = value(argument);
-        } else if (argument == "--workspace-mib") {
-            const std::size_t mib =
-                parse_unsigned<std::size_t>(value(argument), argument, false);
-            if (mib > (std::numeric_limits<std::size_t>::max() >> 20))
-                throw std::runtime_error("--workspace-mib is too large");
-            options.backend.workspace_size = mib << 20;
         } else if (argument == "--result") {
             options.result_path = value(argument);
         } else if (argument == "--save-outputs") {

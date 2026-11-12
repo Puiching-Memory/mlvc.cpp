@@ -10,8 +10,6 @@
 
 #include <nlohmann/json.hpp>
 
-#include <dlfcn.h>
-
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
@@ -29,114 +27,14 @@
 namespace mlvc {
 namespace {
 
-constexpr std::string_view kPackagedModelPrefix = "packaged:";
-constexpr std::string_view kDefaultModelProfile = "mlvc-psnr-v1";
-char kLibraryLocationAnchor = 0;
-
-bool valid_profile_name(std::string_view profile)
-{
-    return !profile.empty() && profile.find('/') == std::string_view::npos &&
-        profile.find('\\') == std::string_view::npos;
-}
-
-std::filesystem::path packaged_models_root()
-{
-    Dl_info information{};
-    if (dladdr(static_cast<const void*>(&kLibraryLocationAnchor), &information) == 0 ||
-        information.dli_fname == nullptr) {
-        throw std::runtime_error(
-            "cannot locate libmlvc_codec.so for packaged model discovery");
-    }
-    std::error_code error;
-    const std::filesystem::path library =
-        std::filesystem::weakly_canonical(information.dli_fname, error);
-    if (error || library.parent_path().empty()) {
-        throw std::runtime_error(
-            "cannot resolve libmlvc_codec.so path for packaged models");
-    }
-    return library.parent_path().parent_path() / "share/mlvc/models";
-}
-
-std::vector<std::filesystem::path> packaged_profile_bundles(
-    const std::filesystem::path& profile_dir)
-{
-    std::vector<std::filesystem::path> result;
-    std::error_code error;
-    if (!std::filesystem::is_directory(profile_dir, error) || error)
-        return result;
-    for (std::filesystem::directory_iterator iterator(profile_dir, error), end;
-         !error && iterator != end; iterator.increment(error)) {
-        const std::filesystem::path candidate = iterator->path();
-        std::error_code candidate_error;
-        if (iterator->is_directory(candidate_error) && !candidate_error &&
-            std::filesystem::is_regular_file(
-                candidate / "model_bundle.json", candidate_error) &&
-            !candidate_error) {
-            result.push_back(candidate);
-        }
-    }
-    if (error) {
-        throw std::runtime_error(
-            "cannot enumerate packaged model directory: " +
-            profile_dir.string());
-    }
-    std::sort(result.begin(), result.end());
-    return result;
-}
-
-std::filesystem::path packaged_model_location(std::string_view profile)
-{
-    if (!valid_profile_name(profile))
-        throw std::runtime_error("invalid packaged model profile");
-    const std::filesystem::path profile_dir =
-        packaged_models_root() / std::string(profile);
-    const std::vector<std::filesystem::path> bundles =
-        packaged_profile_bundles(profile_dir);
-    if (bundles.size() != 1) {
-        throw std::runtime_error(
-            "expected exactly one packaged model bundle for " +
-            std::string(profile) + " below " + profile_dir.string());
-    }
-    return bundles.front();
-}
-
-std::vector<std::string> packaged_model_profiles()
-{
-    std::vector<std::string> result;
-    const std::filesystem::path root = packaged_models_root();
-    std::error_code error;
-    if (!std::filesystem::is_directory(root, error) || error)
-        return result;
-    for (std::filesystem::directory_iterator iterator(root, error), end;
-         !error && iterator != end; iterator.increment(error)) {
-        std::error_code candidate_error;
-        if (!iterator->is_directory(candidate_error) || candidate_error)
-            continue;
-        if (packaged_profile_bundles(iterator->path()).size() == 1)
-            result.push_back(iterator->path().filename().string());
-    }
-    if (error) {
-        throw std::runtime_error(
-            "cannot enumerate packaged model root: " + root.string());
-    }
-    std::sort(result.begin(), result.end());
-    return result;
-}
-
 std::filesystem::path resolve_model_location(const CodecOptions& options)
 {
-    if (!options.model_dir.empty()) {
-        const std::string_view location = options.model_dir;
-        if (location.starts_with(kPackagedModelPrefix)) {
-            return packaged_model_location(
-                location.substr(kPackagedModelPrefix.size()));
-        }
+    if (!options.model_dir.empty())
         return options.model_dir;
-    }
     const std::filesystem::path embedded = detail::default_model_location();
-    if (!embedded.empty())
-        return embedded;
-    return packaged_model_location(kDefaultModelProfile);
+    if (embedded.empty())
+        throw std::runtime_error("no embedded model; supply --model-dir with an AOT bundle");
+    return embedded;
 }
 
 BackendOptions make_backend_options(const CodecOptions& options,
@@ -145,8 +43,6 @@ BackendOptions make_backend_options(const CodecOptions& options,
     BackendOptions result;
     result.model_dir = model_dir.string();
     result.device_id = options.device_id;
-    result.workspace_size = options.workspace_size;
-    result.engine_cache_dir = options.engine_cache_dir;
     return result;
 }
 
@@ -490,10 +386,7 @@ CodecStats decode_buffered(const CodecOptions& options,
 
 std::vector<std::string> available_model_profiles()
 {
-    std::vector<std::string> result = embedded_model_profiles();
-    if (!result.empty())
-        return result;
-    return packaged_model_profiles();
+    return embedded_model_profiles();
 }
 
 CodecStats encode_video(const CodecOptions& options)

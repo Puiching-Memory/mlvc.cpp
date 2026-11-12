@@ -27,25 +27,16 @@ option(MLVC_EMBED_MODELS
 option(MLVC_WARNINGS_AS_ERRORS "Treat project warnings as errors" OFF)
 option(MLVC_ENABLE_SANITIZERS
     "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
-set(MLVC_SELECTED_BACKEND "onnxruntime" CACHE STRING
-    "Inference backend: onnxruntime, libtorch, tensorrt, or driver_cubin")
-set_property(CACHE MLVC_SELECTED_BACKEND PROPERTY STRINGS
-    onnxruntime libtorch tensorrt driver_cubin)
+# Reject stale backend selectors instead of silently building a different runtime.
+if(DEFINED MLVC_SELECTED_BACKEND)
+    message(FATAL_ERROR
+        "Backend selection has been removed. Unset MLVC_SELECTED_BACKEND; "
+        "this project builds Driver+cubin only.")
+endif()
 set(MLVC_TEST_ASSETS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/models/fixtures" CACHE PATH
     "Local MLVC model/reference fixtures used by tests")
 set(MLVC_MODEL_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/models/canonical" CACHE PATH
     "Canonical model bundle root")
-set(MLVC_TEST_ENGINE_CACHE_DIR "" CACHE PATH
-    "Optional TensorRT engine-cache root used by conformance tests")
-
-set(_mlvc_valid_backends onnxruntime libtorch tensorrt driver_cubin)
-if(NOT MLVC_SELECTED_BACKEND IN_LIST _mlvc_valid_backends)
-    message(FATAL_ERROR
-        "MLVC_SELECTED_BACKEND must be one of: "
-        "onnxruntime, libtorch, tensorrt, driver_cubin")
-endif()
-message(STATUS "MLVC selected backend: ${MLVC_SELECTED_BACKEND}")
-
 include(CheckIPOSupported)
 if(MLVC_ENABLE_IPO)
     check_ipo_supported(LANGUAGES CXX
@@ -125,34 +116,3 @@ install(FILES
     "${CMAKE_CURRENT_BINARY_DIR}/mlvc_codecConfig.cmake"
     "${CMAKE_CURRENT_BINARY_DIR}/mlvc_codecConfigVersion.cmake"
     DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/mlvc_codec")
-
-if(MLVC_SELECTED_BACKEND STREQUAL "onnxruntime")
-    file(GLOB _backend_license_files
-        "${ONNXRUNTIME_ROOT}/LICENSE*"
-        "${ONNXRUNTIME_ROOT}/*Notice*"
-        "${ONNXRUNTIME_ROOT}/*NOTICE*")
-    if(_backend_license_files)
-        install(FILES ${_backend_license_files}
-            DESTINATION "share/licenses/onnxruntime")
-    endif()
-elseif(MLVC_SELECTED_BACKEND STREQUAL "libtorch")
-    file(GLOB _backend_license_files
-        "${LIBTORCH_ROOT}/LICENSE*"
-        "${LIBTORCH_ROOT}/*Notice*"
-        "${LIBTORCH_ROOT}/*NOTICE*")
-    if(_backend_license_files)
-        install(FILES ${_backend_license_files}
-            DESTINATION "share/licenses/libtorch")
-    endif()
-elseif(MLVC_SELECTED_BACKEND STREQUAL "tensorrt")
-    if(EXISTS "/usr/share/doc/libnvinfer11/copyright")
-        install(FILES "/usr/share/doc/libnvinfer11/copyright"
-            DESTINATION "share/licenses/tensorrt"
-            RENAME "libnvinfer11.txt")
-    endif()
-    if(EXISTS "/usr/share/doc/libnvonnxparsers11/copyright")
-        install(FILES "/usr/share/doc/libnvonnxparsers11/copyright"
-            DESTINATION "share/licenses/tensorrt"
-            RENAME "libnvonnxparsers11.txt")
-    endif()
-endif()

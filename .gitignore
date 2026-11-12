@@ -13,17 +13,11 @@ packages/
 /packages-driver-*/
 *.tar.gz
 
-# Prebuilt SDK caches (source dependencies are Git submodules)
-third_party/onnxruntime/
-third_party/libtorch/
-
 # Model & media artifacts
 /models/canonical/
 /models/fixtures/
 /models/generated/
 /backends/driver_cubin/generated/
-*.onnx
-*.ts
 *.pt
 *.pth
 *.ckpt

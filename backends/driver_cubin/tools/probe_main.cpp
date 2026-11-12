@@ -157,8 +157,8 @@ int main(int argc, char** argv)
         for (int index = 0; index < space_count; ++index)
             space_input[index] = static_cast<std::uint16_t>(index + 1);
         for (int channel = 0; channel < space_output_channels; ++channel) {
-            const int input_channel = channel % space_channels;
-            const int offset = channel / space_channels;
+            const int input_channel = channel / (space_block * space_block);
+            const int offset = channel % (space_block * space_block);
             for (int y = 0; y < space_output_height; ++y) {
                 for (int x = 0; x < space_output_width; ++x) {
                     const int input_y = y * space_block + offset / space_block;
@@ -214,7 +214,7 @@ int main(int argc, char** argv)
         std::printf("driver API version: %d\n", info.driver_version);
         std::printf("embedded fatbin: %zu bytes\n", mlvc_driver_kernels_fatbin_size);
         std::printf("FP16 payload: %zu bytes, bit mismatches: 0\n", bytes);
-        std::printf("SpaceToDepth DCR mapping: %d elements, bit mismatches: 0\n",
+        std::printf("Native pixel_unshuffle mapping: %d elements, bit mismatches: 0\n",
                     space_count);
         std::printf("kernel launches: %zu, mean launch+execution: %.3f us\n",
                     options.iterations, mean_us);

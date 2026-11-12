@@ -104,9 +104,9 @@ extern "C" __global__ void mlvc_space_to_depth_fp16(
     linear /= output_height;
     const int output_channel = linear % output_channels;
     const int n = linear / output_channels;
-    // ONNX SpaceToDepth is the inverse of DCR DepthToSpace: block offset first.
-    const int input_channel = output_channel % in_channels;
-    const int offset = output_channel / in_channels;
+    // Native pixel_unshuffle layout: channel first, followed by block offsets.
+    const int input_channel = output_channel / (block_size * block_size);
+    const int offset = output_channel % (block_size * block_size);
     const int input_y = y * block_size + offset / block_size;
     const int input_x = x * block_size + offset % block_size;
     const int input_index =

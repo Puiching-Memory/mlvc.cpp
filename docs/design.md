@@ -12,6 +12,13 @@ entropy coding, and the bitstream container.
 
 ## 1. Model artifacts
 
+The serialization contract is `proto/mlvc_model.proto`. Protobuf messages use
+explicit tensor IDs, dtype/operator enums, typed operator attributes, and storage
+locations. The C++ loader converts them to native typed descriptors; no dynamic
+JSON object or Protobuf message remains in the graph execution path. Protobuf
+Lite and Abseil are linked privately and statically.
+
+
 The original registered checkpoint and official model code are the only model
 inputs. `tools/model_source.py` validates the checkpoint SHA-256, constructs the
 official split model, and obtains canonical PMF tables from FP32 parameters.
@@ -23,12 +30,12 @@ The generated source directory contains:
 
 | File                                       | Role                                                                  |
 | ------------------------------------------ | --------------------------------------------------------------------- |
-| `metadata.json`                            | Profile identity, fixed dimensions, GOP, QP, and tensor configuration |
-| `gaussian_pmf.json`                        | Quantized Gaussian PMF tables for y coding                            |
-| `bit_estimator_pmf.json`                   | Quantized bit-estimator PMF tables for z coding                       |
-| `aot/manifest.json`                        | Checkpoint provenance and graph summary                               |
-| `aot/MLVCEncoder/{graph.json,weights.bin}` | Encoder schedule and weights                                          |
-| `aot/MLVCDecoder/{graph.json,weights.bin}` | Decoder schedule and weights                                          |
+| `metadata.pb`                            | Profile identity, fixed dimensions, GOP, QP, and tensor configuration |
+| `gaussian_pmf.pb`                        | Quantized Gaussian PMF tables for y coding                            |
+| `bit_estimator_pmf.pb`                   | Quantized bit-estimator PMF tables for z coding                       |
+| `aot/manifest.pb`                        | Checkpoint provenance and graph summary                               |
+| `aot/MLVCEncoder/{graph.pb,weights.bin}` | Encoder schedule and weights                                          |
+| `aot/MLVCDecoder/{graph.pb,weights.bin}` | Decoder schedule and weights                                          |
 | `benchmark-MLVC*.npz`                      | Captured eager inputs and outputs for model benchmarks                |
 
 `tools/model_package.py assemble` creates a canonical bundle with hashes for
@@ -36,7 +43,7 @@ exactly the eight metadata/PMF/AOT artifacts. Embedding validates both registere
 profiles and writes the read-only model image. Benchmark snapshots remain outside
 the deployment bundle. Both metadata and PMFs come from the same checkpoint.
 
-AOT graph schema 2 uses native channel-first pixel shuffle/unshuffle (CRD).
+AOT graph schema 3 uses native channel-first pixel shuffle/unshuffle (CRD).
 Weights retain the original PyTorch channel order. Older AOT graphs are rejected;
 they must be regenerated. No intermediate framework model file is used.
 
@@ -63,7 +70,7 @@ z_raw, y_raw_0, y_raw_1, ref_feature, q_index_shifted
   -> feature [1,256,46,80]
 ```
 
-Key dimensions for `640x368` (from `metadata.json`):
+Key dimensions for `640x368` (from `metadata.pb`):
 
 - `feature_channels=256`, `latent_channels=128`, `hyperprior_channels=128`
 - `downsample_feature=8`, `downsample_latent=16`, `downsample_hyperprior=8`

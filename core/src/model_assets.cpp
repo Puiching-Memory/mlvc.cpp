@@ -124,13 +124,6 @@ std::vector<std::byte> read_model_binary(
         relative_path.generic_string());
 }
 
-std::string read_model_text(const std::filesystem::path& model_dir,
-                            const std::filesystem::path& relative_path)
-{
-    const std::vector<std::byte> data = read_model_binary(model_dir, relative_path);
-    return {reinterpret_cast<const char*>(data.data()), data.size()};
-}
-
 std::vector<std::string> list_embedded_model_profiles()
 {
     std::vector<std::string> result;

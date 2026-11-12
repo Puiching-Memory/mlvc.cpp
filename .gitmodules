@@ -10,3 +10,11 @@
 	path = third_party/cutlass
 	url = https://github.com/NVIDIA/cutlass.git
 	shallow = true
+[submodule "third_party/protobuf"]
+	path = third_party/protobuf
+	url = https://github.com/protocolbuffers/protobuf.git
+	shallow = true
+[submodule "third_party/abseil"]
+	path = third_party/abseil
+	url = https://github.com/abseil/abseil-cpp.git
+	shallow = true

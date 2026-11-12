@@ -14,12 +14,13 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
 from model_aot import compile_module
+from model_wire import pb, read_message, graph_to_dict
 
 
 @torch.inference_mode()
 def execute_graph(directory, inputs):
     """Independent host interpretation of the serialized runtime contract."""
-    graph = json.loads((directory / "graph.json").read_text())
+    graph = graph_to_dict(read_message(directory / "graph.pb", pb.Graph))
     weights = (directory / "weights.bin").read_bytes()
     values = dict(zip((v["name"] for v in graph["inputs"]), inputs, strict=True))
     for weight in graph["weights"]:
@@ -87,7 +88,7 @@ class AotTests(unittest.TestCase):
         inputs = (torch.rand(1, 3, 8, 8).half(), torch.zeros(1, 12, 4, 4).half(), torch.tensor([0], dtype=torch.int32))
         with tempfile.TemporaryDirectory() as directory:
             directory = Path(directory)
-            graph, _ = compile_module(model, inputs, directory, "test")
+            graph, _ = compile_module(model, inputs, directory, "00" * 32)
             for q in (0, 1, 3):
                 sample = (torch.rand_like(inputs[0]), torch.rand_like(inputs[1]), torch.tensor([q], dtype=torch.int32))
                 for actual, expected in zip(execute_graph(directory, sample), model(*sample), strict=True):
@@ -113,7 +114,7 @@ class AotTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             with self.assertRaisesRegex(ValueError, "unsupported live.*sin"):
-                compile_module(Unsupported(), (torch.ones(1).half(),), Path(directory), "test")
+                compile_module(Unsupported(), (torch.ones(1).half(),), Path(directory), "00" * 32)
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ sys.path.insert(0, str(VIDEO_ROOT))
 
 import numpy as np  # noqa: E402
 
+from model_wire import pb, read_message, read_metadata, read_bundle, pmf_to_dict
 from model_source import load_model  # noqa: E402
 from conversion._frame_loop import FrameLoop  # noqa: E402
 from conversion.utils import read_video_frames  # noqa: E402
@@ -140,14 +141,15 @@ def main() -> None:
 
     import torch
     torch.set_num_threads(min(torch.get_num_threads(), 8))
-    metadata = json.loads((model_dir / "metadata.json").read_text(encoding="utf-8"))
+    metadata = read_metadata(model_dir)
     shape = metadata["params"]["split_model_params"]
     _, split_model, gaussian, estimator = load_model(
         metadata["name"], args.checkpoint, shape["model_width"], shape["model_height"]
     )
-    for filename, table in (("gaussian_pmf.json", gaussian),
-                            ("bit_estimator_pmf.json", estimator)):
-        packaged = json.loads((model_dir / filename).read_text(encoding="utf-8"))
+    for filename, table in (("gaussian_pmf.pb", gaussian),
+                            ("bit_estimator_pmf.pb", estimator)):
+        kind = pb.GaussianPmf if filename.startswith("gaussian") else pb.BitEstimatorPmf
+        packaged = pmf_to_dict(read_message(model_dir / filename, kind))
         if packaged != asdict(table):
             raise ValueError(f"checkpoint entropy tables differ from bundle: {filename}")
     frame_loop_output = output_dir / "python-output"
@@ -199,16 +201,15 @@ def main() -> None:
                 )
             )
 
-    metadata = json.loads((model_dir / "metadata.json").read_text(encoding="utf-8"))
-    bundle_path = model_dir / "model_bundle.json"
-    bundle = json.loads(bundle_path.read_text(encoding="utf-8")) if bundle_path.exists() else None
+    metadata = read_metadata(model_dir)
+    bundle = read_bundle(model_dir)
     manifest = {
         "schema_version": 1,
         "reference_implementation": "microsoft/mlvc-python-split-model",
         "execution_provider": "pytorch-cpu-fp16",
         "profile": metadata["name"],
         "model_version": metadata["params"]["full_model_params"]["model_version"],
-        "model_metadata_sha256": sha256(model_dir / "metadata.json"),
+        "model_metadata_sha256": sha256(model_dir / "metadata.pb"),
         "entropy_model_sha256": bundle.get("entropy_model_sha256") if bundle else None,
         "width": args.width,
         "height": args.height,

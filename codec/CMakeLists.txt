@@ -20,9 +20,13 @@ target_link_libraries(mlvc_codec PRIVATE
     mlvc_runtime
     mlvc_backend_driver_cubin
     msrtc_rans
-    nlohmann_json::nlohmann_json)
+    mlvc_model_proto)
 mlvc_configure_target(mlvc_codec)
 mlvc_enable_ipo(mlvc_codec)
+target_link_options(mlvc_codec PRIVATE
+    "LINKER:--version-script=${PROJECT_SOURCE_DIR}/cmake/codec.exports.map")
+set_property(TARGET mlvc_codec APPEND PROPERTY LINK_DEPENDS
+    "${PROJECT_SOURCE_DIR}/cmake/codec.exports.map")
 
 install(TARGETS mlvc_codec
     EXPORT mlvc_codecTargets

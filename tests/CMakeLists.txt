@@ -33,6 +33,15 @@ target_include_directories(mlvc_public_header_tests PRIVATE
 mlvc_configure_target(mlvc_public_header_tests)
 add_test(NAME mlvc_public_header COMMAND mlvc_public_header_tests)
 
+add_executable(mlvc_model_proto_tests unit/model_proto_tests.cpp
+    "${PROJECT_SOURCE_DIR}/backends/driver_cubin/src/graph_descriptor.cpp")
+target_include_directories(mlvc_model_proto_tests PRIVATE
+    "${PROJECT_SOURCE_DIR}/core/src"
+    "${PROJECT_SOURCE_DIR}/backends/driver_cubin/src")
+target_link_libraries(mlvc_model_proto_tests PRIVATE mlvc_core mlvc_model_proto)
+mlvc_configure_target(mlvc_model_proto_tests)
+add_test(NAME mlvc_model_proto COMMAND mlvc_model_proto_tests)
+
 add_test(NAME mlvc_model_package
     COMMAND "${Python3_EXECUTABLE}"
         "${PROJECT_SOURCE_DIR}/tests/unit/model_package_tests.py")

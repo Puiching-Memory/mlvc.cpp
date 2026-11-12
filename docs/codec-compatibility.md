@@ -20,9 +20,9 @@ bundle produced by `tools/model_package.py assemble` from the direct-checkpoint 
 Metadata, PMFs, and AOT schedules must describe the same registered checkpoint.
 
 The bundle manifest records the SHA-256 and size of every graph, weight blob,
-PMF, and metadata file. `metadata.json`, `gaussian_pmf.json`, and
-`bit_estimator_pmf.json` are generated from FP32 checkpoint parameters before
-the neural model is converted to FP16. AOT graph schema 2 retains native pixel
+PMF, and metadata file. `metadata.pb`, `gaussian_pmf.pb`, and
+`bit_estimator_pmf.pb` are generated from FP32 checkpoint parameters before
+the neural model is converted to FP16. AOT graph schema 3 retains native pixel
 shuffle/unshuffle channel order. The compatibility runner rejects any bundle/reference identity or
 artifact-hash mismatch before inference.
 

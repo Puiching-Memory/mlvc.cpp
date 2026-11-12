@@ -10,8 +10,13 @@ import math
 import struct
 import subprocess
 import tempfile
+import sys
 from pathlib import Path
 from typing import Any
+
+ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(ROOT / "tools"))
+from model_wire import read_bundle
 
 
 def sha256(path: Path) -> str:
@@ -247,9 +252,7 @@ def main() -> None:
         bundle_dir = args.bundle_dir.resolve()
     else:
         bundle_dir = Path(args.model_dir).resolve()
-    bundle = json.loads(
-        (bundle_dir / "model_bundle.json").read_text(encoding="utf-8")
-    )
+    bundle = read_bundle(bundle_dir)
     if (
         bundle.get("profile") != manifest["profile"]
         or bundle.get("model_version") != manifest["model_version"]
@@ -262,7 +265,7 @@ def main() -> None:
             raise AssertionError(f"model bundle artifact missing or truncated: {name}")
         if sha256(artifact) != record["sha256"]:
             raise AssertionError(f"model bundle artifact hash mismatch: {name}")
-    if sha256(bundle_dir / "metadata.json") != manifest["model_metadata_sha256"]:
+    if sha256(bundle_dir / "metadata.pb") != manifest["model_metadata_sha256"]:
         raise AssertionError("model metadata does not match codec reference")
     if sha256(args.reference_dir / manifest["input"]["path"]) != manifest["input"]["sha256"]:
         raise AssertionError("reference input hash mismatch")

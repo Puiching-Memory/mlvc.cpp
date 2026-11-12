@@ -2,7 +2,7 @@
 
 #include "model_assets.hpp"
 
-#include <nlohmann/json.hpp>
+#include "model_proto.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -24,39 +24,25 @@ int divide_up(int value, std::int64_t divisor)
         (static_cast<std::int64_t>(value) % divisor != 0 ? 1 : 0));
 }
 
-std::optional<int> optional_int(const nlohmann::json& value)
+int checked_int(std::uint32_t value)
 {
-    if (value.is_null())
-        return std::nullopt;
-    return value.get<int>();
+    if (value > static_cast<std::uint32_t>(std::numeric_limits<int>::max()))
+        throw std::runtime_error("model integer exceeds runtime range");
+    return static_cast<int>(value);
 }
 
 void validate_bundle_manifest(const std::filesystem::path& model_dir,
-                              const nlohmann::json& metadata)
+                              const wire::ModelMetadata& metadata)
 {
-    const auto manifest_path = model_dir / "model_bundle.json";
-    if (!detail::model_asset_exists(model_dir, "model_bundle.json"))
-        return;
-    const nlohmann::json manifest = nlohmann::json::parse(
-        detail::read_model_text(model_dir, "model_bundle.json"));
-    const auto& full = metadata.at("params").at("full_model_params");
-    const auto& split = metadata.at("params").at("split_model_params");
-    if (manifest.at("schema_version").get<int>() != 1 ||
-        manifest.at("profile").get<std::string>() !=
-            metadata.at("name").get<std::string>() ||
-        manifest.at("model_version").get<std::string>() !=
-            full.at("model_version").get<std::string>() ||
-        manifest.at("model_size").at("width").get<int>() !=
-            split.at("model_width").get<int>() ||
-        manifest.at("model_size").at("height").get<int>() !=
-            split.at("model_height").get<int>() ||
-        manifest.at("compatibility").at("container").get<std::string>() !=
-            "mlvc-frame-le-v1" ||
-        manifest.at("compatibility").at("entropy").get<std::string>() !=
-            "canonical-pmf-v1") {
-        throw std::runtime_error("model bundle manifest does not match metadata: " +
-                                 manifest_path.string());
-    }
+    const auto bundle = detail::read_model_proto<wire::ModelBundle>(model_dir, "model_bundle.pb");
+    if (metadata.schema_version() != 1 || bundle.schema_version() != 2 ||
+        bundle.profile() != metadata.profile() || bundle.model_version() != metadata.model_version() ||
+        bundle.width() != metadata.width() || bundle.height() != metadata.height() ||
+        metadata.checkpoint_sha256().size() != 32 || bundle.entropy_model_sha256().size() != 32 ||
+        bundle.checkpoint_sha256() != metadata.checkpoint_sha256() ||
+        bundle.contract().container() != "mlvc-frame-le-v1" ||
+        bundle.contract().entropy() != "canonical-pmf-v1")
+        throw std::runtime_error("model bundle does not match Protobuf metadata");
 }
 
 }  // namespace
@@ -163,35 +149,30 @@ int ModelConfig::q_index_shift(int frame_index) const
 
 ModelConfig load_model_config(const std::filesystem::path& model_dir)
 {
-    const auto path = model_dir / "metadata.json";
-    const nlohmann::json root = nlohmann::json::parse(
-        detail::read_model_text(model_dir, "metadata.json"));
-    validate_bundle_manifest(model_dir, root);
-    const auto& full = root.at("params").at("full_model_params");
-    const auto& split = root.at("params").at("split_model_params");
-
+    const auto path = model_dir / "metadata.pb";
+    const auto metadata = detail::read_model_proto<wire::ModelMetadata>(model_dir, "metadata.pb");
+    validate_bundle_manifest(model_dir, metadata);
     ModelConfig result;
-    result.name = root.at("name").get<std::string>();
-    result.model_version = full.at("model_version").get<std::string>();
-    result.model_width = split.at("model_width").get<int>();
-    result.model_height = split.at("model_height").get<int>();
-    result.pixel_range = full.at("pixel_range").get<float>();
-    result.qp_num = full.at("qp_num").get<int>();
-    result.total_qp_num = full.at("total_qp_num").get<int>();
-    result.frame_index_map = full.at("frame_index_map").get<std::vector<int>>();
-    result.qp_shift = full.at("qp_shift").get<std::vector<int>>();
-    result.feature_channels = full.at("feature_channels").get<int>();
-    result.latent_channels = full.at("latent_channels").get<int>();
-    result.hyperprior_channels = full.at("hyperprior_channels").get<int>();
-    result.downsample_feature = full.at("downsample_feature").get<int>();
-    result.downsample_latent = full.at("downsample_latent").get<int>();
-    result.downsample_hyperprior =
-        full.at("downsample_hyperprior").get<int>();
-    result.y_scale_repeat = full.at("y_scale_repeat").get<int>();
-    result.iframe_period = optional_int(full.at("iframe_period"));
-    result.reset_period = optional_int(full.at("reset_period"));
-    result.disable_feature_reset =
-        full.at("disable_feature_reset").get<bool>();
+    result.name = metadata.profile();
+    result.model_version = metadata.model_version();
+    result.model_width = checked_int(metadata.width());
+    result.model_height = checked_int(metadata.height());
+    result.pixel_range = metadata.pixel_range();
+    result.qp_num = checked_int(metadata.qp_num());
+    result.total_qp_num = checked_int(metadata.total_qp_num());
+    result.feature_channels = checked_int(metadata.feature_channels());
+    result.latent_channels = checked_int(metadata.latent_channels());
+    result.hyperprior_channels = checked_int(metadata.hyperprior_channels());
+    result.downsample_feature = checked_int(metadata.downsample_feature());
+    result.downsample_latent = checked_int(metadata.downsample_latent());
+    result.downsample_hyperprior = checked_int(metadata.downsample_hyperprior());
+    result.y_scale_repeat = checked_int(metadata.y_scale_repeat());
+    for (const auto value : metadata.frame_index_map())
+        result.frame_index_map.push_back(checked_int(value));
+    result.qp_shift.assign(metadata.qp_shift().begin(), metadata.qp_shift().end());
+    if (metadata.has_iframe_period()) result.iframe_period = checked_int(metadata.iframe_period());
+    if (metadata.has_reset_period()) result.reset_period = checked_int(metadata.reset_period());
+    result.disable_feature_reset = metadata.disable_feature_reset();
 
     try {
         result.validate();

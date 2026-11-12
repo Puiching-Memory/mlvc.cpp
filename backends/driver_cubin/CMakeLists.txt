@@ -95,6 +95,7 @@ mlvc_configure_target(mlvc_driver_probe)
 mlvc_enable_ipo(mlvc_driver_probe)
 
 add_library(mlvc_backend_driver_cubin STATIC
+    src/graph_descriptor.cpp
     src/backend.cpp
     src/cuda_graph_executor.cpp
     src/execution_plan.cpp
@@ -109,12 +110,12 @@ set_target_properties(mlvc_backend_driver_cubin PROPERTIES
 target_include_directories(mlvc_backend_driver_cubin PRIVATE
     "${MLVC_DRIVER_SOURCE_DIR}/include"
     "${PROJECT_SOURCE_DIR}/core/src"
-    "${NLOHMANN_JSON_DIR}/single_include")
+    )
 target_link_libraries(mlvc_backend_driver_cubin PRIVATE
     mlvc_runtime
     mlvc_driver
     mlvc_driver_kernels
-    nlohmann_json::nlohmann_json)
+    mlvc_model_proto)
 mlvc_configure_target(mlvc_backend_driver_cubin)
 mlvc_enable_ipo(mlvc_backend_driver_cubin)
 

@@ -23,6 +23,9 @@ set(INSTALL_ONLY_PYTHON_MODULE ON CACHE BOOL
 add_subdirectory("${MLVC_UPSTREAM_DIR}/packages/msrtc_rans"
                  "${PROJECT_BINARY_DIR}/_deps/msrtc_rans" EXCLUDE_FROM_ALL)
 
+include("${PROJECT_SOURCE_DIR}/cmake/ModelProto.cmake")
+
+# JSON is used only by the standalone benchmark tool.
 set(JSON_BuildTests OFF CACHE INTERNAL "Disable nlohmann/json tests")
 set(JSON_Install OFF CACHE INTERNAL "Do not install nlohmann/json")
 add_subdirectory("${NLOHMANN_JSON_DIR}"
@@ -36,4 +39,14 @@ if(NOT EXISTS "${MLVC_CUTLASS_DIR}/include/cutlass/cutlass.h")
 endif()
 find_package(CUDAToolkit 13.3 REQUIRED)
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
+execute_process(
+    COMMAND "${Python3_EXECUTABLE}" -c
+        "import google.protobuf; assert google.protobuf.__version__ == '6.33.5'"
+    RESULT_VARIABLE _mlvc_python_proto_result
+    ERROR_QUIET)
+if(NOT _mlvc_python_proto_result EQUAL 0)
+    message(FATAL_ERROR
+        "Model tools require Python protobuf==6.33.5. Activate the model environment "
+        "or set Python3_EXECUTABLE to its interpreter.")
+endif()
 enable_language(ASM)

@@ -16,19 +16,22 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from model_wire import (pb, GRAPH_SCHEMA, BUNDLE_SCHEMA, read_message, write_message,
+                        metadata_to_dict, bundle_to_dict, graph_to_dict)
+
 
 ROOT = Path(__file__).resolve().parents[1]
 PROFILE_PATH = ROOT / "models" / "profiles" / "profiles.json"
 COMMON_ARTIFACTS = (
-    "metadata.json",
-    "gaussian_pmf.json",
-    "bit_estimator_pmf.json",
+    "metadata.pb",
+    "gaussian_pmf.pb",
+    "bit_estimator_pmf.pb",
 )
 AOT_ARTIFACTS = (
-    "aot/manifest.json",
-    "aot/MLVCEncoder/graph.json",
+    "aot/manifest.pb",
+    "aot/MLVCEncoder/graph.pb",
     "aot/MLVCEncoder/weights.bin",
-    "aot/MLVCDecoder/graph.json",
+    "aot/MLVCDecoder/graph.pb",
     "aot/MLVCDecoder/weights.bin",
 )
 EMBED_ALIGNMENT = 16
@@ -80,32 +83,49 @@ def add_assemble_arguments(parser: argparse.ArgumentParser) -> None:
 
 
 def verify_package(output_dir: Path) -> dict[str, Any]:
-    manifest_path = output_dir / "model_bundle.json"
-    manifest = load_json(manifest_path)
-    if manifest.get("schema_version") != 1:
-        raise ValueError(f"unsupported model bundle schema: {manifest_path}")
+    bundle = read_message(output_dir / "model_bundle.pb", pb.ModelBundle)
+    manifest = bundle_to_dict(bundle)
     required = set(COMMON_ARTIFACTS + AOT_ARTIFACTS)
-    if set(manifest["artifacts"]) != required:
-        raise ValueError("bundle must contain exactly the Driver+cubin AOT artifacts")
+    if len(bundle.artifacts) != len(required) or set(manifest["artifacts"]) != required:
+        raise ValueError("bundle must contain exactly the Protobuf AOT artifacts")
+    profiles = load_json(PROFILE_PATH)["profiles"]
+    profile = profiles[bundle.profile]
+    checkpoint = bytes.fromhex(profile["weights_sha256"])
+    if bundle.checkpoint_sha256 != checkpoint or bundle.model_version != profile["model_version"]:
+        raise ValueError("bundle checkpoint identity mismatch")
+    if bundle.contract.container != "mlvc-frame-le-v1" or bundle.contract.entropy != "canonical-pmf-v1":
+        raise ValueError("unsupported bundle codec contract")
     for name, record in manifest["artifacts"].items():
         if record["path"] != name:
             raise ValueError(f"non-canonical artifact path: {name}")
-        path = output_dir / record["path"]
+        path = output_dir / name
         if not path.is_file():
-            raise FileNotFoundError(f"bundle artifact {name!r} is missing: {path}")
+            raise FileNotFoundError(f"missing bundle artifact: {path}")
         if path.stat().st_size != record["bytes"]:
             raise ValueError(f"bundle artifact size mismatch: {path}")
-        actual = sha256(path)
-        if actual != record["sha256"]:
+        if sha256(path) != record["sha256"]:
             raise ValueError(f"bundle artifact SHA-256 mismatch: {path}")
-    profiles = load_json(PROFILE_PATH)["profiles"]
-    profile = profiles[manifest["profile"]]
+    metadata = read_message(output_dir / "metadata.pb", pb.ModelMetadata)
+    if (metadata.schema_version != 1 or metadata.profile != bundle.profile or
+        metadata.model_version != bundle.model_version or metadata.width != bundle.width or
+        metadata.height != bundle.height or metadata.checkpoint_sha256 != checkpoint):
+        raise ValueError("bundle metadata identity mismatch")
+    entropy_hash = hashlib.sha256()
+    for name in ("gaussian_pmf.pb", "bit_estimator_pmf.pb"):
+        entropy_hash.update(bytes.fromhex(manifest["artifacts"][name]["sha256"]))
+    if entropy_hash.digest() != bundle.entropy_model_sha256:
+        raise ValueError("bundle entropy identity mismatch")
+    aot = read_message(output_dir / "aot/manifest.pb", pb.AotManifest)
+    if aot.schema_version != 1 or aot.checkpoint_sha256 != checkpoint:
+        raise ValueError("AOT summary checkpoint identity mismatch")
     for part in ("MLVCEncoder", "MLVCDecoder"):
-        graph = load_json(output_dir / "aot" / part / "graph.json")
-        if graph.get("schema_version") != 2 or graph.get("source") != "checkpoint":
-            raise ValueError("AOT graphs must use checkpoint graph schema 2")
-        if graph.get("source_sha256") != profile["weights_sha256"]:
+        graph = read_message(output_dir / "aot" / part / "graph.pb", pb.Graph)
+        graph_to_dict(graph)  # Reject unknown operators/dtypes and unresolved IDs.
+        if graph.checkpoint_sha256 != checkpoint:
             raise ValueError("AOT graph checkpoint identity mismatch")
+        weight_path = output_dir / "aot" / part / "weights.bin"
+        if graph.weights_bytes != weight_path.stat().st_size or graph.weights_sha256.hex() != sha256(weight_path):
+            raise ValueError("AOT graph weights identity mismatch")
     return manifest
 
 
@@ -126,7 +146,8 @@ def assemble(args: argparse.Namespace) -> None:
     if args.profile not in profiles:
         raise ValueError(f"unknown model profile: {args.profile}")
     profile = profiles[args.profile]
-    canonical_metadata = load_json(source_dir / "metadata.json")
+    metadata = read_message(source_dir / "metadata.pb", pb.ModelMetadata)
+    canonical_metadata = metadata_to_dict(metadata)
     identity = model_identity(canonical_metadata)
     if identity["name"] != args.profile:
         raise ValueError(
@@ -135,8 +156,8 @@ def assemble(args: argparse.Namespace) -> None:
     if identity["full_model_params"]["model_version"] != profile["model_version"]:
         raise ValueError("metadata model_version does not match the registered profile")
 
-    aot = load_json(source_dir / "aot/manifest.json")
-    if aot.get("source_sha256") != profile["weights_sha256"]:
+    aot = read_message(source_dir / "aot/manifest.pb", pb.AotManifest)
+    if aot.checkpoint_sha256.hex() != profile["weights_sha256"]:
         raise ValueError("AOT checkpoint identity does not match registered profile")
     output_dir.mkdir(parents=True, exist_ok=True)
     artifacts = {}
@@ -146,30 +167,16 @@ def assemble(args: argparse.Namespace) -> None:
         artifacts[name] = record
 
     entropy_hash = hashlib.sha256()
-    for name in ("gaussian_pmf.json", "bit_estimator_pmf.json"):
+    for name in ("gaussian_pmf.pb", "bit_estimator_pmf.pb"):
         entropy_hash.update(bytes.fromhex(artifacts[name]["sha256"]))
-    manifest = {
-        "schema_version": 1,
-        "profile": args.profile,
-        "model_version": profile["model_version"],
-        "model_size": {
-            "width": identity["split_model_params"]["model_width"],
-            "height": identity["split_model_params"]["model_height"],
-        },
-        "canonical_entropy_source": "checkpoint-fp32",
-        "entropy_model_sha256": entropy_hash.hexdigest(),
-        "compatibility": {
-            "container": "mlvc-frame-le-v1",
-            "entropy": "canonical-pmf-v1",
-            "decoder_max_yuv_sample_error": 1,
-            "decoder_min_psnr_db": 60.0,
-        },
-        "artifacts": artifacts,
-    }
-    manifest_path = output_dir / "model_bundle.json"
-    manifest_path.write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    bundle = pb.ModelBundle(schema_version=BUNDLE_SCHEMA, profile=args.profile,
+        model_version=profile["model_version"], width=metadata.width, height=metadata.height,
+        checkpoint_sha256=bytes.fromhex(profile["weights_sha256"]), entropy_model_sha256=entropy_hash.digest())
+    bundle.contract.CopyFrom(pb.CodecContract(container="mlvc-frame-le-v1", entropy="canonical-pmf-v1",
+        decoder_max_yuv_sample_error=1, decoder_min_psnr_db=60.0))
+    for name, record in sorted(artifacts.items()):
+        bundle.artifacts.add(path=name, size_bytes=record["bytes"], sha256=bytes.fromhex(record["sha256"]))
+    write_message(output_dir / "model_bundle.pb", bundle)
     verified = verify_package(output_dir)
     print(
         f"assembled canonical package {verified['profile']} at {output_dir} "
@@ -187,7 +194,7 @@ def verify(args: argparse.Namespace) -> None:
 
 def find_source_bundle(model_root: Path, profile: str) -> Path:
     profile_root = model_root / profile
-    manifests = sorted(profile_root.glob("*/model_bundle.json"))
+    manifests = sorted(profile_root.glob("*/model_bundle.pb"))
     if len(manifests) != 1:
         raise FileNotFoundError(
             f"expected exactly one canonical bundle for {profile} below "
@@ -198,28 +205,6 @@ def find_source_bundle(model_root: Path, profile: str) -> Path:
 
 def align(data: bytearray) -> None:
     data.extend(b"\0" * (-len(data) % EMBED_ALIGNMENT))
-
-
-def embedded_manifest(source: dict[str, Any]) -> bytes:
-    required = COMMON_ARTIFACTS + AOT_ARTIFACTS
-    artifacts: dict[str, Any] = {}
-    for name in required:
-        try:
-            record = source["artifacts"][name]
-        except KeyError as error:
-            raise FileNotFoundError(
-                f"driver-cubin requires artifact {name!r}"
-            ) from error
-        if record.get("path") != name:
-            raise ValueError(
-                f"artifact {name!r} must use its canonical relative path"
-            )
-        artifacts[name] = record
-    result = dict(source)
-    result["packaged_backend"] = "driver-cubin"
-    result["storage"] = "embedded"
-    result["artifacts"] = artifacts
-    return (json.dumps(result, indent=2, sort_keys=True) + "\n").encode()
 
 
 def replace_file(path: Path, content: bytes) -> None:
@@ -256,7 +241,7 @@ def embed(args: argparse.Namespace) -> None:
 
     for profile, registration in profiles.items():
         source_dir = find_source_bundle(model_root, profile)
-        dependencies.add((source_dir / "model_bundle.json").resolve())
+        dependencies.add((source_dir / "model_bundle.pb").resolve())
         source_manifest = verify_package(source_dir)
         dependencies.update(
             (source_dir / record["path"]).resolve()
@@ -278,7 +263,7 @@ def embed(args: argparse.Namespace) -> None:
             )
 
         assets: list[tuple[str, bytes]] = [
-            ("model_bundle.json", embedded_manifest(source_manifest))
+            ("model_bundle.pb", (source_dir / "model_bundle.pb").read_bytes())
         ]
         required = COMMON_ARTIFACTS + AOT_ARTIFACTS
         assets.extend((name, (source_dir / name).read_bytes()) for name in required)

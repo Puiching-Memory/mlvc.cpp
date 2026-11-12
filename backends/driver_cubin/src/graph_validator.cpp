@@ -10,11 +10,10 @@ namespace mlvc::driver_cubin_backend {
 
 void AotGraph::configure_state(const ModelExecutionConfig& config)
 {
-    const auto final_outputs = manifest_.at("nodes").back().at("outputs")
-        .get<std::vector<std::string>>();
+    const auto final_outputs = graph_.nodes.back().outputs;
     for (const StateTensorBinding& requested : config.state_bindings) {
-        if (requested.input_index >= input_names_.size() ||
-            requested.output_index >= output_names_.size()) {
+        if (requested.input_index >= input_ids_.size() ||
+            requested.output_index >= output_ids_.size()) {
             throw std::runtime_error(
                 "driver-cubin: state tensor index is out of range");
         }
@@ -24,8 +23,8 @@ void AotGraph::configure_state(const ModelExecutionConfig& config)
                 "driver-cubin: duplicate state tensor binding");
         }
 
-        const Value& input = value(input_names_[requested.input_index]);
-        Value& output = values_.at(output_names_[requested.output_index]);
+        const Value& input = value(input_ids_[requested.input_index]);
+        Value& output = values_.at(output_ids_[requested.output_index]);
         if (input.dtype != output.dtype || input.shape != output.shape ||
             requested.data_type != public_dtype(input.dtype) ||
             requested.shape != input.shape) {
@@ -33,7 +32,7 @@ void AotGraph::configure_state(const ModelExecutionConfig& config)
                 "driver-cubin: state tensor shape or dtype mismatch");
         }
         if (std::find(final_outputs.begin(), final_outputs.end(),
-                      output_names_[requested.output_index]) ==
+                      output_ids_[requested.output_index]) ==
             final_outputs.end()) {
             throw std::runtime_error(
                 "driver-cubin: in-place state output must be produced by "
@@ -64,17 +63,17 @@ bool AotGraph::is_state_output(std::size_t index) const
         });
 }
 
-bool AotGraph::is_channel_slice(const json& node, int start, int end) const
+bool AotGraph::is_channel_slice(const Node& node, int start, int end) const
 {
-    const auto inputs = node.at("inputs").get<std::vector<std::string>>();
-    if (inputs.size() < 4 || inputs[1].empty() || inputs[2].empty() ||
-        inputs[3].empty()) {
+    const auto inputs = node.inputs;
+    if (inputs.size() < 4 || (inputs[1] == 0) || (inputs[2] == 0) ||
+        (inputs[3] == 0)) {
         return false;
     }
     const auto starts = initializer_values<std::int64_t>(inputs[1]);
     const auto ends = initializer_values<std::int64_t>(inputs[2]);
     const auto axes = initializer_values<std::int64_t>(inputs[3]);
-    const auto steps = inputs.size() > 4 && !inputs[4].empty()
+    const auto steps = inputs.size() > 4 && !(inputs[4] == 0)
         ? initializer_values<std::int64_t>(inputs[4])
         : std::vector<std::int64_t>{1};
     return starts.size() == 1 && ends.size() == 1 && axes.size() == 1 &&

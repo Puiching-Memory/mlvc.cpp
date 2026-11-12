@@ -15,6 +15,7 @@ import torch
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools"))
 sys.path.insert(0, str(ROOT / "tests/unit"))
+from model_wire import read_metadata
 from model_source import example_inputs, load_model, load_profiles
 from aot_tests import execute_graph
 
@@ -30,11 +31,11 @@ def main():
     torch.manual_seed(123)
     results = []
     for profile in load_profiles():
-        bundles = list((args.model_root / profile).glob("*/model_bundle.json"))
+        bundles = list((args.model_root / profile).glob("*/model_bundle.pb"))
         if len(bundles) != 1:
             raise ValueError(f"expected one canonical bundle for {profile}")
         bundle = bundles[0].parent
-        metadata = json.loads((bundle / "metadata.json").read_text())
+        metadata = read_metadata(bundle)
         shape = metadata["params"]["split_model_params"]
         width, height = shape["model_width"], shape["model_height"]
         full, split, _, _ = load_model(profile, args.checkpoint_root / f"{profile}.ckpt", width, height)

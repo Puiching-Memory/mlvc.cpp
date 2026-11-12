@@ -14,16 +14,16 @@ target_include_directories(mlvc_core
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${NLOHMANN_JSON_DIR}/single_include)
+        )
 target_link_libraries(mlvc_core PRIVATE
     msrtc_rans
-    nlohmann_json::nlohmann_json)
+    mlvc_model_proto)
 mlvc_configure_target(mlvc_core)
 mlvc_enable_ipo(mlvc_core)
 
 if(MLVC_EMBED_MODELS)
     file(GLOB MLVC_MODEL_MANIFESTS CONFIGURE_DEPENDS
-        LIST_DIRECTORIES false "${MLVC_MODEL_ROOT}/*/*/model_bundle.json")
+        LIST_DIRECTORIES false "${MLVC_MODEL_ROOT}/*/*/model_bundle.pb")
     if(NOT MLVC_MODEL_MANIFESTS)
         message(FATAL_ERROR
             "No canonical model bundles found below ${MLVC_MODEL_ROOT}")
@@ -58,6 +58,8 @@ if(MLVC_EMBED_MODELS)
             ${MLVC_MODEL_MANIFESTS}
             "${MLVC_PROFILE_FILE}"
             "${PROJECT_SOURCE_DIR}/tools/model_package.py"
+            "${PROJECT_SOURCE_DIR}/tools/model_wire.py"
+            "${PROJECT_SOURCE_DIR}/tools/mlvc_proto/mlvc_model_pb2.py"
         DEPFILE "${MLVC_EMBEDDED_MODELS_DEPFILE}"
         COMMENT "Embedding validated driver-cubin model bundles"
         VERBATIM)

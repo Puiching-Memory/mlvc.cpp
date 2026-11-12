@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import math
 import weakref
 from collections import Counter, defaultdict
@@ -20,6 +19,7 @@ import numpy as np
 import torch
 from torch.utils._python_dispatch import TorchDispatchMode
 from torch.utils._pytree import tree_flatten, tree_map
+from model_wire import pb, GRAPH_SCHEMA, graph_from_dict, metadata_from_dict, pmf_from_dict, write_message
 
 ALIGNMENT = 256
 DTYPES = {torch.float16: "fp16", torch.int32: "int32", torch.int64: "int64"}
@@ -254,7 +254,7 @@ def compile_module(model, inputs, destination, source_hash):
         weights.append(dict(name=name, dtype=dtype, shape=list(array.shape), offset=len(content), bytes=array.nbytes))
         content.extend(array.tobytes())
     arena, arena_bytes = plan_arena(nodes, tensors, input_names, output_names)
-    manifest = dict(schema_version=2, source="checkpoint", source_sha256=source_hash,
+    manifest = dict(schema_version=GRAPH_SCHEMA, source="checkpoint", source_sha256=source_hash,
         inputs=[dict(name=n, **tensors[n]) for n in input_names],
         outputs=[dict(name=n, **tensors[n]) for n in output_names], nodes=nodes, tensors=tensors, weights=weights,
         operator_counts=dict(sorted(Counter(n["op"] for n in nodes).items())),
@@ -262,7 +262,7 @@ def compile_module(model, inputs, destination, source_hash):
         arena_alignment=ALIGNMENT, arena_bytes=arena_bytes, arena=arena)
     destination.mkdir(parents=True, exist_ok=True)
     (destination / "weights.bin").write_bytes(content)
-    (destination / "graph.json").write_text(json.dumps(manifest, indent=2) + "\n")
+    write_message(destination / "graph.pb", graph_from_dict(manifest))
     return manifest, result
 
 
@@ -283,10 +283,10 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
     metadata = dict(name=args.profile, params=dict(full_model_params=asdict(full.model_params),
                                                   split_model_params=asdict(split.split_model_params)))
-    (args.output_dir / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
-    for name, table in (("gaussian_pmf", gaussian), ("bit_estimator_pmf", estimator)):
-        (args.output_dir / f"{name}.json").write_text(json.dumps(asdict(table)) + "\n")
     source_hash = hashlib.sha256(args.checkpoint.read_bytes()).hexdigest()
+    write_message(args.output_dir / "metadata.pb", metadata_from_dict(metadata, source_hash))
+    for name, table in (("gaussian_pmf", gaussian), ("bit_estimator_pmf", estimator)):
+        write_message(args.output_dir / f"{name}.pb", pmf_from_dict(asdict(table), name == "gaussian_pmf"))
     summaries = []
     for part, wrapper in split.model_parts.items():
         inputs = example_inputs(part.value, full.model_params, args.model_width, args.model_height)
@@ -296,8 +296,12 @@ def main():
         np.savez(args.output_dir / f"benchmark-{part.value}.npz", **snapshot)
         summaries.append(dict(part=part.value, nodes=len(graph["nodes"]), weights_bytes=graph["weights_bytes"], arena_bytes=graph["arena_bytes"]))
         print(summaries[-1])
-    (args.output_dir / "aot/manifest.json").write_text(json.dumps(
-        dict(schema_version=1, source_sha256=source_hash, graphs=summaries), indent=2) + "\n")
+    summary = pb.AotManifest(schema_version=1, checkpoint_sha256=bytes.fromhex(source_hash))
+    for item in summaries:
+        summary.graphs.add(part=item["part"], node_count=item["nodes"],
+                           weights_bytes=item["weights_bytes"], arena_bytes=item["arena_bytes"])
+    write_message(args.output_dir / "aot/manifest.pb", summary)
+
 
 
 if __name__ == "__main__":

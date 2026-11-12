@@ -12,3 +12,4 @@ python-dotenv
 azure-identity
 azure-storage-blob
 azure-ai-ml
+protobuf==6.33.5

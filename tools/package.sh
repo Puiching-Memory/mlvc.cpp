@@ -62,6 +62,10 @@ command -v nvcc >/dev/null || { echo "error: CUDA 13.3 toolkit is required" >&2;
 for tool in ldd python3 sha256sum tar; do
     command -v "$tool" >/dev/null || { echo "error: $tool is required" >&2; exit 1; }
 done
+python3 -c 'import google.protobuf; assert google.protobuf.__version__ == "6.33.5"' || {
+    echo "error: activate the model-tool environment with protobuf==6.33.5" >&2
+    exit 1
+}
 if [[ "$SKIP_GPU_TESTS" -eq 0 ]]; then
     command -v nvidia-smi >/dev/null || { echo "error: nvidia-smi is required" >&2; exit 1; }
     nvidia-smi -L >/dev/null || {
@@ -273,7 +277,9 @@ package_driver_cubin() {
         printf 'codec_library=%s\n' "$(basename "$codec_library")"
         printf 'codec_api=c-abi\n'
         printf 'codec_abi_version=2\n'
-        printf 'aot_graph_schema=2\n'
+        printf 'aot_graph_schema=3\n'
+        printf 'model_format=protobuf\n'
+        printf 'protobuf=33.5-lite-static\n'
         printf 'floating_point=fp16-only\n'
         printf 'runtime_gpu_dependency=libcuda.so.1\n'
         printf 'cuda_toolkit_runtime_dependency=false\n'

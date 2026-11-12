@@ -8,7 +8,7 @@
 
 #include "model_assets.hpp"
 
-#include <nlohmann/json.hpp>
+#include "model_proto.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -154,7 +154,7 @@ void write_debug_tensors(const CodecOptions& options, const char* stage,
         std::filesystem::path(options.debug_dir) / stage / frame_name.str();
     std::filesystem::create_directories(directory);
 
-    nlohmann::json manifest = nlohmann::json::array();
+    wire::DebugTensorSet manifest;
     for (std::size_t index = 0; index < tensors.size(); ++index) {
         const Tensor& tensor = tensors[index];
         tensor.validate();
@@ -168,21 +168,19 @@ void write_debug_tensors(const CodecOptions& options, const char* stage,
                      static_cast<std::streamsize>(tensor.byte_size()));
         if (!output)
             throw std::runtime_error("failed to write debug tensor: " + path.string());
-        manifest.push_back({
-            {"direction", direction},
-            {"index", index},
-            {"name", tensor.name},
-            {"dtype", tensor_dtype_name(tensor.data_type())},
-            {"shape", tensor.shape},
-            {"bytes", tensor.byte_size()},
-            {"path", filename.str()},
-        });
+        auto* record = manifest.add_tensors();
+        record->set_direction(direction);
+        record->set_index(static_cast<std::uint32_t>(index));
+        record->set_name(tensor.name);
+        record->set_dtype(tensor.data_type() == TensorDataType::kFloat16 ? wire::FP16 : wire::INT32);
+        for (const auto dimension : tensor.shape) record->add_shape(dimension);
+        record->set_size_bytes(tensor.byte_size());
+        record->set_path(filename.str());
     }
     const std::filesystem::path manifest_path =
-        directory / (std::string(direction) + "s.json");
-    std::ofstream manifest_output(manifest_path, std::ios::trunc);
-    manifest_output << manifest.dump(2) << '\n';
-    if (!manifest_output)
+        directory / (std::string(direction) + "s.pb");
+    std::ofstream manifest_output(manifest_path, std::ios::binary | std::ios::trunc);
+    if (!manifest.SerializeToOstream(&manifest_output))
         throw std::runtime_error("failed to write debug manifest: " +
                                  manifest_path.string());
 }

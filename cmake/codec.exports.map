@@ -1,0 +1,15 @@
+{
+    global:
+        mlvc_codec_options_init;
+        mlvc_codec_stats_init;
+        mlvc_backend_name;
+        mlvc_encode;
+        mlvc_decode;
+        extern "C++" {
+            mlvc::encode_video*;
+            mlvc::decode_video*;
+            mlvc::available_model_profiles*;
+            mlvc::compiled_backend_name_c_str*;
+        };
+    local: *;
+};

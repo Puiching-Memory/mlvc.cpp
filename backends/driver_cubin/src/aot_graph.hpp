@@ -5,7 +5,7 @@
 #include "mlvc/driver_cubin/driver.hpp"
 #include "mlvc/runtime/backend.hpp"
 
-#include <nlohmann/json.hpp>
+#include "graph_descriptor.hpp"
 
 #include <array>
 #include <cstddef>
@@ -20,17 +20,17 @@
 
 namespace mlvc::driver_cubin_backend {
 
-using json = nlohmann::json;
 using DeviceAddress = driver_cubin::abi::DeviceAddress;
 
 std::size_t element_count(const std::vector<int64_t>& shape);
-std::size_t dtype_bytes(const std::string& dtype);
-TensorDataType public_dtype(const std::string& dtype);
+std::size_t dtype_bytes(DataType dtype);
+TensorDataType public_dtype(DataType dtype);
 std::array<int, 4> dims4(const std::vector<int64_t>& shape);
 unsigned int divide_up(std::size_t value, unsigned int divisor);
 
 struct Value {
-    std::string dtype;
+    std::string name;
+    DataType dtype;
     std::vector<int64_t> shape;
     DeviceAddress address = 0;
     std::size_t host_offset = 0;
@@ -88,7 +88,7 @@ private:
     void configure_state(const ModelExecutionConfig& config);
     bool is_state_input(std::size_t index) const;
     bool is_state_output(std::size_t index) const;
-    bool is_channel_slice(const json& node, int start, int end) const;
+    bool is_channel_slice(const Node& node, int start, int end) const;
     static bool ranges_overlap(const Value& lhs, const Value& rhs);
 
     void register_kernels();
@@ -100,16 +100,16 @@ private:
     void set_q_index(HostSlot& slot, int shifted_q);
     void finish_submit(HostSlot& slot);
 
-    const Value& value(const std::string& name) const;
+    const Value& value(TensorId name) const;
 
     template <typename T>
-    std::vector<T> initializer_values(const std::string& name) const
+    std::vector<T> initializer_values(TensorId name) const
     {
         const Value& item = value(name);
         if (!item.initializer ||
-            item.dtype != (sizeof(T) == 8 ? "int64" : "fp16")) {
+            item.dtype != (sizeof(T) == 8 ? DataType::INT64 : DataType::FP16)) {
             throw std::runtime_error(
-                "driver-cubin: unexpected initializer type " + name);
+                "driver-cubin: unexpected initializer type " + std::to_string(name));
         }
         const std::size_t count = element_count(item.shape);
         std::vector<T> result(count);
@@ -118,40 +118,40 @@ private:
         return result;
     }
 
-    float scalar_fp16(const std::string& name) const;
+    float scalar_fp16(TensorId name) const;
 
     void execute_schedule();
-    bool try_execute_y0_tail(const json& nodes, std::size_t index);
-    bool try_execute_y1_tail(const json& nodes, std::size_t index);
-    bool try_execute_feature_update_outputs(const json& nodes,
+    bool try_execute_y0_tail(const std::vector<Node>& nodes, std::size_t index);
+    bool try_execute_y1_tail(const std::vector<Node>& nodes, std::size_t index);
+    bool try_execute_feature_update_outputs(const std::vector<Node>& nodes,
                                             std::size_t index);
-    bool try_execute_feature_update(const json& nodes, std::size_t index);
-    bool try_execute_pointwise_epilogue(const json& nodes, std::size_t index);
-    bool try_execute_reglu(const json& nodes, std::size_t index);
-    bool try_execute_pointwise_reglu(const json& nodes, std::size_t index);
+    bool try_execute_feature_update(const std::vector<Node>& nodes, std::size_t index);
+    bool try_execute_pointwise_epilogue(const std::vector<Node>& nodes, std::size_t index);
+    bool try_execute_reglu(const std::vector<Node>& nodes, std::size_t index);
+    bool try_execute_pointwise_reglu(const std::vector<Node>& nodes, std::size_t index);
 
     bool launch_cutlass_spatial(
-        const json& node, DeviceAddress input, DeviceAddress weight,
+        const Node& node, DeviceAddress input, DeviceAddress weight,
         DeviceAddress bias, DeviceAddress output, int batch_count,
         int in_channels, int input_height, int input_width, int out_channels,
         int output_height, int output_width, int kernel_height,
         int kernel_width, int stride_height, int stride_width,
         int pad_height, int pad_width);
     bool launch_cutlass_pointwise(
-        const json& node, DeviceAddress input, DeviceAddress weight,
+        const Node& node, DeviceAddress input, DeviceAddress weight,
         DeviceAddress bias, DeviceAddress residual, DeviceAddress output,
         int batch_count, int in_channels, int spatial_count, int out_channels,
         int epilogue, float epilogue_alpha);
     void launch_linear(driver_cubin::abi::Function function, std::size_t count,
                        std::span<void*> parameters);
-    void execute(const json& node, const Value* output_override = nullptr,
+    void execute(const Node& node, const Value* output_override = nullptr,
                  DeviceAddress epilogue_input = 0, int epilogue = 0,
                  float epilogue_alpha = 0.0F);
 
     driver_cubin::Driver& driver_;
     const driver_cubin::Module& module_;
     std::string model_name_;
-    json manifest_;
+    GraphDescriptor graph_;
     std::vector<std::byte> weights_host_;
     driver_cubin::DeviceBuffer weights_device_;
     driver_cubin::DeviceBuffer arena_device_;
@@ -181,14 +181,16 @@ private:
                    driver_cubin::kCutlassPointwiseParamsStorageBytes>>
         cutlass_spatial_host_parameters_;
     std::vector<driver_cubin::DeviceBuffer> input_buffers_;
-    std::vector<std::string> input_names_;
+    std::vector<TensorId> input_ids_;
     std::vector<std::size_t> aliased_input_slices_;
     std::vector<std::size_t> elided_schedule_nodes_;
-    std::vector<std::string> direct_concat_values_;
-    std::vector<std::string> output_names_;
+    std::vector<TensorId> direct_concat_values_;
+    std::vector<TensorId> output_ids_;
     std::vector<StateBinding> state_bindings_;
     std::vector<HostSlot> host_slots_;
-    std::unordered_map<std::string, Value> values_;
+    std::vector<Value> values_;
+    TensorId tensor_id(std::string_view name) const;
+    const Value& value(std::string_view name) const { return value(tensor_id(name)); }
     driver_cubin::abi::Function binary_ = nullptr;
     driver_cubin::abi::Function binary_contiguous_ = nullptr;
     driver_cubin::abi::Function unary_ = nullptr;

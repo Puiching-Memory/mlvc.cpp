@@ -1,0 +1,172 @@
+syntax = "proto3";
+package mlvc.wire;
+option optimize_for = LITE_RUNTIME;
+
+enum DataType {
+  DATA_TYPE_UNSPECIFIED = 0;
+  FP16 = 1;
+  INT32 = 2;
+  INT64 = 3;
+}
+
+enum OpKind {
+  OP_UNSPECIFIED = 0;
+  ADD = 1;
+  SUB = 2;
+  MUL = 3;
+  CLIP = 4;
+  CONCAT = 5;
+  CONV = 6;
+  DEPTH_TO_SPACE = 7;
+  GATHER = 8;
+  LEAKY_RELU = 9;
+  RECIPROCAL = 10;
+  ROUND = 11;
+  SIGMOID = 12;
+  SLICE = 13;
+  SPACE_TO_DEPTH = 14;
+}
+
+message ConvAttributes {
+  repeated uint32 strides = 1;
+  repeated uint32 pads = 2;
+  repeated uint32 dilations = 3;
+  uint32 groups = 4;
+}
+message AxisAttributes { sint32 axis = 1; }
+message ActivationAttributes { float alpha = 1; }
+message PixelAttributes { uint32 block_size = 1; }
+
+message Node {
+  OpKind op = 1;
+  repeated uint32 inputs = 2;
+  repeated uint32 outputs = 3;
+  oneof attributes {
+    ConvAttributes conv = 4;
+    AxisAttributes axis = 5;
+    ActivationAttributes activation = 6;
+    PixelAttributes pixel = 7;
+  }
+}
+
+message ArenaAllocation {
+  uint64 offset = 1;
+  uint64 size_bytes = 2;
+  uint32 birth = 3;
+  uint32 death = 4;
+}
+message WeightLocation {
+  uint64 offset = 1;
+  uint64 size_bytes = 2;
+}
+message TensorDescriptor {
+  uint32 id = 1; // Zero is reserved for an absent optional operand.
+  string name = 2; // Diagnostics and named codec boundaries only.
+  DataType dtype = 3;
+  repeated int64 shape = 4;
+  oneof storage {
+    ArenaAllocation arena = 5;
+    WeightLocation weight = 6;
+  }
+}
+message Graph {
+  uint32 schema_version = 1;
+  bytes checkpoint_sha256 = 2;
+  repeated TensorDescriptor tensors = 3;
+  repeated uint32 inputs = 4;
+  repeated uint32 outputs = 5;
+  repeated Node nodes = 6;
+  uint64 arena_bytes = 7;
+  uint32 arena_alignment = 8;
+  uint64 weights_bytes = 9;
+  bytes weights_sha256 = 10;
+}
+
+message ModelMetadata {
+  uint32 schema_version = 1;
+  string profile = 2;
+  string model_version = 3;
+  bytes checkpoint_sha256 = 4;
+  uint32 width = 5;
+  uint32 height = 6;
+  float pixel_range = 7;
+  uint32 qp_num = 8;
+  uint32 total_qp_num = 9;
+  repeated uint32 frame_index_map = 10;
+  repeated sint32 qp_shift = 11;
+  uint32 feature_channels = 12;
+  uint32 latent_channels = 13;
+  uint32 hyperprior_channels = 14;
+  uint32 downsample_feature = 15;
+  uint32 downsample_latent = 16;
+  uint32 downsample_hyperprior = 17;
+  uint32 y_scale_repeat = 18;
+  optional uint32 iframe_period = 19;
+  optional uint32 reset_period = 20;
+  bool disable_feature_reset = 21;
+}
+
+message PmfTable {
+  repeated int32 lengths = 1;
+  repeated sint32 offsets = 2;
+  repeated uint32 values = 3;
+}
+message GaussianPmf {
+  uint32 schema_version = 1;
+  PmfTable table = 2;
+  double scale_min = 3;
+  double scale_max = 4;
+  uint32 scale_levels = 5;
+  bool index_space = 6;
+}
+message BitEstimatorPmf {
+  uint32 schema_version = 1;
+  PmfTable table = 2;
+  uint32 qp_num = 3;
+  uint32 channels = 4;
+}
+
+message GraphSummary {
+  string part = 1;
+  uint32 node_count = 2;
+  uint64 weights_bytes = 3;
+  uint64 arena_bytes = 4;
+}
+message AotManifest {
+  uint32 schema_version = 1;
+  bytes checkpoint_sha256 = 2;
+  repeated GraphSummary graphs = 3;
+}
+message Artifact {
+  string path = 1;
+  uint64 size_bytes = 2;
+  bytes sha256 = 3;
+}
+message CodecContract {
+  string container = 1;
+  string entropy = 2;
+  uint32 decoder_max_yuv_sample_error = 3;
+  double decoder_min_psnr_db = 4;
+}
+message ModelBundle {
+  uint32 schema_version = 1;
+  string profile = 2;
+  string model_version = 3;
+  uint32 width = 4;
+  uint32 height = 5;
+  bytes checkpoint_sha256 = 6;
+  bytes entropy_model_sha256 = 7;
+  CodecContract contract = 8;
+  repeated Artifact artifacts = 9;
+}
+
+message DebugTensor {
+  string direction = 1;
+  uint32 index = 2;
+  string name = 3;
+  DataType dtype = 4;
+  repeated int64 shape = 5;
+  uint64 size_bytes = 6;
+  string path = 7;
+}
+message DebugTensorSet { repeated DebugTensor tensors = 1; }

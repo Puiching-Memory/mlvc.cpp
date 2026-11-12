@@ -11,33 +11,30 @@
 
 namespace mlvc::driver_cubin_backend {
 
-bool AotGraph::try_execute_y0_tail(const json& nodes, std::size_t index)
+bool AotGraph::try_execute_y0_tail(const std::vector<Node>& nodes, std::size_t index)
 {
     if (index + 18 >= nodes.size())
         return false;
-    static constexpr std::array<const char*, 19> operations{
-        "Slice", "Slice", "Clip", "Reciprocal", "Mul", "Sub", "Mul",
-        "Slice", "Slice", "Add", "Round", "Slice", "Slice", "Add",
-        "Mul", "Add", "Mul", "Concat", "Concat"};
+    static constexpr std::array<Op, 19> operations{
+        Op::SLICE, Op::SLICE, Op::CLIP, Op::RECIPROCAL, Op::MUL, Op::SUB, Op::MUL,
+        Op::SLICE, Op::SLICE, Op::ADD, Op::ROUND, Op::SLICE, Op::SLICE, Op::ADD,
+        Op::MUL, Op::ADD, Op::MUL, Op::CONCAT, Op::CONCAT};
     for (std::size_t offset = 0; offset < operations.size(); ++offset) {
-        if (nodes.at(index + offset).at("op") != operations[offset])
+        if (nodes.at(index + offset).op != operations[offset])
             return false;
     }
 
     auto inputs = [&](std::size_t offset) {
-        return nodes.at(index + offset).at("inputs")
-            .get<std::vector<std::string>>();
+        return nodes.at(index + offset).inputs;
     };
-    auto output = [&](std::size_t offset) -> std::string {
-        const auto names = nodes.at(index + offset).at("outputs")
-            .get<std::vector<std::string>>();
-        return names.size() == 1 ? names[0] : std::string{};
+    auto output = [&](std::size_t offset) -> TensorId {
+        const auto names = nodes.at(index + offset).outputs;
+        return names.size() == 1 ? names[0] : TensorId{};
     };
-    auto consumer_count = [&](const std::string& name) {
+    auto consumer_count = [&](TensorId name) {
         std::size_t count = 0;
         for (const auto& candidate : nodes) {
-            const auto candidate_inputs = candidate.at("inputs")
-                .get<std::vector<std::string>>();
+            const auto candidate_inputs = candidate.inputs;
             count += static_cast<std::size_t>(std::count(
                 candidate_inputs.begin(), candidate_inputs.end(), name));
         }
@@ -47,63 +44,63 @@ bool AotGraph::try_execute_y0_tail(const json& nodes, std::size_t index)
     const auto slice0_inputs = inputs(0);
     const auto slice1_inputs = inputs(1);
     if (slice0_inputs.size() < 1 || slice1_inputs.size() < 1 ||
-        slice0_inputs[0].empty() || slice0_inputs[0] != slice1_inputs[0]) {
+        (slice0_inputs[0] == 0) || slice0_inputs[0] != slice1_inputs[0]) {
         return false;
     }
-    const std::string prior_name = slice0_inputs[0];
-    const std::string slice0 = output(0);
-    const std::string slice1 = output(1);
-    const std::string clipped = output(2);
-    const std::string reciprocal = output(3);
-    const std::string normalized = output(4);
-    const std::string difference = output(5);
-    const std::string scaled = output(6);
-    const std::string scaled0 = output(7);
-    const std::string scaled1 = output(8);
-    const std::string rounded_input = output(9);
-    const std::string y_raw = output(10);
-    const std::string prior0 = output(11);
-    const std::string prior1 = output(12);
-    const std::string updated_input0 = output(13);
-    const std::string updated0 = output(14);
-    const std::string updated_input1 = output(15);
-    const std::string updated1 = output(16);
-    const std::string concat2 = output(17);
-    const std::string concat3 = output(18);
-    if (slice0.empty() || slice1.empty() || clipped.empty() ||
-        reciprocal.empty() || normalized.empty() || difference.empty() ||
-        scaled.empty() || scaled0.empty() || scaled1.empty() ||
-        rounded_input.empty() || y_raw.empty() || prior0.empty() ||
-        prior1.empty() || updated_input0.empty() || updated0.empty() ||
-        updated_input1.empty() || updated1.empty() || concat2.empty() ||
-        concat3.empty() ||
+    const TensorId prior_name = slice0_inputs[0];
+    const TensorId slice0 = output(0);
+    const TensorId slice1 = output(1);
+    const TensorId clipped = output(2);
+    const TensorId reciprocal = output(3);
+    const TensorId normalized = output(4);
+    const TensorId difference = output(5);
+    const TensorId scaled = output(6);
+    const TensorId scaled0 = output(7);
+    const TensorId scaled1 = output(8);
+    const TensorId rounded_input = output(9);
+    const TensorId y_raw = output(10);
+    const TensorId prior0 = output(11);
+    const TensorId prior1 = output(12);
+    const TensorId updated_input0 = output(13);
+    const TensorId updated0 = output(14);
+    const TensorId updated_input1 = output(15);
+    const TensorId updated1 = output(16);
+    const TensorId concat2 = output(17);
+    const TensorId concat3 = output(18);
+    if ((slice0 == 0) || (slice1 == 0) || (clipped == 0) ||
+        (reciprocal == 0) || (normalized == 0) || (difference == 0) ||
+        (scaled == 0) || (scaled0 == 0) || (scaled1 == 0) ||
+        (rounded_input == 0) || (y_raw == 0) || (prior0 == 0) ||
+        (prior1 == 0) || (updated_input0 == 0) || (updated0 == 0) ||
+        (updated_input1 == 0) || (updated1 == 0) || (concat2 == 0) ||
+        (concat3 == 0) ||
         inputs(2).size() != 2 || inputs(2)[0] != slice0 ||
-        inputs(2)[1].empty() || inputs(3) != std::vector<std::string>{clipped} ||
-        inputs(4).size() != 2 || inputs(4)[0].empty() ||
+        (inputs(2)[1] == 0) || inputs(3) != std::vector<TensorId>{clipped} ||
+        inputs(4).size() != 2 || (inputs(4)[0] == 0) ||
         inputs(4)[1] != reciprocal ||
-        inputs(5) != std::vector<std::string>{normalized, slice1} ||
+        inputs(5) != std::vector<TensorId>{normalized, slice1} ||
         inputs(6).size() != 2 || inputs(6)[0] != difference ||
-        inputs(6)[1].empty() || inputs(7).size() < 1 ||
+        (inputs(6)[1] == 0) || inputs(7).size() < 1 ||
         inputs(7)[0] != scaled || inputs(8).size() < 1 ||
         inputs(8)[0] != scaled || inputs(9) !=
-            std::vector<std::string>{scaled0, scaled1} ||
-        inputs(10) != std::vector<std::string>{rounded_input} ||
+            std::vector<TensorId>{scaled0, scaled1} ||
+        inputs(10) != std::vector<TensorId>{rounded_input} ||
         inputs(11).size() < 1 || inputs(11)[0] != slice1 ||
         inputs(12).size() < 1 || inputs(12)[0] != slice1 ||
-        inputs(13) != std::vector<std::string>{y_raw, prior0} ||
+        inputs(13) != std::vector<TensorId>{y_raw, prior0} ||
         inputs(14).size() != 2 || inputs(14)[0] != updated_input0 ||
-        inputs(14)[1].empty() || inputs(15) !=
-            std::vector<std::string>{y_raw, prior1} ||
+        (inputs(14)[1] == 0) || inputs(15) !=
+            std::vector<TensorId>{y_raw, prior1} ||
         inputs(16).size() != 2 || inputs(16)[0] != updated_input1 ||
-        inputs(16)[1].empty() || inputs(17) !=
-            std::vector<std::string>{updated0, updated1} ||
-        inputs(18) != std::vector<std::string>{concat2, prior_name} ||
-        nodes.at(index + 17).at("attributes").value("axis", 0) != 1 ||
-        nodes.at(index + 18).at("attributes").value("axis", 0) != 1) {
+        (inputs(16)[1] == 0) || inputs(17) !=
+            std::vector<TensorId>{updated0, updated1} ||
+        inputs(18) != std::vector<TensorId>{concat2, prior_name} ||
+        nodes.at(index + 17).axis_or_zero() != 1 ||
+        nodes.at(index + 18).axis_or_zero() != 1) {
         return false;
     }
 
-    const std::array<std::pair<const std::string*, std::size_t>, 19>
+    const std::array<std::pair<const TensorId*, std::size_t>, 19>
         expected_consumers{{
             {&prior_name, 3}, {&slice0, 1}, {&slice1, 3},
             {&clipped, 2}, {&reciprocal, 1}, {&normalized, 2},
@@ -127,11 +124,11 @@ bool AotGraph::try_execute_y0_tail(const json& nodes, std::size_t index)
     const Value& raw_value = value(y_raw);
     const Value& concat2_value = value(concat2);
     const Value& concat3_value = value(concat3);
-    if (prior_value.dtype != "fp16" || latent_value.dtype != "fp16" ||
-        quant_scale.dtype != "fp16" || update_scale0.dtype != "fp16" ||
-        update_scale1.dtype != "fp16" || normalized_value.dtype != "fp16" ||
-        clipped_value.dtype != "fp16" || raw_value.dtype != "fp16" ||
-        concat2_value.dtype != "fp16" || concat3_value.dtype != "fp16" ||
+    if (prior_value.dtype != DataType::FP16 || latent_value.dtype != DataType::FP16 ||
+        quant_scale.dtype != DataType::FP16 || update_scale0.dtype != DataType::FP16 ||
+        update_scale1.dtype != DataType::FP16 || normalized_value.dtype != DataType::FP16 ||
+        clipped_value.dtype != DataType::FP16 || raw_value.dtype != DataType::FP16 ||
+        concat2_value.dtype != DataType::FP16 || concat3_value.dtype != DataType::FP16 ||
         prior_value.shape.size() != 4 || latent_value.shape.size() != 4 ||
         raw_value.shape.size() != 4 || concat3_value.shape.size() != 4) {
         return false;
@@ -169,7 +166,7 @@ bool AotGraph::try_execute_y0_tail(const json& nodes, std::size_t index)
         value(updated0).shape != raw_shape || value(updated1).shape != raw_shape ||
         concat2_value.shape != normalized_expected ||
         concat3_value.shape != concat3_expected ||
-        value(inputs(2)[1]).dtype != "fp16" ||
+        value(inputs(2)[1]).dtype != DataType::FP16 ||
         value(inputs(2)[1]).shape != std::vector<int64_t>{1}) {
         return false;
     }
@@ -226,32 +223,29 @@ bool AotGraph::try_execute_y0_tail(const json& nodes, std::size_t index)
     return true;
 }
 
-bool AotGraph::try_execute_y1_tail(const json& nodes, std::size_t index)
+bool AotGraph::try_execute_y1_tail(const std::vector<Node>& nodes, std::size_t index)
 {
     if (index + 14 >= nodes.size())
         return false;
-    static constexpr std::array<const char*, 15> operations{
-        "Sub", "Mul", "Slice", "Slice", "Add", "Round", "Slice",
-        "Slice", "Add", "Mul", "Add", "Mul", "Concat", "Add", "Mul"};
+    static constexpr std::array<Op, 15> operations{
+        Op::SUB, Op::MUL, Op::SLICE, Op::SLICE, Op::ADD, Op::ROUND, Op::SLICE,
+        Op::SLICE, Op::ADD, Op::MUL, Op::ADD, Op::MUL, Op::CONCAT, Op::ADD, Op::MUL};
     for (std::size_t offset = 0; offset < operations.size(); ++offset) {
-        if (nodes.at(index + offset).at("op") != operations[offset])
+        if (nodes.at(index + offset).op != operations[offset])
             return false;
     }
 
     auto inputs = [&](std::size_t offset) {
-        return nodes.at(index + offset).at("inputs")
-            .get<std::vector<std::string>>();
+        return nodes.at(index + offset).inputs;
     };
-    auto output = [&](std::size_t offset) -> std::string {
-        const auto names = nodes.at(index + offset).at("outputs")
-            .get<std::vector<std::string>>();
-        return names.size() == 1 ? names[0] : std::string{};
+    auto output = [&](std::size_t offset) -> TensorId {
+        const auto names = nodes.at(index + offset).outputs;
+        return names.size() == 1 ? names[0] : TensorId{};
     };
-    auto consumer_count = [&](const std::string& name) {
+    auto consumer_count = [&](TensorId name) {
         std::size_t count = 0;
         for (const auto& candidate : nodes) {
-            const auto candidate_inputs = candidate.at("inputs")
-                .get<std::vector<std::string>>();
+            const auto candidate_inputs = candidate.inputs;
             count += static_cast<std::size_t>(std::count(
                 candidate_inputs.begin(), candidate_inputs.end(), name));
         }
@@ -259,57 +253,57 @@ bool AotGraph::try_execute_y1_tail(const json& nodes, std::size_t index)
     };
 
     const auto first_inputs = inputs(0);
-    if (first_inputs.size() != 2 || first_inputs[0].empty() ||
-        first_inputs[1].empty()) {
+    if (first_inputs.size() != 2 || (first_inputs[0] == 0) ||
+        (first_inputs[1] == 0)) {
         return false;
     }
-    const std::string normalized_name = first_inputs[0];
-    const std::string prior_name = first_inputs[1];
-    const std::string difference = output(0);
-    const std::string scaled = output(1);
-    const std::string scaled0 = output(2);
-    const std::string scaled1 = output(3);
-    const std::string rounded_input = output(4);
-    const std::string y_raw = output(5);
-    const std::string prior0 = output(6);
-    const std::string prior1 = output(7);
-    const std::string updated_input0 = output(8);
-    const std::string updated0 = output(9);
-    const std::string updated_input1 = output(10);
-    const std::string updated1 = output(11);
-    const std::string concat4 = output(12);
-    const std::string added = output(13);
-    const std::string result_name = output(14);
-    if (difference.empty() || scaled.empty() || scaled0.empty() ||
-        scaled1.empty() || rounded_input.empty() || y_raw.empty() ||
-        prior0.empty() || prior1.empty() || updated_input0.empty() ||
-        updated0.empty() || updated_input1.empty() || updated1.empty() ||
-        concat4.empty() || added.empty() || result_name.empty() ||
+    const TensorId normalized_name = first_inputs[0];
+    const TensorId prior_name = first_inputs[1];
+    const TensorId difference = output(0);
+    const TensorId scaled = output(1);
+    const TensorId scaled0 = output(2);
+    const TensorId scaled1 = output(3);
+    const TensorId rounded_input = output(4);
+    const TensorId y_raw = output(5);
+    const TensorId prior0 = output(6);
+    const TensorId prior1 = output(7);
+    const TensorId updated_input0 = output(8);
+    const TensorId updated0 = output(9);
+    const TensorId updated_input1 = output(10);
+    const TensorId updated1 = output(11);
+    const TensorId concat4 = output(12);
+    const TensorId added = output(13);
+    const TensorId result_name = output(14);
+    if ((difference == 0) || (scaled == 0) || (scaled0 == 0) ||
+        (scaled1 == 0) || (rounded_input == 0) || (y_raw == 0) ||
+        (prior0 == 0) || (prior1 == 0) || (updated_input0 == 0) ||
+        (updated0 == 0) || (updated_input1 == 0) || (updated1 == 0) ||
+        (concat4 == 0) || (added == 0) || (result_name == 0) ||
         inputs(1).size() != 2 || inputs(1)[0] != difference ||
-        inputs(1)[1].empty() || inputs(2).size() < 1 ||
+        (inputs(1)[1] == 0) || inputs(2).size() < 1 ||
         inputs(2)[0] != scaled || inputs(3).size() < 1 ||
         inputs(3)[0] != scaled || inputs(4) !=
-            std::vector<std::string>{scaled0, scaled1} ||
-        inputs(5) != std::vector<std::string>{rounded_input} ||
+            std::vector<TensorId>{scaled0, scaled1} ||
+        inputs(5) != std::vector<TensorId>{rounded_input} ||
         inputs(6).size() < 1 || inputs(6)[0] != prior_name ||
         inputs(7).size() < 1 || inputs(7)[0] != prior_name ||
-        inputs(8) != std::vector<std::string>{y_raw, prior0} ||
+        inputs(8) != std::vector<TensorId>{y_raw, prior0} ||
         inputs(9).size() != 2 || inputs(9)[0] != updated_input0 ||
-        inputs(9)[1].empty() || inputs(10) !=
-            std::vector<std::string>{y_raw, prior1} ||
+        (inputs(9)[1] == 0) || inputs(10) !=
+            std::vector<TensorId>{y_raw, prior1} ||
         inputs(11).size() != 2 || inputs(11)[0] != updated_input1 ||
-        inputs(11)[1].empty() || inputs(12) !=
-            std::vector<std::string>{updated0, updated1} ||
-        inputs(13).size() != 2 || inputs(13)[0].empty() ||
+        (inputs(11)[1] == 0) || inputs(12) !=
+            std::vector<TensorId>{updated0, updated1} ||
+        inputs(13).size() != 2 || (inputs(13)[0] == 0) ||
         inputs(13)[1] != concat4 ||
         inputs(14).size() != 2 || inputs(14)[0] != added ||
-        inputs(14)[1].empty() ||
-        nodes.at(index + 12).at("attributes").value("axis", 0) != 1) {
+        (inputs(14)[1] == 0) ||
+        nodes.at(index + 12).axis_or_zero() != 1) {
         return false;
     }
 
-    const std::string concat2_name = inputs(13)[0];
-    const std::string clipped_name = inputs(14)[1];
+    const TensorId concat2_name = inputs(13)[0];
+    const TensorId clipped_name = inputs(14)[1];
     if (consumer_count(difference) != 1 || consumer_count(scaled) != 2 ||
         consumer_count(scaled0) != 1 || consumer_count(scaled1) != 1 ||
         consumer_count(rounded_input) != 1 || consumer_count(y_raw) != 2 ||
@@ -331,11 +325,11 @@ bool AotGraph::try_execute_y1_tail(const json& nodes, std::size_t index)
     const Value& clipped_value = value(clipped_name);
     const Value& raw_value = value(y_raw);
     const Value& result = value(result_name);
-    if (normalized_value.dtype != "fp16" || prior_value.dtype != "fp16" ||
-        quant_scale.dtype != "fp16" || update_scale0.dtype != "fp16" ||
-        update_scale1.dtype != "fp16" || concat2_value.dtype != "fp16" ||
-        clipped_value.dtype != "fp16" || raw_value.dtype != "fp16" ||
-        result.dtype != "fp16" || normalized_value.shape.size() != 4 ||
+    if (normalized_value.dtype != DataType::FP16 || prior_value.dtype != DataType::FP16 ||
+        quant_scale.dtype != DataType::FP16 || update_scale0.dtype != DataType::FP16 ||
+        update_scale1.dtype != DataType::FP16 || concat2_value.dtype != DataType::FP16 ||
+        clipped_value.dtype != DataType::FP16 || raw_value.dtype != DataType::FP16 ||
+        result.dtype != DataType::FP16 || normalized_value.shape.size() != 4 ||
         prior_value.shape.size() != 4 || raw_value.shape.size() != 4 ||
         result.shape.size() != 4) {
         return false;
@@ -370,7 +364,7 @@ bool AotGraph::try_execute_y1_tail(const json& nodes, std::size_t index)
         !is_channel_slice(nodes.at(index + 6), 0, quant_channels) ||
         !is_channel_slice(nodes.at(index + 7), quant_channels,
                           quant_channels * 2) ||
-        nodes.at(index + 13).at("attributes").value("axis", 0) != 0) {
+        nodes.at(index + 13).axis_or_zero() != 0) {
         return false;
     }
 
@@ -408,26 +402,24 @@ bool AotGraph::try_execute_y1_tail(const json& nodes, std::size_t index)
     return true;
 }
 
-bool AotGraph::try_execute_feature_update(const json& nodes, std::size_t index)
+bool AotGraph::try_execute_feature_update(const std::vector<Node>& nodes, std::size_t index)
 {
     if (index + 11 >= nodes.size())
         return false;
-    static constexpr std::array<const char*, 12> operations{
-        "Slice", "Slice", "Slice", "Sigmoid", "Sigmoid", "Mul",
-        "Sub", "Mul", "Add", "Mul", "Mul", "Concat"};
+    static constexpr std::array<Op, 12> operations{
+        Op::SLICE, Op::SLICE, Op::SLICE, Op::SIGMOID, Op::SIGMOID, Op::MUL,
+        Op::SUB, Op::MUL, Op::ADD, Op::MUL, Op::MUL, Op::CONCAT};
     for (std::size_t offset = 0; offset < operations.size(); ++offset) {
-        if (nodes.at(index + offset).at("op") != operations[offset])
+        if (nodes.at(index + offset).op != operations[offset])
             return false;
     }
 
     auto inputs = [&](std::size_t offset) {
-        return nodes.at(index + offset).at("inputs")
-            .get<std::vector<std::string>>();
+        return nodes.at(index + offset).inputs;
     };
-    auto output = [&](std::size_t offset) -> std::string {
-        const auto names = nodes.at(index + offset).at("outputs")
-            .get<std::vector<std::string>>();
-        return names.size() == 1 ? names[0] : std::string{};
+    auto output = [&](std::size_t offset) -> TensorId {
+        const auto names = nodes.at(index + offset).outputs;
+        return names.size() == 1 ? names[0] : TensorId{};
     };
 
     const auto slice0_inputs = inputs(0);
@@ -438,46 +430,45 @@ bool AotGraph::try_execute_feature_update(const json& nodes, std::size_t index)
         slice0_inputs[0] != slice2_inputs[0]) {
         return false;
     }
-    const std::string slice0 = output(0);
-    const std::string slice1 = output(1);
-    const std::string slice2 = output(2);
-    const std::string sigmoid0 = output(3);
-    const std::string sigmoid1 = output(4);
-    const std::string weighted1 = output(5);
-    const std::string inverse_gate = output(6);
-    const std::string weighted0 = output(7);
-    const std::string blended = output(8);
-    const std::string gated = output(9);
-    const std::string scaled = output(10);
-    const std::string result_name = output(11);
-    if (slice0.empty() || slice1.empty() || slice2.empty() ||
-        sigmoid0.empty() || sigmoid1.empty() || weighted1.empty() ||
-        inverse_gate.empty() || weighted0.empty() || blended.empty() ||
-        gated.empty() || scaled.empty() || result_name.empty() ||
-        inputs(3) != std::vector<std::string>{slice1} ||
-        inputs(4) != std::vector<std::string>{slice2} ||
+    const TensorId slice0 = output(0);
+    const TensorId slice1 = output(1);
+    const TensorId slice2 = output(2);
+    const TensorId sigmoid0 = output(3);
+    const TensorId sigmoid1 = output(4);
+    const TensorId weighted1 = output(5);
+    const TensorId inverse_gate = output(6);
+    const TensorId weighted0 = output(7);
+    const TensorId blended = output(8);
+    const TensorId gated = output(9);
+    const TensorId scaled = output(10);
+    const TensorId result_name = output(11);
+    if ((slice0 == 0) || (slice1 == 0) || (slice2 == 0) ||
+        (sigmoid0 == 0) || (sigmoid1 == 0) || (weighted1 == 0) ||
+        (inverse_gate == 0) || (weighted0 == 0) || (blended == 0) ||
+        (gated == 0) || (scaled == 0) || (result_name == 0) ||
+        inputs(3) != std::vector<TensorId>{slice1} ||
+        inputs(4) != std::vector<TensorId>{slice2} ||
         inputs(5).size() != 2 || inputs(5)[0] != sigmoid0 ||
         inputs(6).size() != 2 || inputs(6)[1] != sigmoid0 ||
-        inputs(7) != std::vector<std::string>{inverse_gate, slice0} ||
-        inputs(8) != std::vector<std::string>{weighted1, weighted0} ||
-        inputs(9) != std::vector<std::string>{sigmoid1, blended} ||
+        inputs(7) != std::vector<TensorId>{inverse_gate, slice0} ||
+        inputs(8) != std::vector<TensorId>{weighted1, weighted0} ||
+        inputs(9) != std::vector<TensorId>{sigmoid1, blended} ||
         inputs(10).size() != 2 || inputs(10)[0] != gated ||
-        inputs(11) != std::vector<std::string>{scaled, blended} ||
-        nodes.at(index + 11).at("attributes").at("axis").get<int>() != 1) {
+        inputs(11) != std::vector<TensorId>{scaled, blended} ||
+        nodes.at(index + 11).axis() != 1) {
         return false;
     }
 
-    auto consumer_count = [&](const std::string& name) {
+    auto consumer_count = [&](TensorId name) {
         std::size_t count = 0;
         for (const auto& candidate : nodes) {
-            const auto candidate_inputs = candidate.at("inputs")
-                .get<std::vector<std::string>>();
+            const auto candidate_inputs = candidate.inputs;
             count += static_cast<std::size_t>(std::count(
                 candidate_inputs.begin(), candidate_inputs.end(), name));
         }
         return count;
     };
-    const std::array<std::pair<const std::string*, std::size_t>, 11>
+    const std::array<std::pair<const TensorId*, std::size_t>, 11>
         expected_consumers{{
             {&slice0, 1}, {&slice1, 1}, {&slice2, 1}, {&sigmoid0, 2},
             {&sigmoid1, 1}, {&weighted1, 1}, {&inverse_gate, 1},
@@ -492,9 +483,9 @@ bool AotGraph::try_execute_feature_update(const json& nodes, std::size_t index)
     const Value& history = value(inputs(5)[1]);
     const Value& scale = value(inputs(10)[1]);
     const Value& result = value(result_name);
-    if (source.dtype != "fp16" || first.dtype != "fp16" ||
-        history.dtype != "fp16" || scale.dtype != "fp16" ||
-        result.dtype != "fp16" ||
+    if (source.dtype != DataType::FP16 || first.dtype != DataType::FP16 ||
+        history.dtype != DataType::FP16 || scale.dtype != DataType::FP16 ||
+        result.dtype != DataType::FP16 ||
         source.shape.size() != 4 || first.shape.size() != 4 ||
         result.shape.size() != 4 || first.shape[0] != source.shape[0] ||
         source.shape[1] != first.shape[1] * 3 ||
@@ -510,7 +501,7 @@ bool AotGraph::try_execute_feature_update(const json& nodes, std::size_t index)
         return false;
     }
     for (std::size_t offset = 3; offset <= 10; ++offset) {
-        if (value(output(offset)).dtype != "fp16" ||
+        if (value(output(offset)).dtype != DataType::FP16 ||
             value(output(offset)).shape != first.shape) {
             return false;
         }
@@ -539,32 +530,29 @@ bool AotGraph::try_execute_feature_update(const json& nodes, std::size_t index)
 }
 
 bool AotGraph::try_execute_feature_update_outputs(
-    const json& nodes, std::size_t index)
+    const std::vector<Node>& nodes, std::size_t index)
 {
     if (index + 10 >= nodes.size())
         return false;
-    static constexpr std::array<const char*, 11> operations{
-        "Slice", "Slice", "Slice", "Sigmoid", "Sigmoid", "Mul",
-        "Sub", "Mul", "Add", "Mul", "Mul"};
+    static constexpr std::array<Op, 11> operations{
+        Op::SLICE, Op::SLICE, Op::SLICE, Op::SIGMOID, Op::SIGMOID, Op::MUL,
+        Op::SUB, Op::MUL, Op::ADD, Op::MUL, Op::MUL};
     for (std::size_t offset = 0; offset < operations.size(); ++offset) {
-        if (nodes.at(index + offset).at("op") != operations[offset])
+        if (nodes.at(index + offset).op != operations[offset])
             return false;
     }
 
     auto inputs = [&](std::size_t offset) {
-        return nodes.at(index + offset).at("inputs")
-            .get<std::vector<std::string>>();
+        return nodes.at(index + offset).inputs;
     };
-    auto output = [&](std::size_t offset) -> std::string {
-        const auto names = nodes.at(index + offset).at("outputs")
-            .get<std::vector<std::string>>();
-        return names.size() == 1 ? names[0] : std::string{};
+    auto output = [&](std::size_t offset) -> TensorId {
+        const auto names = nodes.at(index + offset).outputs;
+        return names.size() == 1 ? names[0] : TensorId{};
     };
-    auto consumer_count = [&](const std::string& name) {
+    auto consumer_count = [&](TensorId name) {
         std::size_t count = 0;
         for (const auto& candidate : nodes) {
-            const auto candidate_inputs = candidate.at("inputs")
-                .get<std::vector<std::string>>();
+            const auto candidate_inputs = candidate.inputs;
             count += static_cast<std::size_t>(std::count(
                 candidate_inputs.begin(), candidate_inputs.end(), name));
         }
@@ -579,46 +567,44 @@ bool AotGraph::try_execute_feature_update_outputs(
         slice0_inputs[0] != slice2_inputs[0]) {
         return false;
     }
-    const std::string slice0 = output(0);
-    const std::string slice1 = output(1);
-    const std::string slice2 = output(2);
-    const std::string sigmoid0 = output(3);
-    const std::string sigmoid1 = output(4);
-    const std::string weighted1 = output(5);
-    const std::string inverse_gate = output(6);
-    const std::string weighted0 = output(7);
-    const std::string blended = output(8);
-    const std::string gated = output(9);
-    const std::string scaled = output(10);
-    if (slice0.empty() || slice1.empty() || slice2.empty() ||
-        sigmoid0.empty() || sigmoid1.empty() || weighted1.empty() ||
-        inverse_gate.empty() || weighted0.empty() || blended.empty() ||
-        gated.empty() || scaled.empty() ||
-        inputs(3) != std::vector<std::string>{slice1} ||
-        inputs(4) != std::vector<std::string>{slice2} ||
+    const TensorId slice0 = output(0);
+    const TensorId slice1 = output(1);
+    const TensorId slice2 = output(2);
+    const TensorId sigmoid0 = output(3);
+    const TensorId sigmoid1 = output(4);
+    const TensorId weighted1 = output(5);
+    const TensorId inverse_gate = output(6);
+    const TensorId weighted0 = output(7);
+    const TensorId blended = output(8);
+    const TensorId gated = output(9);
+    const TensorId scaled = output(10);
+    if ((slice0 == 0) || (slice1 == 0) || (slice2 == 0) ||
+        (sigmoid0 == 0) || (sigmoid1 == 0) || (weighted1 == 0) ||
+        (inverse_gate == 0) || (weighted0 == 0) || (blended == 0) ||
+        (gated == 0) || (scaled == 0) ||
+        inputs(3) != std::vector<TensorId>{slice1} ||
+        inputs(4) != std::vector<TensorId>{slice2} ||
         inputs(5).size() != 2 || inputs(5)[0] != sigmoid0 ||
         inputs(6).size() != 2 || inputs(6)[1] != sigmoid0 ||
-        inputs(7) != std::vector<std::string>{inverse_gate, slice0} ||
-        inputs(8) != std::vector<std::string>{weighted1, weighted0} ||
-        inputs(9) != std::vector<std::string>{sigmoid1, blended} ||
+        inputs(7) != std::vector<TensorId>{inverse_gate, slice0} ||
+        inputs(8) != std::vector<TensorId>{weighted1, weighted0} ||
+        inputs(9) != std::vector<TensorId>{sigmoid1, blended} ||
         inputs(10).size() != 2 || inputs(10)[0] != gated) {
         return false;
     }
 
     std::size_t concat_index = nodes.size();
-    std::string result_name;
+    TensorId result_name = 0;
     for (std::size_t candidate_index = index + operations.size();
          candidate_index < nodes.size(); ++candidate_index) {
-        const json& candidate = nodes.at(candidate_index);
-        if (candidate.at("op") != "Concat")
+        const Node& candidate = nodes.at(candidate_index);
+        if (candidate.op != Op::CONCAT)
             continue;
-        const auto candidate_inputs = candidate.at("inputs")
-            .get<std::vector<std::string>>();
-        const auto candidate_outputs = candidate.at("outputs")
-            .get<std::vector<std::string>>();
-        if (candidate_inputs != std::vector<std::string>{scaled, blended} ||
+        const auto candidate_inputs = candidate.inputs;
+        const auto candidate_outputs = candidate.outputs;
+        if (candidate_inputs != std::vector<TensorId>{scaled, blended} ||
             candidate_outputs.size() != 1 ||
-            candidate.at("attributes").value("axis", 0) != 1) {
+            candidate.axis_or_zero() != 1) {
             continue;
         }
         if (concat_index != nodes.size())
@@ -626,10 +612,10 @@ bool AotGraph::try_execute_feature_update_outputs(
         concat_index = candidate_index;
         result_name = candidate_outputs[0];
     }
-    if (concat_index == nodes.size() || result_name.empty())
+    if (concat_index == nodes.size() || (result_name == 0))
         return false;
 
-    const std::array<std::pair<const std::string*, std::size_t>, 11>
+    const std::array<std::pair<const TensorId*, std::size_t>, 11>
         expected_consumers{{
             {&slice0, 1}, {&slice1, 1}, {&slice2, 1}, {&sigmoid0, 2},
             {&sigmoid1, 1}, {&weighted1, 1}, {&inverse_gate, 1},
@@ -646,10 +632,10 @@ bool AotGraph::try_execute_feature_update_outputs(
     const Value& scaled_value = value(scaled);
     const Value& blended_value = value(blended);
     Value& result = values_.at(result_name);
-    if (source.dtype != "fp16" || first.dtype != "fp16" ||
-        history.dtype != "fp16" || scale.dtype != "fp16" ||
-        scaled_value.dtype != "fp16" || blended_value.dtype != "fp16" ||
-        result.dtype != "fp16" || source.shape.size() != 4 ||
+    if (source.dtype != DataType::FP16 || first.dtype != DataType::FP16 ||
+        history.dtype != DataType::FP16 || scale.dtype != DataType::FP16 ||
+        scaled_value.dtype != DataType::FP16 || blended_value.dtype != DataType::FP16 ||
+        result.dtype != DataType::FP16 || source.shape.size() != 4 ||
         first.shape.size() != 4 || result.shape.size() != 4 ||
         first.shape[0] != source.shape[0] ||
         source.shape[1] != first.shape[1] * 3 ||
@@ -664,7 +650,7 @@ bool AotGraph::try_execute_feature_update_outputs(
         return false;
     }
     for (std::size_t offset = 3; offset <= 10; ++offset) {
-        if (value(output(offset)).dtype != "fp16" ||
+        if (value(output(offset)).dtype != DataType::FP16 ||
             value(output(offset)).shape != first.shape) {
             return false;
         }
@@ -684,11 +670,11 @@ bool AotGraph::try_execute_feature_update_outputs(
     }
 
     const auto output_iterator = std::find(
-        output_names_.begin(), output_names_.end(), result_name);
+        output_ids_.begin(), output_ids_.end(), result_name);
     const bool bound_state_output =
-        output_iterator != output_names_.end() &&
+        output_iterator != output_ids_.end() &&
         is_state_output(static_cast<std::size_t>(
-            std::distance(output_names_.begin(), output_iterator)));
+            std::distance(output_ids_.begin(), output_iterator)));
     if (!bound_state_output) {
         auto [buffer, inserted] =
             feature_update_output_buffers_.try_emplace(concat_index);
@@ -722,39 +708,39 @@ bool AotGraph::try_execute_feature_update_outputs(
     return true;
 }
 
-bool AotGraph::try_execute_pointwise_epilogue(const json& nodes, std::size_t index)
+bool AotGraph::try_execute_pointwise_epilogue(const std::vector<Node>& nodes, std::size_t index)
 {
     if (driver_.device_info().compute_major < 8 || index + 1 >= nodes.size())
         return false;
-    const json& convolution = nodes.at(index);
-    const json& epilogue_node = nodes.at(index + 1);
-    const std::string epilogue_op =
-        epilogue_node.at("op").get<std::string>();
-    if (convolution.at("op") != "Conv" ||
-        (epilogue_op != "LeakyRelu" && epilogue_op != "Add")) {
+    const Node& convolution = nodes.at(index);
+    const Node& epilogue_node = nodes.at(index + 1);
+    const Op epilogue_op =
+        epilogue_node.op;
+    if (convolution.op != Op::CONV ||
+        (epilogue_op != Op::LEAKY_RELU && epilogue_op != Op::ADD)) {
         return false;
     }
 
     const auto convolution_inputs =
-        convolution.at("inputs").get<std::vector<std::string>>();
+        convolution.inputs;
     const auto convolution_outputs =
-        convolution.at("outputs").get<std::vector<std::string>>();
+        convolution.outputs;
     const auto epilogue_inputs =
-        epilogue_node.at("inputs").get<std::vector<std::string>>();
+        epilogue_node.inputs;
     const auto epilogue_outputs =
-        epilogue_node.at("outputs").get<std::vector<std::string>>();
+        epilogue_node.outputs;
     if (convolution_inputs.size() < 2 || convolution_outputs.size() != 1 ||
         epilogue_outputs.size() != 1 ||
-        std::find(output_names_.begin(), output_names_.end(),
-                  convolution_outputs[0]) != output_names_.end()) {
+        std::find(output_ids_.begin(), output_ids_.end(),
+                  convolution_outputs[0]) != output_ids_.end()) {
         return false;
     }
 
-    const std::string& convolution_output_name = convolution_outputs[0];
+    TensorId convolution_output_name = convolution_outputs[0];
     std::size_t consumer_count = 0;
     for (const auto& candidate : nodes) {
-        for (const std::string& input :
-             candidate.at("inputs").get<std::vector<std::string>>()) {
+        for (TensorId input :
+             candidate.inputs) {
             consumer_count += input == convolution_output_name ? 1 : 0;
         }
     }
@@ -763,10 +749,10 @@ bool AotGraph::try_execute_pointwise_epilogue(const json& nodes, std::size_t ind
 
     DeviceAddress epilogue_input_address = 0;
     int epilogue = 1;
-    float alpha = epilogue_node.at("attributes").value("alpha", 0.01F);
+    float alpha = epilogue_node.alpha_or_default();
     const Value* residual = nullptr;
-    if (epilogue_op == "LeakyRelu") {
-        if (epilogue_inputs != std::vector<std::string>{convolution_output_name})
+    if (epilogue_op == Op::LEAKY_RELU) {
+        if (epilogue_inputs != std::vector<TensorId>{convolution_output_name})
             return false;
     } else {
         if (epilogue_inputs.size() != 2)
@@ -776,7 +762,7 @@ bool AotGraph::try_execute_pointwise_epilogue(const json& nodes, std::size_t ind
                                      convolution_output_name);
         if (found == epilogue_inputs.end())
             return false;
-        const std::string& residual_name =
+        TensorId residual_name =
             epilogue_inputs[found == epilogue_inputs.begin() ? 1 : 0];
         residual = &value(residual_name);
         epilogue_input_address = residual->address;
@@ -787,15 +773,15 @@ bool AotGraph::try_execute_pointwise_epilogue(const json& nodes, std::size_t ind
     const Value& weight = value(convolution_inputs[1]);
     const Value& convolution_output = value(convolution_output_name);
     const Value& output = value(epilogue_outputs[0]);
-    const auto& attributes = convolution.at("attributes");
-    const auto strides = attributes.at("strides").get<std::vector<int>>();
-    const auto pads = attributes.at("pads").get<std::vector<int>>();
-    if (input.dtype != "fp16" || weight.dtype != "fp16" ||
-        output.dtype != "fp16" || input.shape.size() != 4 ||
+    const auto& attributes = convolution.conv();
+    const auto strides = attributes.strides;
+    const auto pads = attributes.pads;
+    if (input.dtype != DataType::FP16 || weight.dtype != DataType::FP16 ||
+        output.dtype != DataType::FP16 || input.shape.size() != 4 ||
         weight.shape.size() != 4 || output.shape.size() != 4 ||
-        attributes.value("group", 1) != 1 || weight.shape[2] != 1 ||
-        weight.shape[3] != 1 || strides != std::vector<int>{1, 1} ||
-        pads != std::vector<int>{0, 0, 0, 0} ||
+        attributes.groups != 1 || weight.shape[2] != 1 ||
+        weight.shape[3] != 1 || strides != std::array<int, 2>{1, 1} ||
+        pads != std::array<int, 4>{0, 0, 0, 0} ||
         input.shape[0] != output.shape[0] ||
         input.shape[1] != weight.shape[1] ||
         input.shape[2] != output.shape[2] ||
@@ -813,33 +799,33 @@ bool AotGraph::try_execute_pointwise_epilogue(const json& nodes, std::size_t ind
     return true;
 }
 
-bool AotGraph::try_execute_reglu(const json& nodes, std::size_t index)
+bool AotGraph::try_execute_reglu(const std::vector<Node>& nodes, std::size_t index)
 {
     if (index + 3 >= nodes.size())
         return false;
-    const json& first_slice = nodes.at(index);
-    const json& second_slice = nodes.at(index + 1);
-    const json& clip = nodes.at(index + 2);
-    const json& multiply = nodes.at(index + 3);
-    if (first_slice.at("op") != "Slice" || second_slice.at("op") != "Slice" ||
-        clip.at("op") != "Clip" || multiply.at("op") != "Mul") {
+    const Node& first_slice = nodes.at(index);
+    const Node& second_slice = nodes.at(index + 1);
+    const Node& clip = nodes.at(index + 2);
+    const Node& multiply = nodes.at(index + 3);
+    if (first_slice.op != Op::SLICE || second_slice.op != Op::SLICE ||
+        clip.op != Op::CLIP || multiply.op != Op::MUL) {
         return false;
     }
 
     const auto first_inputs =
-        first_slice.at("inputs").get<std::vector<std::string>>();
+        first_slice.inputs;
     const auto second_inputs =
-        second_slice.at("inputs").get<std::vector<std::string>>();
+        second_slice.inputs;
     const auto first_outputs =
-        first_slice.at("outputs").get<std::vector<std::string>>();
+        first_slice.outputs;
     const auto second_outputs =
-        second_slice.at("outputs").get<std::vector<std::string>>();
-    const auto clip_inputs = clip.at("inputs").get<std::vector<std::string>>();
-    const auto clip_outputs = clip.at("outputs").get<std::vector<std::string>>();
+        second_slice.outputs;
+    const auto clip_inputs = clip.inputs;
+    const auto clip_outputs = clip.outputs;
     const auto multiply_inputs =
-        multiply.at("inputs").get<std::vector<std::string>>();
+        multiply.inputs;
     const auto multiply_outputs =
-        multiply.at("outputs").get<std::vector<std::string>>();
+        multiply.outputs;
     if (first_inputs.empty() || second_inputs.empty() ||
         first_inputs[0] != second_inputs[0] || first_outputs.size() != 1 ||
         second_outputs.size() != 1 || clip_inputs.empty() ||
@@ -852,7 +838,7 @@ bool AotGraph::try_execute_reglu(const json& nodes, std::size_t index)
 
     const Value& input = value(first_inputs[0]);
     Value& output = values_.at(multiply_outputs[0]);
-    if (input.dtype != "fp16" || output.dtype != "fp16" ||
+    if (input.dtype != DataType::FP16 || output.dtype != DataType::FP16 ||
         input.shape.size() != 4 || output.shape.size() != 4 ||
         input.shape[0] != output.shape[0] ||
         input.shape[1] != output.shape[1] * 2 ||
@@ -872,9 +858,9 @@ bool AotGraph::try_execute_reglu(const json& nodes, std::size_t index)
 
     float minimum = -std::numeric_limits<float>::infinity();
     float maximum = std::numeric_limits<float>::infinity();
-    if (clip_inputs.size() > 1 && !clip_inputs[1].empty())
+    if (clip_inputs.size() > 1 && !(clip_inputs[1] == 0))
         minimum = scalar_fp16(clip_inputs[1]);
-    if (clip_inputs.size() > 2 && !clip_inputs[2].empty())
+    if (clip_inputs.size() > 2 && !(clip_inputs[2] == 0))
         maximum = scalar_fp16(clip_inputs[2]);
     DeviceAddress input_address = input.address;
     if (std::find(direct_concat_values_.begin(),
@@ -904,37 +890,37 @@ bool AotGraph::try_execute_reglu(const json& nodes, std::size_t index)
     return true;
 }
 
-bool AotGraph::try_execute_pointwise_reglu(const json& nodes, std::size_t index)
+bool AotGraph::try_execute_pointwise_reglu(const std::vector<Node>& nodes, std::size_t index)
 {
     if (driver_.device_info().compute_major < 8 || index + 4 >= nodes.size())
         return false;
-    const json& convolution = nodes.at(index);
-    const json& first_slice = nodes.at(index + 1);
-    const json& second_slice = nodes.at(index + 2);
-    const json& clip = nodes.at(index + 3);
-    const json& multiply = nodes.at(index + 4);
-    if (convolution.at("op") != "Conv" || first_slice.at("op") != "Slice" ||
-        second_slice.at("op") != "Slice" || clip.at("op") != "Clip" ||
-        multiply.at("op") != "Mul") {
+    const Node& convolution = nodes.at(index);
+    const Node& first_slice = nodes.at(index + 1);
+    const Node& second_slice = nodes.at(index + 2);
+    const Node& clip = nodes.at(index + 3);
+    const Node& multiply = nodes.at(index + 4);
+    if (convolution.op != Op::CONV || first_slice.op != Op::SLICE ||
+        second_slice.op != Op::SLICE || clip.op != Op::CLIP ||
+        multiply.op != Op::MUL) {
         return false;
     }
 
     const auto convolution_inputs =
-        convolution.at("inputs").get<std::vector<std::string>>();
+        convolution.inputs;
     const auto convolution_outputs =
-        convolution.at("outputs").get<std::vector<std::string>>();
+        convolution.outputs;
     const auto first_inputs =
-        first_slice.at("inputs").get<std::vector<std::string>>();
+        first_slice.inputs;
     const auto second_inputs =
-        second_slice.at("inputs").get<std::vector<std::string>>();
+        second_slice.inputs;
     const auto first_outputs =
-        first_slice.at("outputs").get<std::vector<std::string>>();
+        first_slice.outputs;
     const auto second_outputs =
-        second_slice.at("outputs").get<std::vector<std::string>>();
-    const auto clip_inputs = clip.at("inputs").get<std::vector<std::string>>();
-    const auto clip_outputs = clip.at("outputs").get<std::vector<std::string>>();
-    const auto multiply_inputs = multiply.at("inputs").get<std::vector<std::string>>();
-    const auto multiply_outputs = multiply.at("outputs").get<std::vector<std::string>>();
+        second_slice.outputs;
+    const auto clip_inputs = clip.inputs;
+    const auto clip_outputs = clip.outputs;
+    const auto multiply_inputs = multiply.inputs;
+    const auto multiply_outputs = multiply.outputs;
     if (convolution_inputs.size() < 2 || convolution_outputs.size() != 1 ||
         first_inputs.empty() || second_inputs.empty() ||
         first_inputs[0] != convolution_outputs[0] ||
@@ -952,17 +938,17 @@ bool AotGraph::try_execute_pointwise_reglu(const json& nodes, std::size_t index)
     const Value& weight = value(convolution_inputs[1]);
     const Value& convolution_output = value(convolution_outputs[0]);
     Value& output = values_.at(multiply_outputs[0]);
-    const auto& attributes = convolution.at("attributes");
-    const auto strides = attributes.at("strides").get<std::vector<int>>();
-    const auto pads = attributes.at("pads").get<std::vector<int>>();
-    const int groups = attributes.value("group", 1);
-    if (input.dtype != "fp16" || weight.dtype != "fp16" ||
-        output.dtype != "fp16" || input.shape.size() != 4 ||
+    const auto& attributes = convolution.conv();
+    const auto strides = attributes.strides;
+    const auto pads = attributes.pads;
+    const int groups = attributes.groups;
+    if (input.dtype != DataType::FP16 || weight.dtype != DataType::FP16 ||
+        output.dtype != DataType::FP16 || input.shape.size() != 4 ||
         weight.shape.size() != 4 || output.shape.size() != 4 ||
         convolution_output.shape.size() != 4 || groups != 1 ||
         weight.shape[2] != 1 || weight.shape[3] != 1 ||
-        strides != std::vector<int>{1, 1} ||
-        pads != std::vector<int>{0, 0, 0, 0} ||
+        strides != std::array<int, 2>{1, 1} ||
+        pads != std::array<int, 4>{0, 0, 0, 0} ||
         input.shape[0] != output.shape[0] ||
         input.shape[2] != output.shape[2] ||
         input.shape[3] != output.shape[3] ||
@@ -986,14 +972,14 @@ bool AotGraph::try_execute_pointwise_reglu(const json& nodes, std::size_t index)
 
     float minimum = -std::numeric_limits<float>::infinity();
     float maximum = std::numeric_limits<float>::infinity();
-    if (clip_inputs.size() > 1 && !clip_inputs[1].empty())
+    if (clip_inputs.size() > 1 && !(clip_inputs[1] == 0))
         minimum = scalar_fp16(clip_inputs[1]);
-    if (clip_inputs.size() > 2 && !clip_inputs[2].empty())
+    if (clip_inputs.size() > 2 && !(clip_inputs[2] == 0))
         maximum = scalar_fp16(clip_inputs[2]);
     DeviceAddress input_address = input.address;
     DeviceAddress weight_address = weight.address;
     DeviceAddress bias_address = convolution_inputs.size() > 2 &&
-        !convolution_inputs[2].empty()
+        !(convolution_inputs[2] == 0)
         ? value(convolution_inputs[2]).address : 0;
     if (std::find(direct_concat_values_.begin(),
                   direct_concat_values_.end(), multiply_outputs[0]) ==

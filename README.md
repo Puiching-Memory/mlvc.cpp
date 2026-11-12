@@ -12,12 +12,31 @@ operator schedules, FP16 weights, and a multi-architecture fatbin. Its GPU
 dependency is the system NVIDIA driver (`libcuda.so.1`). CUDA Toolkit is a
 build-host dependency; Python/PyTorch are offline model-preparation dependencies.
 
+## Model format
+
+`proto/mlvc_model.proto` is the shared Python/C++ schema. Runtime metadata,
+PMF tables, graph schedules, and bundle manifests use binary Protobuf messages;
+FP16 weights remain in aligned `weights.bin` files. Operators use enums and
+typed attributes, and graph edges use integer tensor IDs. The loader validates
+and converts messages to native execution structures before GPU allocation.
+
+The codec privately links Protobuf Lite and Abseil statically. No Protobuf shared
+library or public Protobuf header is needed by installed applications. Build-host
+`protoc` and the Lite runtime use the same pinned source; Python tools require
+`protobuf==6.33.5`. Regenerate Python bindings after schema edits with the CMake
+target `mlvc_generate_python_proto`.
+
+The profile registry and diagnostic/benchmark reports remain human-readable JSON;
+the codec library does not link the JSON library. Binary model descriptions use
+AOT schema 3 and bundle schema 2. Previous JSON model bundles are unsupported.
+
 ## Requirements
 
 - Linux x86_64, CMake >= 3.23, a C++20 compiler.
 - CUDA Toolkit 13.3 on the build host.
 - Pinned source submodules: Microsoft MLVC (`msrtc_rans` and model source),
-  nlohmann/json, and NVIDIA CUTLASS.
+  NVIDIA CUTLASS, Protobuf v33.5, and Abseil 20250512.1.
+  nlohmann/json is used only by the standalone benchmark tool.
 - Original registered `mlvc-psnr-v1.ckpt` and `mlvc-s-psnr-v1.ckpt` checkpoints.
 - An NVIDIA driver compatible with the generated GPU code on the deployment host.
 
@@ -35,6 +54,7 @@ convolution accumulation; int32 is used for model control inputs.
 uv venv --python 3.12 build/model-venv
 uv pip install --python build/model-venv/bin/python -r tools/requirements-models.txt
 uv pip install --python build/model-venv/bin/python ./third_party/mlvc/packages/msrtc_rans
+source build/model-venv/bin/activate
 ```
 
 The model compiler constructs the official network from its registered original
@@ -66,7 +86,7 @@ from FP32 checkpoint parameters before neural graphs are converted to FP16.
 Each bundle contains metadata, two PMF files, and the AOT graphs/weights; model
 dimensions always come from the metadata.
 
-Native channel-first pixel shuffle/unshuffle uses AOT graph schema **2**. Earlier
+Native channel-first pixel shuffle/unshuffle uses AOT graph schema **3**. Earlier
 graph packages must be regenerated from the checkpoints.
 
 ## Build and package
@@ -213,6 +233,8 @@ backends/driver_cubin/      AOT loader, planner, Driver API, CUDA kernels
 tools/model_source.py       Official checkpoint loading and split-model inputs
 tools/model_aot.py          Direct checkpoint-to-AOT compiler
 tools/model_package.py      Canonical bundle verification and embedding
+tools/model_wire.py         Typed Protobuf adapters for offline tooling
+proto/mlvc_model.proto      Model, PMF, graph, bundle, and debug schemas
 tools/model_reference.py    Official eager-Python reference generation
 tools/cli/                  Encode/decode command-line entry point
 tools/benchmark/            FP16 graph latency and tensor parity measurement

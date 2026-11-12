@@ -5,7 +5,7 @@ SDK 面向 Linux x86_64 NVIDIA GPU。发布包内含模型、AOT 调度和 CUDA 
 只用于构建及模型准备。
 
 当前只提供 Driver+cubin。公开 C 接口使用 ABI 2，不维护旧结构体兼容。
-原始 checkpoint 直接生成的 AOT 图采用 schema 2，旧模型包需要重新生成。
+原始 checkpoint 直接生成的 AOT 图采用 schema 3，旧模型包需要重新生成。
 
 ## 安装
 

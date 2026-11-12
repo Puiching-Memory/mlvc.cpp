@@ -6,7 +6,7 @@
 #include "model_assets.hpp"
 
 #include <msrtc_rans/EntropyCoder.h>
-#include <nlohmann/json.hpp>
+#include "model_proto.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -36,42 +36,42 @@ struct BitEstimatorPmf : PmfTable {
     int channels = 0;
 };
 
-nlohmann::json load_json(const std::filesystem::path& model_dir,
-                         const std::filesystem::path& relative_path)
+PmfTable parse_table(const wire::PmfTable& value)
 {
-    return nlohmann::json::parse(
-        detail::read_model_text(model_dir, relative_path));
-}
-
-PmfTable parse_table(const nlohmann::json& value)
-{
-    return PmfTable{
-        value.at("pmf_lengths").get<std::vector<std::int32_t>>(),
-        value.at("pmf_offsets").get<std::vector<std::int32_t>>(),
-        value.at("pmf_table").get<std::vector<std::int32_t>>()};
+    if (value.lengths().empty() || value.lengths_size() != value.offsets_size())
+        throw std::runtime_error("invalid Protobuf PMF dimensions");
+    PmfTable result;
+    result.lengths.assign(value.lengths().begin(), value.lengths().end());
+    result.offsets.assign(value.offsets().begin(), value.offsets().end());
+    for (const auto frequency : value.values()) {
+        if (frequency > 65536U)
+            throw std::runtime_error("invalid Protobuf PMF frequency");
+        result.table.push_back(static_cast<std::int32_t>(frequency));
+    }
+    return result;
 }
 
 GaussianPmf load_gaussian(const std::filesystem::path& model_dir)
 {
-    const auto value = load_json(model_dir, "gaussian_pmf.json");
-    PmfTable table = parse_table(value);
+    const auto value = detail::read_model_proto<wire::GaussianPmf>(model_dir, "gaussian_pmf.pb");
+    if (value.schema_version() != 1 || !value.index_space() || value.scale_levels() > 128)
+        throw std::runtime_error("unsupported Gaussian PMF contract");
     GaussianPmf result;
-    static_cast<PmfTable&>(result) = std::move(table);
-    result.scale_levels = value.at("scale_levels").get<int>();
-    result.index_space = value.at("index_space").get<bool>();
-    if (!result.index_space)
-        throw std::runtime_error("MLVC AOT runtime requires index-space Gaussian PMFs");
+    static_cast<PmfTable&>(result) = parse_table(value.table());
+    result.scale_levels = static_cast<int>(value.scale_levels());
+    result.index_space = value.index_space();
     return result;
 }
 
 BitEstimatorPmf load_bit_estimator(const std::filesystem::path& model_dir)
 {
-    const auto value = load_json(model_dir, "bit_estimator_pmf.json");
-    PmfTable table = parse_table(value);
+    const auto value = detail::read_model_proto<wire::BitEstimatorPmf>(model_dir, "bit_estimator_pmf.pb");
+    if (value.schema_version() != 1 || value.qp_num() > 65536 || value.channels() > 65536)
+        throw std::runtime_error("unsupported bit-estimator PMF contract");
     BitEstimatorPmf result;
-    static_cast<PmfTable&>(result) = std::move(table);
-    result.qp_num = value.at("qp_num").get<int>();
-    result.channels = value.at("channels").get<int>();
+    static_cast<PmfTable&>(result) = parse_table(value.table());
+    result.qp_num = static_cast<int>(value.qp_num());
+    result.channels = static_cast<int>(value.channels());
     return result;
 }
 

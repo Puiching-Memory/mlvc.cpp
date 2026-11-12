@@ -39,3 +39,5 @@ target_link_options(mlvc_tool_benchmark PRIVATE
 
 install(TARGETS mlvc_tool_demo mlvc_tool_benchmark
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(FILES "${NLOHMANN_JSON_DIR}/LICENSE.MIT"
+    DESTINATION "share/licenses/nlohmann_json")

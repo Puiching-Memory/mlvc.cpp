@@ -9,16 +9,16 @@ namespace mlvc::driver_cubin_backend {
 
 void AotGraph::plan_input_slice_aliases()
 {
-    for (const auto& node : manifest_.at("nodes")) {
-        if (node.at("op") != "Slice")
+    for (const auto& node : graph_.nodes) {
+        if (node.op != Op::SLICE)
             continue;
         const auto inputs =
-            node.at("inputs").get<std::vector<std::string>>();
+            node.inputs;
         const auto outputs =
-            node.at("outputs").get<std::vector<std::string>>();
+            node.outputs;
         if (inputs.empty() || outputs.size() != 1 ||
-            std::find(input_names_.begin(), input_names_.end(), inputs[0]) ==
-                input_names_.end()) {
+            std::find(input_ids_.begin(), input_ids_.end(), inputs[0]) ==
+                input_ids_.end()) {
             continue;
         }
         const Value& input = value(inputs[0]);
@@ -42,7 +42,7 @@ void AotGraph::plan_input_slice_aliases()
             output.address = input.address +
                 static_cast<std::size_t>(start) * channel_bytes;
             aliased_input_slices_.push_back(
-                node.at("index").get<std::size_t>());
+                node.index);
             break;
         }
     }
@@ -52,43 +52,40 @@ void AotGraph::plan_epilogue_buffers()
 {
     if (driver_.device_info().compute_major >= 8) {
         struct EpilogueInterval {
-            std::string name;
+            TensorId name;
             std::size_t birth;
             std::size_t death;
             std::size_t bytes;
             std::size_t slot;
         };
         std::vector<EpilogueInterval> intervals;
-        const auto& nodes = manifest_.at("nodes");
+        const auto& nodes = graph_.nodes;
         for (std::size_t index = 0; index + 1 < nodes.size(); ++index) {
             const auto& convolution = nodes.at(index);
             const auto& epilogue = nodes.at(index + 1);
-            const std::string epilogue_op =
-                epilogue.at("op").get<std::string>();
-            if (convolution.at("op") != "Conv" ||
-                (epilogue_op != "Add" && epilogue_op != "LeakyRelu")) {
+            const Op epilogue_op =
+                epilogue.op;
+            if (convolution.op != Op::CONV ||
+                (epilogue_op != Op::ADD && epilogue_op != Op::LEAKY_RELU)) {
                 continue;
             }
-            const auto convolution_outputs = convolution.at("outputs")
-                .get<std::vector<std::string>>();
-            const auto epilogue_inputs = epilogue.at("inputs")
-                .get<std::vector<std::string>>();
-            const auto epilogue_outputs = epilogue.at("outputs")
-                .get<std::vector<std::string>>();
+            const auto convolution_outputs = convolution.outputs;
+            const auto epilogue_inputs = epilogue.inputs;
+            const auto epilogue_outputs = epilogue.outputs;
             if (convolution_outputs.size() != 1 ||
                 epilogue_outputs.size() != 1 ||
                 std::find(epilogue_inputs.begin(), epilogue_inputs.end(),
                           convolution_outputs[0]) == epilogue_inputs.end() ||
-                !manifest_.at("arena").contains(epilogue_outputs[0])) {
+                !std::holds_alternative<ArenaSlot>(graph_.tensors.at(epilogue_outputs[0]).storage)) {
                 continue;
             }
             const auto& allocation =
-                manifest_.at("arena").at(epilogue_outputs[0]);
+                std::get<ArenaSlot>(graph_.tensors.at(epilogue_outputs[0]).storage);
             intervals.push_back({
                 epilogue_outputs[0],
-                allocation.at("birth").get<std::size_t>(),
-                allocation.at("death").get<std::size_t>(),
-                allocation.at("bytes").get<std::size_t>(), 0});
+                allocation.birth,
+                allocation.death,
+                allocation.bytes, 0});
         }
 
         std::vector<std::size_t> slot_deaths;
@@ -120,14 +117,13 @@ void AotGraph::plan_epilogue_buffers()
 void AotGraph::plan_reglu_buffer()
 {
     std::size_t reglu_bytes = 0;
-    const auto& nodes = manifest_.at("nodes");
+    const auto& nodes = graph_.nodes;
     for (std::size_t index = 0; index + 3 < nodes.size(); ++index) {
-        if (nodes.at(index).at("op") == "Slice" &&
-            nodes.at(index + 1).at("op") == "Slice" &&
-            nodes.at(index + 2).at("op") == "Clip" &&
-            nodes.at(index + 3).at("op") == "Mul") {
-            const auto outputs = nodes.at(index + 3).at("outputs")
-                .get<std::vector<std::string>>();
+        if (nodes.at(index).op == Op::SLICE &&
+            nodes.at(index + 1).op == Op::SLICE &&
+            nodes.at(index + 2).op == Op::CLIP &&
+            nodes.at(index + 3).op == Op::MUL) {
+            const auto outputs = nodes.at(index + 3).outputs;
             if (outputs.size() == 1) {
                 const Value& output = value(outputs[0]);
                 reglu_bytes = std::max(
@@ -142,27 +138,27 @@ void AotGraph::plan_reglu_buffer()
 
 void AotGraph::plan_spatial_buffers()
 {
-    const auto& nodes = manifest_.at("nodes");
+    const auto& nodes = graph_.nodes;
     if (driver_.device_info().compute_major >= 8) {
         std::size_t spatial_input_bytes = 0;
         std::size_t spatial_output_bytes = 0;
         for (const auto& node : nodes) {
-            if (node.at("op") != "Conv")
+            if (node.op != Op::CONV)
                 continue;
             const auto inputs =
-                node.at("inputs").get<std::vector<std::string>>();
+                node.inputs;
             const auto outputs =
-                node.at("outputs").get<std::vector<std::string>>();
-            const auto& attributes = node.at("attributes");
-            if (inputs.size() < 3 || inputs[2].empty() ||
-                outputs.size() != 1 || attributes.value("group", 1) != 1) {
+                node.outputs;
+            const auto& attributes = node.conv();
+            if (inputs.size() < 3 || (inputs[2] == 0) ||
+                outputs.size() != 1 || attributes.groups != 1) {
                 continue;
             }
             const Value& input = value(inputs[0]);
             const Value& weight = value(inputs[1]);
             const Value& output = value(outputs[0]);
-            if (input.dtype != "fp16" || weight.dtype != "fp16" ||
-                output.dtype != "fp16" || input.shape.size() != 4 ||
+            if (input.dtype != DataType::FP16 || weight.dtype != DataType::FP16 ||
+                output.dtype != DataType::FP16 || input.shape.size() != 4 ||
                 weight.shape.size() != 4 || output.shape.size() != 4 ||
                 input.shape[0] != 1 ||
                 weight.shape[2] * weight.shape[3] == 1 ||
@@ -185,22 +181,22 @@ void AotGraph::plan_spatial_buffers()
 
 void AotGraph::plan_direct_concat_buffers()
 {
-    const auto& nodes = manifest_.at("nodes");
+    const auto& nodes = graph_.nodes;
     concat_buffers_.reserve(nodes.size());
     for (auto iterator = nodes.rbegin(); iterator != nodes.rend(); ++iterator) {
-        const json& node = *iterator;
-        if (node.at("op") != "Concat" ||
-            node.at("attributes").at("axis").get<int>() != 1) {
+        const Node& node = *iterator;
+        if (node.op != Op::CONCAT ||
+            node.axis() != 1) {
             continue;
         }
         const auto inputs =
-            node.at("inputs").get<std::vector<std::string>>();
+            node.inputs;
         const auto outputs =
-            node.at("outputs").get<std::vector<std::string>>();
+            node.outputs;
         if (outputs.size() != 1)
             continue;
         Value& output = values_.at(outputs[0]);
-        if (output.dtype != "fp16" || output.shape.size() != 4 ||
+        if (output.dtype != DataType::FP16 || output.shape.size() != 4 ||
             output.shape[0] != 1) {
             continue;
         }
@@ -209,28 +205,26 @@ void AotGraph::plan_direct_concat_buffers()
         bool has_redirect = false;
         for (std::size_t input_index = 0; input_index < inputs.size();
              ++input_index) {
-            const std::string& input_name = inputs[input_index];
+            TensorId input_name = inputs[input_index];
             const Value& input = value(input_name);
             if (input.initializer || input.dtype != output.dtype ||
                 input.shape.size() != 4 || input.shape[0] != 1 ||
                 input.shape[2] != output.shape[2] ||
                 input.shape[3] != output.shape[3] ||
-                std::find(input_names_.begin(), input_names_.end(),
-                          input_name) != input_names_.end() ||
-                std::find(output_names_.begin(), output_names_.end(),
-                          input_name) != output_names_.end()) {
+                std::find(input_ids_.begin(), input_ids_.end(),
+                          input_name) != input_ids_.end() ||
+                std::find(output_ids_.begin(), output_ids_.end(),
+                          input_name) != output_ids_.end()) {
                 continue;
             }
             std::size_t consumers = 0;
             bool produced = false;
             for (const auto& candidate : nodes) {
-                const auto candidate_inputs = candidate.at("inputs")
-                    .get<std::vector<std::string>>();
+                const auto candidate_inputs = candidate.inputs;
                 consumers += static_cast<std::size_t>(std::count(
                     candidate_inputs.begin(), candidate_inputs.end(),
                     input_name));
-                const auto candidate_outputs = candidate.at("outputs")
-                    .get<std::vector<std::string>>();
+                const auto candidate_outputs = candidate.outputs;
                 produced = produced || std::find(
                     candidate_outputs.begin(), candidate_outputs.end(),
                     input_name) != candidate_outputs.end();

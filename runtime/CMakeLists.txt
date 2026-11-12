@@ -3,4 +3,4 @@ target_include_directories(mlvc_runtime
     INTERFACE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
-target_link_libraries(mlvc_runtime INTERFACE mlvc_core)
+target_link_libraries(mlvc_runtime INTERFACE mlvc_core mlvc_model_proto)

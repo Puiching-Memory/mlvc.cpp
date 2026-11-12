@@ -15,7 +15,7 @@ namespace mlvc::driver_cubin_backend {
 
 void AotGraph::execute_schedule()
 {
-    const auto& nodes = manifest_.at("nodes");
+    const auto& nodes = graph_.nodes;
     for (std::size_t index = 0; index < nodes.size();) {
         if (std::find(elided_schedule_nodes_.begin(),
                       elided_schedule_nodes_.end(), index) !=
@@ -41,7 +41,7 @@ void AotGraph::execute_schedule()
 }
 
 bool AotGraph::launch_cutlass_spatial(
-    const json& node, DeviceAddress input, DeviceAddress weight,
+    const Node& node, DeviceAddress input, DeviceAddress weight,
     DeviceAddress bias, DeviceAddress output, int batch_count,
     int in_channels, int input_height, int input_width, int out_channels,
     int output_height, int output_width, int kernel_height,
@@ -55,7 +55,7 @@ bool AotGraph::launch_cutlass_spatial(
         return false;
     }
 
-    const std::size_t node_index = node.at("index").get<std::size_t>();
+    const std::size_t node_index = node.index;
     auto [params, params_inserted] =
         cutlass_spatial_parameter_buffers_.try_emplace(node_index);
     auto [transformed_weight, weight_inserted] =
@@ -132,7 +132,7 @@ bool AotGraph::launch_cutlass_spatial(
 }
 
 bool AotGraph::launch_cutlass_pointwise(
-    const json& node, DeviceAddress input, DeviceAddress weight,
+    const Node& node, DeviceAddress input, DeviceAddress weight,
     DeviceAddress bias, DeviceAddress residual, DeviceAddress output,
     int batch_count, int in_channels, int spatial_count, int out_channels,
     int epilogue, float epilogue_alpha)
@@ -215,7 +215,7 @@ bool AotGraph::launch_cutlass_pointwise(
         function = base_main[variant];
     }
 
-    const std::size_t node_index = node.at("index").get<std::size_t>();
+    const std::size_t node_index = node.index;
     auto [found, inserted] = cutlass_parameter_buffers_.try_emplace(node_index);
     if (inserted) {
         found->second = driver_.allocate(
@@ -276,13 +276,13 @@ void AotGraph::launch_linear(driver_cubin::abi::Function function, std::size_t c
                    0, parameters);
 }
 
-void AotGraph::execute(const json& node, const Value* output_override,
+void AotGraph::execute(const Node& node, const Value* output_override,
              DeviceAddress epilogue_input, int epilogue,
              float epilogue_alpha)
 {
-    const std::string op = node.at("op").get<std::string>();
-    const auto inputs = node.at("inputs").get<std::vector<std::string>>();
-    const auto outputs = node.at("outputs").get<std::vector<std::string>>();
+    const Op op = node.op;
+    const auto inputs = node.inputs;
+    const auto outputs = node.outputs;
     if (outputs.size() != 1)
         throw std::runtime_error("driver-cubin: only single-output nodes are supported");
     const Value& output = output_override ? *output_override : value(outputs[0]);
@@ -291,11 +291,11 @@ void AotGraph::execute(const json& node, const Value* output_override,
         throw std::runtime_error("driver-cubin: tensor is too large");
     int count = static_cast<int>(count_size);
 
-    if (op == "Add" || op == "Mul" || op == "Sub") {
+    if (op == Op::ADD || op == Op::MUL || op == Op::SUB) {
         DeviceAddress lhs = value(inputs.at(0)).address;
         DeviceAddress rhs = value(inputs.at(1)).address;
         DeviceAddress result = output.address;
-        int operation = op == "Add" ? 0 : (op == "Mul" ? 1 : 2);
+        int operation = op == Op::ADD ? 0 : (op == Op::MUL ? 1 : 2);
         const auto od = dims4(output.shape);
         const auto ld = dims4(value(inputs[0]).shape);
         const auto rd = dims4(value(inputs[1]).shape);
@@ -320,18 +320,18 @@ void AotGraph::execute(const json& node, const Value* output_override,
         return;
     }
 
-    if (op == "LeakyRelu" || op == "Clip" || op == "Sigmoid" ||
-        op == "Reciprocal" || op == "Round") {
+    if (op == Op::LEAKY_RELU || op == Op::CLIP || op == Op::SIGMOID ||
+        op == Op::RECIPROCAL || op == Op::ROUND) {
         DeviceAddress input = value(inputs.at(0)).address;
         DeviceAddress result = output.address;
-        int operation = op == "LeakyRelu" ? 0 : op == "Clip" ? 1 :
-                        op == "Sigmoid" ? 2 : op == "Reciprocal" ? 3 : 4;
-        float alpha = node.at("attributes").value("alpha", 0.01F);
+        int operation = op == Op::LEAKY_RELU ? 0 : op == Op::CLIP ? 1 :
+                        op == Op::SIGMOID ? 2 : op == Op::RECIPROCAL ? 3 : 4;
+        float alpha = node.alpha_or_default();
         float minimum = -std::numeric_limits<float>::infinity();
         float maximum = std::numeric_limits<float>::infinity();
-        if (op == "Clip") {
-            if (inputs.size() > 1 && !inputs[1].empty()) minimum = scalar_fp16(inputs[1]);
-            if (inputs.size() > 2 && !inputs[2].empty()) maximum = scalar_fp16(inputs[2]);
+        if (op == Op::CLIP) {
+            if (inputs.size() > 1 && !(inputs[1] == 0)) minimum = scalar_fp16(inputs[1]);
+            if (inputs.size() > 2 && !(inputs[2] == 0)) maximum = scalar_fp16(inputs[2]);
         }
         void* parameters[] = {
             &input, &result, &count, &operation, &alpha, &minimum, &maximum};
@@ -339,19 +339,19 @@ void AotGraph::execute(const json& node, const Value* output_override,
         return;
     }
 
-    if (op == "Conv") {
+    if (op == Op::CONV) {
         const Value& input_value = value(inputs.at(0));
         const Value& weight_value = value(inputs.at(1));
-        const auto& attributes = node.at("attributes");
-        const auto strides = attributes.at("strides").get<std::vector<int>>();
-        const auto pads = attributes.at("pads").get<std::vector<int>>();
-        int groups = attributes.value("group", 1);
+        const auto& attributes = node.conv();
+        const auto strides = attributes.strides;
+        const auto pads = attributes.pads;
+        int groups = attributes.groups;
         const auto in = dims4(input_value.shape);
         const auto out = dims4(output.shape);
         const auto kernel = weight_value.shape;
         DeviceAddress input = input_value.address;
         DeviceAddress weight = weight_value.address;
-        DeviceAddress bias = inputs.size() > 2 && !inputs[2].empty()
+        DeviceAddress bias = inputs.size() > 2 && !(inputs[2] == 0)
             ? value(inputs[2]).address : 0;
         DeviceAddress result = output.address;
         int n = in[0], ic = in[1], ih = in[2], iw = in[3];
@@ -465,9 +465,9 @@ void AotGraph::execute(const json& node, const Value* output_override,
         return;
     }
 
-    if (op == "Gather") {
+    if (op == Op::GATHER) {
         const Value& data = value(inputs.at(0));
-        if (node.at("attributes").value("axis", 0) != 0)
+        if (node.axis_or_zero() != 0)
             throw std::runtime_error("driver-cubin: only Gather axis 0 is supported");
         DeviceAddress input = data.address;
         DeviceAddress index = value(inputs.at(1)).address;
@@ -479,8 +479,8 @@ void AotGraph::execute(const json& node, const Value* output_override,
         return;
     }
 
-    if (op == "Slice") {
-        const std::size_t node_index = node.at("index").get<std::size_t>();
+    if (op == Op::SLICE) {
+        const std::size_t node_index = node.index;
         if (std::find(aliased_input_slices_.begin(),
                       aliased_input_slices_.end(), node_index) !=
             aliased_input_slices_.end()) {
@@ -488,10 +488,10 @@ void AotGraph::execute(const json& node, const Value* output_override,
         }
         const Value& input_value = value(inputs.at(0));
         const auto starts_values = initializer_values<std::int64_t>(inputs.at(1));
-        const auto axes_values = inputs.size() > 3 && !inputs[3].empty()
+        const auto axes_values = inputs.size() > 3 && !(inputs[3] == 0)
             ? initializer_values<std::int64_t>(inputs[3])
             : std::vector<std::int64_t>{};
-        const auto steps_values = inputs.size() > 4 && !inputs[4].empty()
+        const auto steps_values = inputs.size() > 4 && !(inputs[4] == 0)
             ? initializer_values<std::int64_t>(inputs[4])
             : std::vector<std::int64_t>{};
         auto id = dims4(input_value.shape);
@@ -524,13 +524,13 @@ void AotGraph::execute(const json& node, const Value* output_override,
         return;
     }
 
-    if (op == "Concat") {
-        int axis = node.at("attributes").at("axis").get<int>();
+    if (op == Op::CONCAT) {
+        int axis = node.axis();
         if (axis < 0) axis += static_cast<int>(output.shape.size());
         axis += 4 - static_cast<int>(output.shape.size());
         const auto od = dims4(output.shape);
         int axis_offset = 0;
-        for (const std::string& input_name : inputs) {
+        for (const TensorId input_name : inputs) {
             const Value& input_value = value(input_name);
             const auto id = dims4(input_value.shape);
             const std::size_t input_count = element_count(input_value.shape);
@@ -558,35 +558,34 @@ void AotGraph::execute(const json& node, const Value* output_override,
         return;
     }
 
-    if (op == "DepthToSpace") {
+    if (op == Op::DEPTH_TO_SPACE) {
         const Value& input_value = value(inputs.at(0));
         const auto in = dims4(input_value.shape);
         DeviceAddress input = input_value.address;
         DeviceAddress result = output.address;
         int channels = in[1], height = in[2], width = in[3];
-        int block = node.at("attributes").at("blocksize").get<int>();
-        int mode = node.at("attributes").value("mode", std::string("DCR")) == "DCR"
-            ? 0 : 1;
+        int block = node.block_size();
+        int mode = 1;
         void* parameters[] = {
             &input, &result, &count, &channels, &height, &width, &block, &mode};
         launch_linear(depth_to_space_, count_size, parameters);
         return;
     }
 
-    if (op == "SpaceToDepth") {
+    if (op == Op::SPACE_TO_DEPTH) {
         const Value& input_value = value(inputs.at(0));
         const auto in = dims4(input_value.shape);
         DeviceAddress input = input_value.address;
         DeviceAddress result = output.address;
         int channels = in[1], height = in[2], width = in[3];
-        int block = node.at("attributes").at("blocksize").get<int>();
+        int block = node.block_size();
         void* parameters[] = {
             &input, &result, &count, &channels, &height, &width, &block};
         launch_linear(space_to_depth_, count_size, parameters);
         return;
     }
 
-    throw std::runtime_error("driver-cubin: unsupported operator " + op);
+    throw std::runtime_error("driver-cubin: unsupported operator " + std::to_string(static_cast<int>(op)));
 }
 
 }  // namespace mlvc::driver_cubin_backend

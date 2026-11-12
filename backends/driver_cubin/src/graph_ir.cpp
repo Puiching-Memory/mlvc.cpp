@@ -21,19 +21,19 @@ std::size_t element_count(const std::vector<int64_t>& shape)
                            });
 }
 
-std::size_t dtype_bytes(const std::string& dtype)
+std::size_t dtype_bytes(DataType dtype)
 {
-    if (dtype == "fp16") return 2;
-    if (dtype == "int32") return 4;
-    if (dtype == "int64") return 8;
-    throw std::runtime_error("driver-cubin: unsupported AOT dtype " + dtype);
+    if (dtype == DataType::FP16) return 2;
+    if (dtype == DataType::INT32) return 4;
+    if (dtype == DataType::INT64) return 8;
+    throw std::runtime_error("driver-cubin: unsupported AOT dtype " + std::to_string(static_cast<int>(dtype)));
 }
 
-TensorDataType public_dtype(const std::string& dtype)
+TensorDataType public_dtype(DataType dtype)
 {
-    if (dtype == "fp16") return TensorDataType::kFloat16;
-    if (dtype == "int32") return TensorDataType::kInt32;
-    throw std::runtime_error("driver-cubin: unsupported graph I/O dtype " + dtype);
+    if (dtype == DataType::FP16) return TensorDataType::kFloat16;
+    if (dtype == DataType::INT32) return TensorDataType::kInt32;
+    throw std::runtime_error("driver-cubin: unsupported graph I/O dtype " + std::to_string(static_cast<int>(dtype)));
 }
 
 std::array<int, 4> dims4(const std::vector<int64_t>& shape)
@@ -55,15 +55,22 @@ unsigned int divide_up(std::size_t value, unsigned int divisor)
     return static_cast<unsigned int>((value + divisor - 1) / divisor);
 }
 
-const Value& AotGraph::value(const std::string& name) const
+const Value& AotGraph::value(TensorId name) const
 {
-    const auto found = values_.find(name);
-    if (found == values_.end() || found->second.address == 0)
-        throw std::runtime_error("driver-cubin: unresolved tensor " + name);
-    return found->second;
+    if (name == 0 || name >= values_.size() || values_[name].address == 0)
+        throw std::runtime_error("driver-cubin: unresolved tensor ID " + std::to_string(name));
+    return values_[name];
 }
 
-float AotGraph::scalar_fp16(const std::string& name) const
+TensorId AotGraph::tensor_id(std::string_view name) const
+{
+    for (std::size_t i = 1; i < values_.size(); ++i)
+        if (values_[i].name == name)
+            return static_cast<TensorId>(i);
+    throw std::runtime_error("driver-cubin: named codec tensor not found: " + std::string(name));
+}
+
+float AotGraph::scalar_fp16(TensorId name) const
 {
     const auto values = initializer_values<Float16Storage>(name);
     if (values.size() != 1)

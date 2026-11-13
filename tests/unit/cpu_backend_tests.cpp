@@ -833,6 +833,139 @@ void test_small_channel_layout_roundtrip()
     check_close(outs[1], exp11_vals, 5e-3F, "C=11 layout roundtrip mismatch");
 }
 
+struct ScopedCpuIsaEnv {
+    std::string prev;
+    bool had_prev = false;
+    explicit ScopedCpuIsaEnv(const char* mode)
+    {
+        if (const char* cur = std::getenv("MLVC_CPU_ISA")) {
+            had_prev = true;
+            prev = cur;
+        }
+        set(mode);
+    }
+    ~ScopedCpuIsaEnv()
+    {
+        if (had_prev)
+            set(prev.c_str());
+        else
+            clear();
+    }
+    static void set(const char* mode)
+    {
+#if defined(_WIN32)
+        _putenv_s("MLVC_CPU_ISA", mode ? mode : "");
+#else
+        if (mode && mode[0] != '\0')
+            setenv("MLVC_CPU_ISA", mode, 1);
+        else
+            unsetenv("MLVC_CPU_ISA");
+#endif
+    }
+    static void clear()
+    {
+#if defined(_WIN32)
+        _putenv_s("MLVC_CPU_ISA", "");
+#else
+        unsetenv("MLVC_CPU_ISA");
+#endif
+    }
+};
+
+void test_gemm_tail_shapes()
+{
+    // Exercises odd M/N/K tail blocks: M=7 (non-4, non-6), K=19 (8+8+3),
+    // OC=28 (16+12) + ReGLU gate=14 (non-8, non-4), Clamp, LeakyReLU, ResidualAdd,
+    // and C=3 spatial/1x1 output, comparing AUTO and FP32 against scalar truth.
+    WireGraphBuilder gb("TailShapesNet");
+    const std::int64_t H = 1, W = 7, IC = 19, OC_HALF = 14, OC_REG = 28;
+    const auto x_id = gb.add_input("x", wire::FP16, {1, IC, H, W});
+    const auto res_id = gb.add_input("res", wire::FP16, {1, OC_REG, H, W});
+    const auto zero_id = gb.add_weight_fp16("zero", {1}, {-0.2F});
+    const auto one_id = gb.add_weight_fp16("one", {1}, {0.8F});
+
+    std::vector<float> w_reg(OC_REG * IC, 0.0F), b_reg(OC_REG, 0.0F);
+    for (std::size_t oc = 0; oc < static_cast<std::size_t>(OC_REG); ++oc) {
+        b_reg[oc] = (static_cast<float>(oc % 7U) - 3.0F) * 0.05F;
+        for (std::size_t ic = 0; ic < static_cast<std::size_t>(IC); ++ic)
+            w_reg[oc * IC + ic] = ((oc + ic) % 5 == 0) ? 0.12F : -0.06F;
+    }
+    const auto w_reg_id = gb.add_weight_fp16("w_reg", {OC_REG, IC, 1, 1}, w_reg);
+    const auto b_reg_id = gb.add_weight_fp16("b_reg", {OC_REG}, b_reg);
+    const auto c_reg = gb.add_conv("c_reg", x_id, w_reg_id, b_reg_id, {1, 1}, {0, 0, 0, 0}, 1, {1, OC_REG, H, W});
+    const auto s_gate = gb.add_slice_1d_axis("g", c_reg, 0, OC_HALF, 1, {1, OC_HALF, H, W});
+    const auto s_lin = gb.add_slice_1d_axis("l", c_reg, OC_HALF, OC_REG, 1, {1, OC_HALF, H, W});
+    const auto clp_g = gb.add_clip("cg", s_gate, zero_id, one_id, {1, OC_HALF, H, W});
+    const auto out_reglu = gb.add_binary(wire::MUL, "reglu", clp_g, s_lin, {1, OC_HALF, H, W});
+
+    std::vector<float> w_lr(OC_REG * OC_HALF, 0.0F), b_lr(OC_REG, 0.0F);
+    for (std::size_t oc = 0; oc < static_cast<std::size_t>(OC_REG); ++oc) {
+        b_lr[oc] = (oc % 2U == 0U) ? 0.1F : -0.15F;
+        w_lr[oc * OC_HALF + (oc % static_cast<std::size_t>(OC_HALF))] = (oc % 3U == 0U) ? 0.5F : -0.4F;
+    }
+    const auto w_lr_id = gb.add_weight_fp16("w_lr", {OC_REG, OC_HALF, 1, 1}, w_lr);
+    const auto b_lr_id = gb.add_weight_fp16("b_lr", {OC_REG}, b_lr);
+    const auto c_lr = gb.add_conv("c_lr", out_reglu, w_lr_id, b_lr_id, {1, 1}, {0, 0, 0, 0}, 1, {1, OC_REG, H, W});
+    const auto out_lr = gb.add_leaky_relu("lr", c_lr, 0.2F, {1, OC_REG, H, W});
+
+    std::vector<float> w_res(OC_REG * OC_REG, 0.0F);
+    for (std::size_t oc = 0; oc < static_cast<std::size_t>(OC_REG); ++oc)
+        w_res[oc * OC_REG + oc] = 0.75F;
+    const auto w_res_id = gb.add_weight_fp16("w_res", {OC_REG, OC_REG, 1, 1}, w_res);
+    const auto c_res = gb.add_conv("c_res", out_lr, w_res_id, 0, {1, 1}, {0, 0, 0, 0}, 1, {1, OC_REG, H, W});
+    const auto out_res = gb.add_binary(wire::ADD, "res_add", c_res, res_id, {1, OC_REG, H, W});
+
+    std::vector<float> w_clp(3 * OC_REG, 0.0F);
+    for (std::size_t oc = 0; oc < 3U; ++oc)
+        w_clp[oc * OC_REG + oc] = 1.0F;
+    const auto w_clp_id = gb.add_weight_fp16("w_clp", {3, OC_REG, 1, 1}, w_clp);
+    const auto c_clp = gb.add_conv("c_clp", out_res, w_clp_id, 0, {1, 1}, {0, 0, 0, 0}, 1, {1, 3, H, W});
+    const auto out_clp = gb.add_clip("out_clp", c_clp, zero_id, one_id, {1, 3, H, W});
+
+    gb.mark_output(out_reglu);
+    gb.mark_output(out_lr);
+    gb.mark_output(out_res);
+    gb.mark_output(out_clp);
+
+    BackendOptions opts;
+    opts.backend_name = "cpu";
+    opts.asset_reader = gb.build();
+    opts.num_threads = 2;
+
+    std::vector<float> x_v(IC * H * W);
+    for (std::size_t i = 0; i < x_v.size(); ++i)
+        x_v[i] = static_cast<float>(static_cast<int>(i % 17U) - 8) * 0.125F;
+    std::vector<float> r_v(OC_REG * H * W);
+    for (std::size_t i = 0; i < r_v.size(); ++i)
+        r_v[i] = static_cast<float>(static_cast<int>(i % 11U) - 5) * 0.0625F;
+    const Tensor xt = make_fp16_tensor("x", {1, IC, H, W}, x_v);
+    const Tensor rt = make_fp16_tensor("res", {1, OC_REG, H, W}, r_v);
+
+    std::vector<Tensor> ref_outs;
+    {
+        ScopedCpuIsaEnv guard("scalar");
+        auto sb = create_backend(opts);
+        sb->load("TailShapesNet", {});
+        ref_outs = sb->run({xt, rt});
+    }
+
+    const char* isa_modes[] = {
+        "auto",
+#if defined(__aarch64__)
+        "fp32",
+#endif
+    };
+    for (const char* mode : isa_modes) {
+        ScopedCpuIsaEnv guard(mode);
+        auto b = create_backend(opts);
+        b->load("TailShapesNet", {});
+        const auto outs = b->run({xt, rt});
+        require(outs.size() == ref_outs.size(), "tail shape output count mismatch");
+        for (std::size_t idx = 0; idx < ref_outs.size(); ++idx)
+            check_close(outs[idx], to_floats(ref_outs[idx]), 5e-3F, "tail shape ISA mismatch");
+    }
+}
+
 }  // namespace
 
 int main()
@@ -843,6 +976,19 @@ int main()
         test_feature_update_and_state();
         test_pixel_shuffle_and_quant_pipeline();
         test_small_channel_layout_roundtrip();
+        test_gemm_tail_shapes();
+#if defined(__aarch64__)
+        {
+            ScopedCpuIsaEnv fp32_guard("fp32");
+            test_conv_and_epilogues();
+            test_small_channel_layout_roundtrip();
+        }
+#endif
+        {
+            ScopedCpuIsaEnv scalar_guard("scalar");
+            test_conv_and_epilogues();
+            test_small_channel_layout_roundtrip();
+        }
         std::cout << "cpu_backend_tests passed\n";
         return 0;
     } catch (const std::exception& err) {

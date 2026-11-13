@@ -75,10 +75,6 @@ CpuFeatures probe_features() noexcept
     features.arm64_fp16 = true;
     features.arm64_fp16fml = true;
 #endif
-    // Pure-FP16 accumulation (KleidiAI neon_mla) can exceed MLVC accuracy limits
-    // on deep K=864..2304 conv chains, so AUTO selects FP16->FP32 accumulation
-    // (+fp16fml when available, else NEON FP32). Explicit MLVC_CPU_ISA=fp16|kleidi
-    // remains available for targeted pure-FP16 testing.
     if (features.arm64_fp16fml) {
         features.preferred_gemm = GemmMode::kArm64Fp16Fml;
     } else {
@@ -110,9 +106,6 @@ CpuFeatures probe_features() noexcept
 #endif
     } else if (override_mode == "fp16fml" && features.arm64_fp16fml) {
         features.preferred_gemm = GemmMode::kArm64Fp16Fml;
-    } else if ((override_mode == "fp16" || override_mode == "kleidi") &&
-               features.arm64_fp16) {
-        features.preferred_gemm = GemmMode::kArm64KleidiFp16;
     } else if (override_mode == "avx2" && features.x86_avx2_fma_f16c) {
         features.preferred_gemm = GemmMode::kX86Avx2Fp32;
     }
@@ -137,8 +130,6 @@ std::string_view gemm_mode_name(GemmMode mode) noexcept
         return "arm64-neon-fp32";
     case GemmMode::kArm64Fp16Fml:
         return "arm64-fp16fml";
-    case GemmMode::kArm64KleidiFp16:
-        return "arm64-kleidi-fp16";
     case GemmMode::kX86Avx2Fp32:
         return "x86-avx2-f16c";
     }

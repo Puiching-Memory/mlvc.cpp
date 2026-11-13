@@ -43,7 +43,7 @@ enum class BinaryKind {
 };
 
 // Packs OIHW weights [oc, ic, kh, kw] and optional bias [oc] into unified
-// f16p16x1biasf16 layout consumed by KleidiAI NEON, FP16FML, ARMv8 NEON FP32,
+// f16p16x1biasf16 layout consumed by ARMv8+fp16fml, ARMv8 NEON FP32,
 // AVX2+F16C, and scalar GEMM kernels. For spatial convs, K = kh * kw * ic with
 // layout order (ky, kx, ic) matching NHWC contiguous input channel strips.
 std::vector<Float16Storage> pack_conv_weights_f16p16x1bias(
@@ -151,7 +151,45 @@ struct KernelSet {
 
 const KernelSet& get_scalar_kernels() noexcept;
 #if defined(MLVC_CPU_ENABLE_ARM64)
-const KernelSet& get_arm64_fp16_kernels() noexcept;
+struct Arm64AsmGemmArgs {
+    std::size_t m_rows;
+    std::size_t n_cols;
+    std::size_t k_dim;
+    const Float16Storage* lhs;
+    std::size_t lhs_stride;
+    const Float16Storage* rhs;
+    Float16Storage* dst;
+    std::size_t dst_stride;
+    const Float16Storage* res;
+    std::size_t epi_kind;
+    float alpha;
+    float clamp_min;
+    float clamp_max;
+};
+
+extern "C" {
+void mlvc_arm64_gemm_neon_fp32_4x16(const Arm64AsmGemmArgs* args) noexcept;
+void mlvc_arm64_gemm_fp16fml_6x16(const Arm64AsmGemmArgs* args) noexcept;
+}
+
+using Arm64AsmGemmFn = void (*)(const Arm64AsmGemmArgs*) noexcept;
+
+void arm64_run_asm_gemm_block(
+    Arm64AsmGemmFn gemm_fn, bool use_fp16_reglu,
+    std::size_t m_rows, std::size_t n, std::size_t k,
+    const Float16Storage* lhs_block, std::size_t lhs_stride,
+    const Float16Storage* rhs_packed,
+    Float16Storage* dst_block, std::size_t dst_stride,
+    const GemmEpilogue& epilogue, std::size_t row_offset,
+    Float16Storage* scratch, std::size_t scratch_elems);
+
+void arm64_fp16_reglu_post(
+    const Float16Storage* reglu_buf, Float16Storage* dst_block,
+    std::size_t m_rows, std::size_t n, std::size_t dst_stride,
+    float clamp_min, float clamp_max) noexcept;
+
+void apply_arm64_fp16_non_gemm_ops(KernelSet& k) noexcept;
+const KernelSet& get_arm64_neon_fp32_kernels(bool has_fp16) noexcept;
 const KernelSet& get_arm64_fp16fml_kernels() noexcept;
 #endif
 #if defined(MLVC_CPU_ENABLE_X86_AVX2)

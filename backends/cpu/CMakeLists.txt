@@ -19,35 +19,19 @@ elseif(_mlvc_cpu_arch MATCHES "^(x86_64|amd64)$")
 endif()
 
 if(_mlvc_cpu_arm64 AND NOT MSVC)
-    set(MLVC_KLEIDIAI_DIR "${PROJECT_SOURCE_DIR}/third_party/kleidiai")
-    if(NOT EXISTS "${MLVC_KLEIDIAI_DIR}/kai/kai_common.h")
-        message(FATAL_ERROR
-            "Vendored KleidiAI headers are missing under ${MLVC_KLEIDIAI_DIR}")
-    endif()
-    add_library(mlvc_kleidiai_f16 OBJECT
-        "${MLVC_KLEIDIAI_DIR}/kai/ukernels/matmul/matmul_clamp_f16_f16_f16p/kai_matmul_clamp_f16_f16_f16p16x1biasf16_6x16x8_neon_mla.c"
-        "${MLVC_KLEIDIAI_DIR}/kai/ukernels/matmul/pack/kai_rhs_pack_kxn_f16p16x1biasf16_f16_f16_neon.c"
-    )
-    set_target_properties(mlvc_kleidiai_f16 PROPERTIES
-        POSITION_INDEPENDENT_CODE ON
-        C_STANDARD 99
-        C_STANDARD_REQUIRED ON
-        C_EXTENSIONS OFF
-    )
-    target_include_directories(mlvc_kleidiai_f16 PRIVATE "${MLVC_KLEIDIAI_DIR}")
-    target_compile_options(mlvc_kleidiai_f16 PRIVATE -O3 -march=armv8.2-a+fp16 -w)
-
+    enable_language(ASM)
     set_source_files_properties(src/kernels_arm64_fp16.cpp PROPERTIES
         COMPILE_OPTIONS "-march=armv8.2-a+fp16"
-        INCLUDE_DIRECTORIES "${MLVC_KLEIDIAI_DIR}"
     )
-    set_source_files_properties(src/kernels_arm64_fp16fml.cpp PROPERTIES
+    set_source_files_properties(src/kernels_arm64_fp16fml_asm.S PROPERTIES
         COMPILE_OPTIONS "-march=armv8.2-a+fp16fml"
     )
     list(APPEND MLVC_CPU_SOURCES
+        src/kernels_arm64_neon.cpp
+        src/kernels_arm64_neon_asm.S
         src/kernels_arm64_fp16.cpp
         src/kernels_arm64_fp16fml.cpp
-        $<TARGET_OBJECTS:mlvc_kleidiai_f16>
+        src/kernels_arm64_fp16fml_asm.S
     )
 elseif(_mlvc_cpu_x86_64)
     if(MSVC)

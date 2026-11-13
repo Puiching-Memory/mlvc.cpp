@@ -2,17 +2,11 @@
 
 #include "mlvc/core/half.hpp"
 
-extern "C" {
-#include "kai/ukernels/matmul/matmul_clamp_f16_f16_f16p/kai_matmul_clamp_f16_f16_f16p16x1biasf16_6x16x8_neon_mla.h"
-}
-
 #include <arm_neon.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstring>
-#include <limits>
-#include <vector>
 
 namespace mlvc::cpu_backend {
 namespace {
@@ -52,174 +46,6 @@ inline float16x8_t fast_sigmoid_f16x8(float16x8_t x) noexcept
         hi_arr[i] = 1.0F / (1.0F + std::exp(-hi_arr[i]));
     }
     return f32x8_to_f16x8(vld1q_f32(lo_arr), vld1q_f32(hi_arr));
-}
-
-void apply_l1_epilogue(std::size_t m_rows, std::size_t n,
-                       Float16Storage* dst_block, std::size_t dst_stride,
-                       const GemmEpilogue& epilogue, std::size_t row_offset) noexcept
-{
-    if (epilogue.kind == GemmEpilogueKind::kLeakyRelu) {
-        const float32x4_t v_alpha = vdupq_n_f32(epilogue.alpha);
-        const float16x8_t v_zero = vdupq_n_f16(static_cast<float16_t>(0.0F));
-        for (std::size_t mi = 0; mi < m_rows; ++mi) {
-            Float16Storage* row = dst_block + mi * dst_stride;
-            std::size_t c = 0;
-            for (; c + 8U <= n; c += 8U) {
-                const float16x8_t h = vld_f16q(row + c);
-                const uint16x8_t neg = vcltq_f16(h, v_zero);
-                const float32x4x2_t f = f16x8_to_f32x8(h);
-                const float16x8_t scaled = f32x8_to_f16x8(
-                    vmulq_f32(f.val[0], v_alpha), vmulq_f32(f.val[1], v_alpha));
-                const uint16x8_t out_u = vbslq_u16(
-                    neg, vreinterpretq_u16_f16(scaled), vreinterpretq_u16_f16(h));
-                vst1q_u16(row + c, out_u);
-            }
-            for (; c < n; ++c) {
-                const float fv = half_to_float(row[c]);
-                if (fv < 0.0F)
-                    row[c] = float_to_half(fv * epilogue.alpha);
-            }
-        }
-    } else if (epilogue.kind == GemmEpilogueKind::kResidualAdd && epilogue.residual) {
-        for (std::size_t mi = 0; mi < m_rows; ++mi) {
-            Float16Storage* row = dst_block + mi * dst_stride;
-            const Float16Storage* res = epilogue.residual + (row_offset + mi) * dst_stride;
-            std::size_t c = 0;
-            for (; c + 8U <= n; c += 8U)
-                vst_f16q(row + c, vaddq_f16(vld_f16q(row + c), vld_f16q(res + c)));
-            for (; c < n; ++c)
-                row[c] = float_to_half(half_to_float(row[c]) + half_to_float(res[c]));
-        }
-    }
-}
-
-void arm64_fp16_run_block(
-    std::size_t m_rows, std::size_t n, std::size_t k,
-    const Float16Storage* lhs_block, std::size_t lhs_stride,
-    const Float16Storage* rhs_packed,
-    Float16Storage* dst_block, std::size_t dst_stride,
-    const GemmEpilogue& epilogue, std::size_t row_offset,
-    Float16Storage* scratch, std::size_t scratch_elems)
-{
-    if (epilogue.kind == GemmEpilogueKind::kReglu) {
-        const std::size_t req = m_rows * n;
-        std::vector<Float16Storage> local_buf;
-        Float16Storage* temp = scratch;
-        if (!temp || scratch_elems < req) {
-            local_buf.resize(req);
-            temp = local_buf.data();
-        }
-        kai_run_matmul_clamp_f16_f16_f16p16x1biasf16_6x16x8_neon_mla(
-            m_rows, n, k,
-            lhs_block, lhs_stride * sizeof(Float16Storage),
-            rhs_packed,
-            temp, n * sizeof(Float16Storage), sizeof(Float16Storage),
-            -std::numeric_limits<float>::infinity(),
-            std::numeric_limits<float>::infinity());
-
-        const std::size_t gate_c = n / 2U;
-        const float16x8_t vmin = vdupq_n_f16(static_cast<float16_t>(epilogue.clamp_min));
-        const float16x8_t vmax = vdupq_n_f16(static_cast<float16_t>(epilogue.clamp_max));
-        for (std::size_t mi = 0; mi < m_rows; ++mi) {
-            const Float16Storage* gptr = temp + mi * n;
-            const Float16Storage* lptr = gptr + gate_c;
-            Float16Storage* out_row = dst_block + mi * dst_stride;
-            std::size_t c = 0;
-            for (; c + 8U <= gate_c; c += 8U) {
-                const float16x8_t g = vmaxq_f16(vminq_f16(vld_f16q(gptr + c), vmax), vmin);
-                vst_f16q(out_row + c, vmulq_f16(g, vld_f16q(lptr + c)));
-            }
-            for (; c < gate_c; ++c) {
-                const float clamped = std::min(
-                    std::max(half_to_float(gptr[c]), epilogue.clamp_min), epilogue.clamp_max);
-                const Float16Storage cg = float_to_half(clamped);
-                out_row[c] = float_to_half(half_to_float(cg) * half_to_float(lptr[c]));
-            }
-        }
-        return;
-    }
-
-    const float cmin = epilogue.kind == GemmEpilogueKind::kClamp
-        ? epilogue.clamp_min : -std::numeric_limits<float>::infinity();
-    const float cmax = epilogue.kind == GemmEpilogueKind::kClamp
-        ? epilogue.clamp_max : std::numeric_limits<float>::infinity();
-
-    kai_run_matmul_clamp_f16_f16_f16p16x1biasf16_6x16x8_neon_mla(
-        m_rows, n, k,
-        lhs_block, lhs_stride * sizeof(Float16Storage),
-        rhs_packed,
-        dst_block, dst_stride * sizeof(Float16Storage), sizeof(Float16Storage),
-        cmin, cmax);
-
-    if (epilogue.kind == GemmEpilogueKind::kLeakyRelu ||
-        epilogue.kind == GemmEpilogueKind::kResidualAdd) {
-        apply_l1_epilogue(m_rows, n, dst_block, dst_stride, epilogue, row_offset);
-    }
-}
-
-void arm64_depthwise3x3_s1p1(
-    const Float16Storage* input, const Float16Storage* packed_weight,
-    Float16Storage* output, int n, int h, int w, int channels,
-    CpuThreadPool& pool)
-{
-    const std::size_t pad_c = ((static_cast<std::size_t>(channels) + 15U) / 16U) * 16U;
-    const Float16Storage* bias = packed_weight;
-    const Float16Storage* weights = packed_weight + pad_c;
-    const int hw = h * w;
-    const std::size_t total_rows = static_cast<std::size_t>(n) * h;
-
-    pool.parallel_for(total_rows, 2U, [&](std::size_t r0, std::size_t r1) {
-        for (std::size_t row = r0; row < r1; ++row) {
-            const int batch = static_cast<int>(row / static_cast<std::size_t>(h));
-            const int oy = static_cast<int>(row % static_cast<std::size_t>(h));
-            const Float16Storage* in_batch =
-                input + static_cast<std::size_t>(batch) * hw * channels;
-            Float16Storage* out_row =
-                output + (static_cast<std::size_t>(batch) * h + oy) * w * channels;
-
-            for (int ox = 0; ox < w; ++ox) {
-                Float16Storage* out_px = out_row + static_cast<std::size_t>(ox) * channels;
-                const Float16Storage* neighbors[9] = {};
-                const Float16Storage* wrows[9] = {};
-                int kcount = 0;
-                for (int ky = 0; ky < 3; ++ky) {
-                    const int iy = oy + ky - 1;
-                    if (iy < 0 || iy >= h)
-                        continue;
-                    const Float16Storage* in_r =
-                        in_batch + static_cast<std::size_t>(iy) * w * channels;
-                    for (int kx = 0; kx < 3; ++kx) {
-                        const int ix = ox + kx - 1;
-                        if (ix < 0 || ix >= w)
-                            continue;
-                        neighbors[kcount] = in_r + static_cast<std::size_t>(ix) * channels;
-                        wrows[kcount] = weights + static_cast<std::size_t>(ky * 3 + kx) * pad_c;
-                        ++kcount;
-                    }
-                }
-
-                int c = 0;
-                for (; c + 8 <= channels; c += 8) {
-                    const float32x4x2_t b = f16x8_to_f32x8(vld_f16q(bias + c));
-                    float32x4_t acc0 = b.val[0];
-                    float32x4_t acc1 = b.val[1];
-                    for (int idx = 0; idx < kcount; ++idx) {
-                        const float32x4x2_t iv = f16x8_to_f32x8(vld_f16q(neighbors[idx] + c));
-                        const float32x4x2_t wv = f16x8_to_f32x8(vld_f16q(wrows[idx] + c));
-                        acc0 = vfmaq_f32(acc0, iv.val[0], wv.val[0]);
-                        acc1 = vfmaq_f32(acc1, iv.val[1], wv.val[1]);
-                    }
-                    vst_f16q(out_px + c, f32x8_to_f16x8(acc0, acc1));
-                }
-                for (; c < channels; ++c) {
-                    float acc = half_to_float(bias[c]);
-                    for (int idx = 0; idx < kcount; ++idx)
-                        acc += half_to_float(neighbors[idx][c]) * half_to_float(wrows[idx][c]);
-                    out_px[c] = float_to_half(acc);
-                }
-            }
-        }
-    });
 }
 
 void arm64_unary(
@@ -653,128 +479,44 @@ void arm64_y1_tail_nhwc(
     });
 }
 
-inline void transpose8x8_u16(
-    const Float16Storage* src, std::size_t src_stride,
-    Float16Storage* dst, std::size_t dst_stride) noexcept
-{
-    uint16x8_t r0 = vld1q_u16(src + 0U * src_stride);
-    uint16x8_t r1 = vld1q_u16(src + 1U * src_stride);
-    uint16x8_t r2 = vld1q_u16(src + 2U * src_stride);
-    uint16x8_t r3 = vld1q_u16(src + 3U * src_stride);
-    uint16x8_t r4 = vld1q_u16(src + 4U * src_stride);
-    uint16x8_t r5 = vld1q_u16(src + 5U * src_stride);
-    uint16x8_t r6 = vld1q_u16(src + 6U * src_stride);
-    uint16x8_t r7 = vld1q_u16(src + 7U * src_stride);
-
-    const uint16x8_t a0 = vtrn1q_u16(r0, r1);
-    const uint16x8_t a1 = vtrn2q_u16(r0, r1);
-    const uint16x8_t a2 = vtrn1q_u16(r2, r3);
-    const uint16x8_t a3 = vtrn2q_u16(r2, r3);
-    const uint16x8_t a4 = vtrn1q_u16(r4, r5);
-    const uint16x8_t a5 = vtrn2q_u16(r4, r5);
-    const uint16x8_t a6 = vtrn1q_u16(r6, r7);
-    const uint16x8_t a7 = vtrn2q_u16(r6, r7);
-
-    const uint32x4_t b0 = vtrn1q_u32(vreinterpretq_u32_u16(a0), vreinterpretq_u32_u16(a2));
-    const uint32x4_t b1 = vtrn1q_u32(vreinterpretq_u32_u16(a1), vreinterpretq_u32_u16(a3));
-    const uint32x4_t b2 = vtrn2q_u32(vreinterpretq_u32_u16(a0), vreinterpretq_u32_u16(a2));
-    const uint32x4_t b3 = vtrn2q_u32(vreinterpretq_u32_u16(a1), vreinterpretq_u32_u16(a3));
-    const uint32x4_t b4 = vtrn1q_u32(vreinterpretq_u32_u16(a4), vreinterpretq_u32_u16(a6));
-    const uint32x4_t b5 = vtrn1q_u32(vreinterpretq_u32_u16(a5), vreinterpretq_u32_u16(a7));
-    const uint32x4_t b6 = vtrn2q_u32(vreinterpretq_u32_u16(a4), vreinterpretq_u32_u16(a6));
-    const uint32x4_t b7 = vtrn2q_u32(vreinterpretq_u32_u16(a5), vreinterpretq_u32_u16(a7));
-
-    vst1q_u16(dst + 0U * dst_stride, vreinterpretq_u16_u64(vtrn1q_u64(vreinterpretq_u64_u32(b0), vreinterpretq_u64_u32(b4))));
-    vst1q_u16(dst + 1U * dst_stride, vreinterpretq_u16_u64(vtrn1q_u64(vreinterpretq_u64_u32(b1), vreinterpretq_u64_u32(b5))));
-    vst1q_u16(dst + 2U * dst_stride, vreinterpretq_u16_u64(vtrn1q_u64(vreinterpretq_u64_u32(b2), vreinterpretq_u64_u32(b6))));
-    vst1q_u16(dst + 3U * dst_stride, vreinterpretq_u16_u64(vtrn1q_u64(vreinterpretq_u64_u32(b3), vreinterpretq_u64_u32(b7))));
-    vst1q_u16(dst + 4U * dst_stride, vreinterpretq_u16_u64(vtrn2q_u64(vreinterpretq_u64_u32(b0), vreinterpretq_u64_u32(b4))));
-    vst1q_u16(dst + 5U * dst_stride, vreinterpretq_u16_u64(vtrn2q_u64(vreinterpretq_u64_u32(b1), vreinterpretq_u64_u32(b5))));
-    vst1q_u16(dst + 6U * dst_stride, vreinterpretq_u16_u64(vtrn2q_u64(vreinterpretq_u64_u32(b2), vreinterpretq_u64_u32(b6))));
-    vst1q_u16(dst + 7U * dst_stride, vreinterpretq_u16_u64(vtrn2q_u64(vreinterpretq_u64_u32(b3), vreinterpretq_u64_u32(b7))));
-}
-
-void arm64_transpose_2d_u16(
-    const Float16Storage* src, Float16Storage* dst,
-    std::size_t batches, std::size_t rows, std::size_t cols,
-    CpuThreadPool& pool)
-{
-    if (rows == 0U || cols == 0U)
-        return;
-    if (rows == 1U || cols == 1U) {
-        std::memcpy(dst, src, batches * rows * cols * sizeof(Float16Storage));
-        return;
-    }
-    const std::size_t row_tiles = (rows + 7U) / 8U;
-    for (std::size_t b = 0; b < batches; ++b) {
-        const Float16Storage* sb = src + b * rows * cols;
-        Float16Storage* db = dst + b * rows * cols;
-        if (rows < 8U && cols >= 64U) {
-            pool.parallel_for(cols, 1024U, [&](std::size_t c0, std::size_t c1) {
-                for (std::size_t r = 0; r < rows; ++r) {
-                    const Float16Storage* sr = sb + r * cols;
-                    for (std::size_t c = c0; c < c1; ++c)
-                        db[c * rows + r] = sr[c];
-                }
-            });
-            continue;
-        }
-        pool.parallel_for(row_tiles, 32U, [&](std::size_t rt0, std::size_t rt1) {
-            for (std::size_t rt = rt0; rt < rt1; ++rt) {
-                const std::size_t r0 = rt * 8U;
-                const std::size_t rem_r = std::min<std::size_t>(8U, rows - r0);
-                std::size_t c = 0;
-                if (rem_r == 8U) {
-                    for (; c + 8U <= cols; c += 8U)
-                        transpose8x8_u16(sb + r0 * cols + c, cols, db + c * rows + r0, rows);
-                }
-                for (std::size_t rr = r0; rr < r0 + rem_r; ++rr) {
-                    const Float16Storage* sr = sb + rr * cols;
-                    for (std::size_t cc = c; cc < cols; ++cc)
-                        db[cc * rows + rr] = sr[cc];
-                }
-            }
-        });
-    }
-}
-
-void arm64_nchw_to_nhwc(const Float16Storage* nchw, Float16Storage* nhwc,
-                        std::size_t n, std::size_t c, std::size_t hw,
-                        CpuThreadPool& pool)
-{
-    arm64_transpose_2d_u16(nchw, nhwc, n, c, hw, pool);
-}
-
-void arm64_nhwc_to_nchw(const Float16Storage* nhwc, Float16Storage* nchw,
-                        std::size_t n, std::size_t hw, std::size_t c,
-                        CpuThreadPool& pool)
-{
-    arm64_transpose_2d_u16(nhwc, nchw, n, hw, c, pool);
-}
-
 }  // namespace
 
-const KernelSet& get_arm64_fp16_kernels() noexcept
+void arm64_fp16_reglu_post(
+    const Float16Storage* reglu_buf, Float16Storage* dst_block,
+    std::size_t m_rows, std::size_t n, std::size_t dst_stride,
+    float clamp_min, float clamp_max) noexcept
 {
-    static const KernelSet fp16_set = []() {
-        KernelSet k;
-        k.mode = GemmMode::kArm64KleidiFp16;
-        k.gemm.run_block = &arm64_fp16_run_block;
-        k.depthwise3x3_s1p1 = &arm64_depthwise3x3_s1p1;
-        k.unary = &arm64_unary;
-        k.binary_contiguous = &arm64_binary_contiguous;
-        k.binary_channel_bcast = &arm64_binary_channel_bcast;
-        k.binary_scalar_bcast = &arm64_binary_scalar_bcast;
-        k.reglu_nhwc = &arm64_reglu_nhwc;
-        k.feature_update_nhwc = &arm64_feature_update_nhwc;
-        k.feature_update_outputs_nhwc = &arm64_feature_update_outputs_nhwc;
-        k.y0_tail_nhwc = &arm64_y0_tail_nhwc;
-        k.y1_tail_nhwc = &arm64_y1_tail_nhwc;
-        k.nchw_to_nhwc = &arm64_nchw_to_nhwc;
-        k.nhwc_to_nchw = &arm64_nhwc_to_nchw;
-        return k;
-    }();
-    return fp16_set;
+    const std::size_t gate_c = n / 2U;
+    const float16x8_t vmin = vdupq_n_f16(static_cast<float16_t>(clamp_min));
+    const float16x8_t vmax = vdupq_n_f16(static_cast<float16_t>(clamp_max));
+    for (std::size_t mi = 0; mi < m_rows; ++mi) {
+        const Float16Storage* gptr = reglu_buf + mi * n;
+        const Float16Storage* lptr = gptr + gate_c;
+        Float16Storage* out_row = dst_block + mi * dst_stride;
+        std::size_t c = 0;
+        for (; c + 8U <= gate_c; c += 8U) {
+            const float16x8_t g = vmaxq_f16(vminq_f16(vld_f16q(gptr + c), vmax), vmin);
+            vst_f16q(out_row + c, vmulq_f16(g, vld_f16q(lptr + c)));
+        }
+        for (; c < gate_c; ++c) {
+            const Float16Storage cg = float_to_half(
+                std::min(std::max(half_to_float(gptr[c]), clamp_min), clamp_max));
+            out_row[c] = float_to_half(half_to_float(cg) * half_to_float(lptr[c]));
+        }
+    }
+}
+
+void apply_arm64_fp16_non_gemm_ops(KernelSet& k) noexcept
+{
+    k.unary = &arm64_unary;
+    k.binary_contiguous = &arm64_binary_contiguous;
+    k.binary_channel_bcast = &arm64_binary_channel_bcast;
+    k.binary_scalar_bcast = &arm64_binary_scalar_bcast;
+    k.reglu_nhwc = &arm64_reglu_nhwc;
+    k.feature_update_nhwc = &arm64_feature_update_nhwc;
+    k.feature_update_outputs_nhwc = &arm64_feature_update_outputs_nhwc;
+    k.y0_tail_nhwc = &arm64_y0_tail_nhwc;
+    k.y1_tail_nhwc = &arm64_y1_tail_nhwc;
 }
 
 }  // namespace mlvc::cpu_backend

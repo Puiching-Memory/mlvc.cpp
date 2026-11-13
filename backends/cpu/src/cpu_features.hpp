@@ -8,7 +8,6 @@ enum class GemmMode {
     kScalarFp32,
     kArm64NeonFp32,
     kArm64Fp16Fml,
-    kArm64KleidiFp16,
     kX86Avx2Fp32,
 };
 

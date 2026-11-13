@@ -85,17 +85,18 @@ mlvc_enable_ipo(mlvc_driver)
 add_executable(mlvc_driver_probe tools/probe_main.cpp)
 target_link_libraries(mlvc_driver_probe PRIVATE
     mlvc_driver mlvc_driver_kernels)
-target_link_options(mlvc_driver_probe PRIVATE "LINKER:--disable-new-dtags")
-# The codec library links the CUDA driver API through CUDA::cuda_driver; on
-# driverless CI hosts the probe needs the toolkit stub to resolve the
-# transitive libcuda.so.1 dependency at link time.
-target_link_options(mlvc_driver_probe PRIVATE
-    "LINKER:-rpath-link,${CUDAToolkit_LIBRARY_DIR}/stubs")
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(mlvc_driver_probe PRIVATE "LINKER:--disable-new-dtags")
+    # The codec library links the CUDA driver API through CUDA::cuda_driver; on
+    # driverless CI hosts the probe needs the toolkit stub to resolve the
+    # transitive libcuda.so.1 dependency at link time.
+    target_link_options(mlvc_driver_probe PRIVATE
+        "LINKER:-rpath-link,${CUDAToolkit_LIBRARY_DIR}/stubs")
+endif()
 mlvc_configure_target(mlvc_driver_probe)
 mlvc_enable_ipo(mlvc_driver_probe)
 
 add_library(mlvc_backend_driver_cubin STATIC
-    src/graph_descriptor.cpp
     src/backend.cpp
     src/cuda_graph_executor.cpp
     src/execution_plan.cpp
@@ -108,14 +109,11 @@ add_library(mlvc_backend_driver_cubin STATIC
 set_target_properties(mlvc_backend_driver_cubin PROPERTIES
     POSITION_INDEPENDENT_CODE ON)
 target_include_directories(mlvc_backend_driver_cubin PRIVATE
-    "${MLVC_DRIVER_SOURCE_DIR}/include"
-    "${PROJECT_SOURCE_DIR}/core/src"
-    )
+    "${MLVC_DRIVER_SOURCE_DIR}/include")
 target_link_libraries(mlvc_backend_driver_cubin PRIVATE
     mlvc_runtime
     mlvc_driver
-    mlvc_driver_kernels
-    mlvc_model_proto)
+    mlvc_driver_kernels)
 mlvc_configure_target(mlvc_backend_driver_cubin)
 mlvc_enable_ipo(mlvc_backend_driver_cubin)
 
@@ -131,8 +129,10 @@ if(BUILD_TESTING)
         "${PROJECT_SOURCE_DIR}/core/include")
     target_link_libraries(mlvc_cutlass_kernel_tests PRIVATE
         mlvc_driver mlvc_driver_kernels)
-    target_link_options(mlvc_cutlass_kernel_tests PRIVATE
-        "LINKER:--disable-new-dtags")
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_link_options(mlvc_cutlass_kernel_tests PRIVATE
+            "LINKER:--disable-new-dtags")
+    endif()
     mlvc_configure_target(mlvc_cutlass_kernel_tests)
     mlvc_enable_ipo(mlvc_cutlass_kernel_tests)
     add_test(NAME mlvc_cutlass_kernels COMMAND mlvc_cutlass_kernel_tests)

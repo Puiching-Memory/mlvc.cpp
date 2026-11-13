@@ -1,5 +1,6 @@
 #pragma once
 
+#include "mlvc/core/assets.hpp"
 #include "mlvc/core/model.hpp"
 #include "mlvc/core/tensor.hpp"
 
@@ -11,6 +12,8 @@ namespace mlvc {
 
 class EntropyCodec final {
 public:
+    EntropyCodec(std::shared_ptr<const ModelAssetReader> assets,
+                 const ModelConfig& config);
     EntropyCodec(const std::filesystem::path& model_dir,
                  const ModelConfig& config);
     ~EntropyCodec();

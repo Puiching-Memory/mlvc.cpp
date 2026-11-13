@@ -5,10 +5,38 @@ include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 include(CTest)
 
-if(NOT CMAKE_SYSTEM_NAME STREQUAL "Linux" OR
-   NOT CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
-    message(FATAL_ERROR "mlvc.cpp supports Linux x86_64 NVIDIA GPU releases only")
+set(MLVC_BACKEND "AUTO" CACHE STRING
+    "Inference backend to build (AUTO, driver_cubin, none)")
+set_property(CACHE MLVC_BACKEND PROPERTY STRINGS AUTO driver_cubin none)
+
+set(_mlvc_is_linux_x86_64 FALSE)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+   CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64|AMD64)$")
+    set(_mlvc_is_linux_x86_64 TRUE)
 endif()
+
+if(MLVC_BACKEND STREQUAL "AUTO")
+    if(_mlvc_is_linux_x86_64)
+        set(_mlvc_resolved_backend "driver_cubin")
+    else()
+        set(_mlvc_resolved_backend "none")
+    endif()
+    set(MLVC_BACKEND "${_mlvc_resolved_backend}" CACHE STRING
+        "Inference backend to build (AUTO, driver_cubin, none)" FORCE)
+endif()
+
+if(NOT MLVC_BACKEND MATCHES "^(driver_cubin|none)$")
+    message(FATAL_ERROR
+        "Unsupported MLVC_BACKEND='${MLVC_BACKEND}'. "
+        "Supported values: AUTO, driver_cubin, none.")
+endif()
+if(MLVC_BACKEND STREQUAL "driver_cubin" AND NOT _mlvc_is_linux_x86_64)
+    message(FATAL_ERROR
+        "MLVC_BACKEND=driver_cubin supports Linux x86_64 NVIDIA hosts only "
+        "(current target: ${CMAKE_SYSTEM_NAME} ${CMAKE_SYSTEM_PROCESSOR}). "
+        "Configure with -DMLVC_BACKEND=none for portable/decoupled builds.")
+endif()
+message(STATUS "MLVC inference backend: ${MLVC_BACKEND}")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -21,18 +49,17 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
+set(_mlvc_default_embed_models OFF)
+if(MLVC_BACKEND STREQUAL "driver_cubin")
+    set(_mlvc_default_embed_models ON)
+endif()
 option(MLVC_ENABLE_IPO "Enable interprocedural optimization in Release builds" ON)
 option(MLVC_EMBED_MODELS
-    "Embed canonical model bundles in driver-cubin builds" ON)
+    "Embed canonical model bundles into the core library"
+    ${_mlvc_default_embed_models})
 option(MLVC_WARNINGS_AS_ERRORS "Treat project warnings as errors" OFF)
 option(MLVC_ENABLE_SANITIZERS
     "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
-# Reject stale backend selectors instead of silently building a different runtime.
-if(DEFINED MLVC_SELECTED_BACKEND)
-    message(FATAL_ERROR
-        "Backend selection has been removed. Unset MLVC_SELECTED_BACKEND; "
-        "this project builds Driver+cubin only.")
-endif()
 set(MLVC_TEST_ASSETS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/models/fixtures" CACHE PATH
     "Local MLVC model/reference fixtures used by tests")
 set(MLVC_MODEL_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/models/canonical" CACHE PATH
@@ -58,11 +85,18 @@ endfunction()
 add_library(mlvc_project_options INTERFACE)
 target_compile_options(mlvc_project_options INTERFACE
     "$<$<COMPILE_LANG_AND_ID:C,GNU,Clang,AppleClang>:-Wall;-Wextra;-Wpedantic;-Wformat=2;-Wshadow;-Wundef>"
-    "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-Wall;-Wextra;-Wpedantic;-Wformat=2;-Wshadow;-Wundef>")
+    "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-Wall;-Wextra;-Wpedantic;-Wformat=2;-Wshadow;-Wundef>"
+    "$<$<COMPILE_LANG_AND_ID:C,MSVC>:/W4;/utf-8>"
+    "$<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/W4;/utf-8>")
+target_compile_definitions(mlvc_project_options INTERFACE
+    "$<$<C_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>"
+    "$<$<CXX_COMPILER_ID:MSVC>:_CRT_SECURE_NO_WARNINGS>")
 if(MLVC_WARNINGS_AS_ERRORS)
     target_compile_options(mlvc_project_options INTERFACE
         "$<$<COMPILE_LANG_AND_ID:C,GNU,Clang,AppleClang>:-Werror>"
-        "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-Werror>")
+        "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-Werror>"
+        "$<$<COMPILE_LANG_AND_ID:C,MSVC>:/WX>"
+        "$<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/WX>")
 endif()
 if(MLVC_ENABLE_SANITIZERS)
     if(NOT CMAKE_C_COMPILER_ID MATCHES "GNU|Clang" OR

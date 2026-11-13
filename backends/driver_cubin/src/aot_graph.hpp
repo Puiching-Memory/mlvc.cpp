@@ -1,17 +1,16 @@
 #pragma once
 
+#include "mlvc/core/assets.hpp"
 #include "mlvc/core/half.hpp"
 #include "mlvc/driver_cubin/cutlass.hpp"
 #include "mlvc/driver_cubin/driver.hpp"
+#include "mlvc/runtime/aot_graph.hpp"
 #include "mlvc/runtime/backend.hpp"
-
-#include "graph_descriptor.hpp"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <filesystem>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -19,6 +18,8 @@
 #include <vector>
 
 namespace mlvc::driver_cubin_backend {
+
+using namespace mlvc::aot;
 
 using DeviceAddress = driver_cubin::abi::DeviceAddress;
 
@@ -39,7 +40,7 @@ struct Value {
 
 class AotGraph final {
 public:
-    AotGraph(const std::filesystem::path& model_dir,
+    AotGraph(const ModelAssetReader& assets,
              const std::string& model_name,
              const ModelExecutionConfig& execution_config,
              driver_cubin::Driver& driver,
@@ -75,7 +76,7 @@ private:
         bool pending = false;
     };
 
-    void load_model(const std::filesystem::path& model_dir,
+    void load_model(const ModelAssetReader& assets,
                     const std::string& model_name);
     void collect_graph_outputs();
 

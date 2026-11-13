@@ -1,5 +1,7 @@
 #pragma once
 
+#include "mlvc/core/assets.hpp"
+
 #include <filesystem>
 #include <optional>
 #include <string>
@@ -39,6 +41,7 @@ struct ModelConfig {
     int q_index_shift(int frame_index) const;
 };
 
+ModelConfig load_model_config(const ModelAssetReader& assets);
 ModelConfig load_model_config(const std::filesystem::path& model_dir);
 std::vector<std::string> embedded_model_profiles();
 

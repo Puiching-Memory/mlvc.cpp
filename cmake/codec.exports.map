@@ -9,7 +9,11 @@
             mlvc::encode_video*;
             mlvc::decode_video*;
             mlvc::available_model_profiles*;
+            mlvc::available_backends*;
+            mlvc::default_backend_name*;
             mlvc::compiled_backend_name_c_str*;
+            mlvc::EncoderSession*;
+            mlvc::DecoderSession*;
         };
     local: *;
 };

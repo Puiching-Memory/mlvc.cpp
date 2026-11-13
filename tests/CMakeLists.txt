@@ -10,7 +10,9 @@ add_executable(mlvc_codec_tests unit/codec_tests.cpp)
 target_include_directories(mlvc_codec_tests PRIVATE
     "${PROJECT_SOURCE_DIR}/core/include")
 target_link_libraries(mlvc_codec_tests PRIVATE mlvc_core)
-target_link_options(mlvc_codec_tests PRIVATE "LINKER:--disable-new-dtags")
+if(UNIX AND NOT APPLE)
+    target_link_options(mlvc_codec_tests PRIVATE "LINKER:--disable-new-dtags")
+endif()
 mlvc_configure_target(mlvc_codec_tests)
 mlvc_enable_ipo(mlvc_codec_tests)
 
@@ -18,10 +20,14 @@ add_executable(mlvc_c_api_tests unit/c_api_tests.cpp)
 target_include_directories(mlvc_c_api_tests PRIVATE
     "${PROJECT_SOURCE_DIR}/public/include")
 target_link_libraries(mlvc_c_api_tests PRIVATE mlvc_codec)
-target_link_options(mlvc_c_api_tests PRIVATE "LINKER:--disable-new-dtags")
+if(UNIX AND NOT APPLE)
+    target_link_options(mlvc_c_api_tests PRIVATE "LINKER:--disable-new-dtags")
+endif()
 # Resolve the codec's transitive driver dependency on driverless build hosts.
-target_link_options(mlvc_c_api_tests PRIVATE
-    "LINKER:-rpath-link,${CUDAToolkit_LIBRARY_DIR}/stubs")
+if(MLVC_BACKEND STREQUAL "driver_cubin" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(mlvc_c_api_tests PRIVATE
+        "LINKER:-rpath-link,${CUDAToolkit_LIBRARY_DIR}/stubs")
+endif()
 mlvc_configure_target(mlvc_c_api_tests)
 mlvc_enable_ipo(mlvc_c_api_tests)
 
@@ -33,18 +39,40 @@ target_include_directories(mlvc_public_header_tests PRIVATE
 mlvc_configure_target(mlvc_public_header_tests)
 add_test(NAME mlvc_public_header COMMAND mlvc_public_header_tests)
 
-add_executable(mlvc_model_proto_tests unit/model_proto_tests.cpp
-    "${PROJECT_SOURCE_DIR}/backends/driver_cubin/src/graph_descriptor.cpp")
+add_executable(mlvc_model_proto_tests unit/model_proto_tests.cpp)
 target_include_directories(mlvc_model_proto_tests PRIVATE
-    "${PROJECT_SOURCE_DIR}/core/src"
-    "${PROJECT_SOURCE_DIR}/backends/driver_cubin/src")
-target_link_libraries(mlvc_model_proto_tests PRIVATE mlvc_core mlvc_model_proto)
+    "${PROJECT_SOURCE_DIR}/core/include"
+    "${PROJECT_SOURCE_DIR}/runtime/include")
+target_link_libraries(mlvc_model_proto_tests PRIVATE
+    mlvc_core
+    mlvc_runtime
+    mlvc_model_proto)
 mlvc_configure_target(mlvc_model_proto_tests)
+mlvc_enable_ipo(mlvc_model_proto_tests)
 add_test(NAME mlvc_model_proto COMMAND mlvc_model_proto_tests)
 
-add_test(NAME mlvc_model_package
-    COMMAND "${Python3_EXECUTABLE}"
-        "${PROJECT_SOURCE_DIR}/tests/unit/model_package_tests.py")
+add_executable(mlvc_runtime_decoupling_tests
+    unit/runtime_decoupling_tests.cpp
+    $<TARGET_OBJECTS:mlvc_codec_objects>)
+target_include_directories(mlvc_runtime_decoupling_tests PRIVATE
+    "${PROJECT_SOURCE_DIR}/core/include"
+    "${PROJECT_SOURCE_DIR}/runtime/include"
+    "${PROJECT_SOURCE_DIR}/codec/include")
+target_link_libraries(mlvc_runtime_decoupling_tests PRIVATE
+    mlvc_core
+    mlvc_runtime
+    mlvc_backend
+    msrtc_rans
+    mlvc_model_proto)
+mlvc_configure_target(mlvc_runtime_decoupling_tests)
+mlvc_enable_ipo(mlvc_runtime_decoupling_tests)
+add_test(NAME mlvc_runtime_decoupling COMMAND mlvc_runtime_decoupling_tests)
+
+if(_mlvc_python_protobuf_ok)
+    add_test(NAME mlvc_model_package
+        COMMAND "${Python3_EXECUTABLE}"
+            "${PROJECT_SOURCE_DIR}/tests/unit/model_package_tests.py")
+endif()
 
 set(_mlvc_conformance_script
     "${PROJECT_SOURCE_DIR}/tests/conformance/run_codec_conformance.py")
@@ -53,27 +81,35 @@ if(EXISTS "${MLVC_TEST_ASSETS_DIR}/references/mlvc-psnr-v1/gray-q21-2f/reference
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
     add_test(NAME mlvc_codec_reference
         COMMAND mlvc_codec_tests "${MLVC_TEST_ASSETS_DIR}" "${MLVC_MODEL_ROOT}")
-    foreach(_mlvc_profile mlvc-psnr-v1 mlvc-s-psnr-v1)
-        set(_mlvc_model_dir
-            "${MLVC_MODEL_ROOT}/${_mlvc_profile}/640x368")
-        set(_mlvc_reference_dir
-            "${MLVC_TEST_ASSETS_DIR}/references/${_mlvc_profile}/gray-q21-2f")
-        set(_mlvc_conformance_args
-            --binary "$<TARGET_FILE:mlvc_tool_demo>"
-            --model-dir "embedded:${_mlvc_profile}"
-            --bundle-dir "${_mlvc_model_dir}"
-            --reference-dir "${_mlvc_reference_dir}")
-        add_test(NAME "mlvc_codec_conformance_${_mlvc_profile}"
-            COMMAND "${Python3_EXECUTABLE}" "${_mlvc_conformance_script}"
-                    ${_mlvc_conformance_args})
-        set_tests_properties("mlvc_codec_conformance_${_mlvc_profile}"
-            PROPERTIES LABELS "gpu;conformance" TIMEOUT 300)
-    endforeach()
-    add_custom_target(mlvc_codec_compatibility
-        COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure -L conformance
-        DEPENDS mlvc_tool_demo
-        USES_TERMINAL
-        COMMENT "Checking both MLVC profiles against official Python codec references")
+    if(NOT MLVC_BACKEND STREQUAL "none")
+        foreach(_mlvc_profile mlvc-psnr-v1 mlvc-s-psnr-v1)
+            set(_mlvc_model_dir
+                "${MLVC_MODEL_ROOT}/${_mlvc_profile}/640x368")
+            set(_mlvc_reference_dir
+                "${MLVC_TEST_ASSETS_DIR}/references/${_mlvc_profile}/gray-q21-2f")
+            set(_mlvc_conformance_args
+                --binary "$<TARGET_FILE:mlvc_tool_demo>"
+                --model-dir "embedded:${_mlvc_profile}"
+                --bundle-dir "${_mlvc_model_dir}"
+                --reference-dir "${_mlvc_reference_dir}")
+            add_test(NAME "mlvc_codec_conformance_${_mlvc_profile}"
+                COMMAND "${Python3_EXECUTABLE}" "${_mlvc_conformance_script}"
+                        ${_mlvc_conformance_args})
+            set_tests_properties("mlvc_codec_conformance_${_mlvc_profile}"
+                PROPERTIES LABELS "gpu;conformance" TIMEOUT 300)
+        endforeach()
+        add_custom_target(mlvc_codec_compatibility
+            COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure -L conformance
+            DEPENDS mlvc_tool_demo
+            USES_TERMINAL
+            COMMENT "Checking both MLVC profiles against official Python codec references")
+    else()
+        add_custom_target(mlvc_codec_compatibility
+            COMMAND "${CMAKE_COMMAND}" -E echo
+                "Codec conformance requires an active inference backend (MLVC_BACKEND=${MLVC_BACKEND})"
+            USES_TERMINAL
+            COMMENT "Skipping end-to-end inference conformance in backend-none builds")
+    endif()
 else()
     message(STATUS
         "Codec conformance references not found under ${MLVC_TEST_ASSETS_DIR}; "

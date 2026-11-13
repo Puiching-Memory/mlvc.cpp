@@ -1,27 +1,24 @@
 #include "aot_graph.hpp"
 
-#include "model_proto.hpp"
-
 #include <algorithm>
 #include <cstdlib>
-#include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <utility>
 
 namespace mlvc::driver_cubin_backend {
 
-AotGraph::AotGraph(const std::filesystem::path& model_dir,
+AotGraph::AotGraph(const ModelAssetReader& assets,
                    const std::string& model_name,
                    const ModelExecutionConfig& execution_config,
                    driver_cubin::Driver& driver,
-    const driver_cubin::Module& module)
+                   const driver_cubin::Module& module)
     : driver_(driver), module_(module), model_name_(model_name)
 {
     // Opt-in L2 threadblock swizzle for the CUTLASS pointwise GEMMs.
     if (const char* env = std::getenv("MLVC_CUTLASS_LOG_TILE"))
         cutlass_log_tile_ = std::clamp(std::atoi(env), 0, 3);
-    load_model(model_dir, model_name);
+    load_model(assets, model_name);
     plan_input_slice_aliases();
     plan_epilogue_buffers();
     plan_reglu_buffer();
@@ -32,19 +29,12 @@ AotGraph::AotGraph(const std::filesystem::path& model_dir,
     configure_state(execution_config);
 }
 
-void AotGraph::load_model(const std::filesystem::path& model_dir,
+void AotGraph::load_model(const ModelAssetReader& assets,
                           const std::string& model_name)
 {
-    const std::filesystem::path graph_dir =
-        std::filesystem::path("aot") / model_name;
-    const auto message = detail::read_model_proto<wire::Graph>(model_dir, graph_dir / "graph.pb");
-    graph_ = decode_graph(message);
-    const auto metadata = detail::read_model_proto<wire::ModelMetadata>(model_dir, "metadata.pb");
-    if (message.checkpoint_sha256() != metadata.checkpoint_sha256())
-        throw std::runtime_error("driver-cubin: graph checkpoint differs from metadata");
-    weights_host_ = detail::read_model_binary(model_dir, graph_dir / "weights.bin");
-    if (weights_host_.size() != graph_.weights_bytes)
-        throw std::runtime_error("driver-cubin: weights size does not match graph");
+    auto loaded = aot::load_aot_graph(assets, model_name);
+    graph_ = std::move(loaded.descriptor);
+    weights_host_ = std::move(loaded.weights);
     weights_device_ = driver_.allocate(std::max<std::size_t>(weights_host_.size(), 1));
     if (!weights_host_.empty())
         driver_.upload(weights_device_, weights_host_.data(), weights_host_.size());

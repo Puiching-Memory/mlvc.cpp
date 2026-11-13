@@ -1,5 +1,7 @@
 #pragma once
 
+#include "mlvc/core/assets.hpp"
+
 #include <cstddef>
 #include <filesystem>
 #include <string>

@@ -31,10 +31,10 @@ int checked_int(std::uint32_t value)
     return static_cast<int>(value);
 }
 
-void validate_bundle_manifest(const std::filesystem::path& model_dir,
+void validate_bundle_manifest(const ModelAssetReader& assets,
                               const wire::ModelMetadata& metadata)
 {
-    const auto bundle = detail::read_model_proto<wire::ModelBundle>(model_dir, "model_bundle.pb");
+    const auto bundle = detail::read_model_proto<wire::ModelBundle>(assets, "model_bundle.pb");
     if (metadata.schema_version() != 1 || bundle.schema_version() != 2 ||
         bundle.profile() != metadata.profile() || bundle.model_version() != metadata.model_version() ||
         bundle.width() != metadata.width() || bundle.height() != metadata.height() ||
@@ -147,11 +147,10 @@ int ModelConfig::q_index_shift(int frame_index) const
     return qp_shift.at(static_cast<std::size_t>(map_index));
 }
 
-ModelConfig load_model_config(const std::filesystem::path& model_dir)
+ModelConfig load_model_config(const ModelAssetReader& assets)
 {
-    const auto path = model_dir / "metadata.pb";
-    const auto metadata = detail::read_model_proto<wire::ModelMetadata>(model_dir, "metadata.pb");
-    validate_bundle_manifest(model_dir, metadata);
+    const auto metadata = detail::read_model_proto<wire::ModelMetadata>(assets, "metadata.pb");
+    validate_bundle_manifest(assets, metadata);
     ModelConfig result;
     result.name = metadata.profile();
     result.model_version = metadata.model_version();
@@ -177,9 +176,16 @@ ModelConfig load_model_config(const std::filesystem::path& model_dir)
     try {
         result.validate();
     } catch (const std::exception& error) {
-        throw std::runtime_error(std::string(error.what()) + ": " + path.string());
+        throw std::runtime_error(
+            std::string(error.what()) + ": " + assets.location_label() + "/metadata.pb");
     }
     return result;
+}
+
+ModelConfig load_model_config(const std::filesystem::path& model_dir)
+{
+    const auto assets = make_model_asset_reader(model_dir);
+    return load_model_config(*assets);
 }
 
 std::vector<std::string> embedded_model_profiles()

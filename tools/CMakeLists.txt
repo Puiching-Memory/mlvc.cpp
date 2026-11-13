@@ -9,7 +9,9 @@ target_include_directories(mlvc_tool_demo PRIVATE
     "${PROJECT_SOURCE_DIR}/core/include"
     "${PROJECT_SOURCE_DIR}/runtime/include")
 target_link_libraries(mlvc_tool_demo PRIVATE mlvc_codec)
-target_link_options(mlvc_tool_demo PRIVATE "LINKER:--disable-new-dtags")
+if(UNIX AND NOT APPLE)
+    target_link_options(mlvc_tool_demo PRIVATE "LINKER:--disable-new-dtags")
+endif()
 mlvc_configure_target(mlvc_tool_demo)
 mlvc_enable_ipo(mlvc_tool_demo)
 
@@ -25,17 +27,21 @@ target_include_directories(mlvc_tool_benchmark PRIVATE
 target_link_libraries(mlvc_tool_benchmark PRIVATE
     mlvc_core
     mlvc_runtime
-    mlvc_backend_driver_cubin
+    mlvc_backend
     nlohmann_json::nlohmann_json)
-target_link_options(mlvc_tool_benchmark PRIVATE "LINKER:--disable-new-dtags")
+if(UNIX AND NOT APPLE)
+    target_link_options(mlvc_tool_benchmark PRIVATE "LINKER:--disable-new-dtags")
+endif()
 mlvc_configure_target(mlvc_tool_benchmark)
 mlvc_enable_ipo(mlvc_tool_benchmark)
 
 # Resolve the driver SONAME against the toolkit stub on driverless build hosts.
-target_link_options(mlvc_tool_demo PRIVATE
-    "LINKER:-rpath-link,${CUDAToolkit_LIBRARY_DIR}/stubs")
-target_link_options(mlvc_tool_benchmark PRIVATE
-    "LINKER:-rpath-link,${CUDAToolkit_LIBRARY_DIR}/stubs")
+if(MLVC_BACKEND STREQUAL "driver_cubin" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(mlvc_tool_demo PRIVATE
+        "LINKER:-rpath-link,${CUDAToolkit_LIBRARY_DIR}/stubs")
+    target_link_options(mlvc_tool_benchmark PRIVATE
+        "LINKER:-rpath-link,${CUDAToolkit_LIBRARY_DIR}/stubs")
+endif()
 
 install(TARGETS mlvc_tool_demo mlvc_tool_benchmark
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

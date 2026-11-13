@@ -1,10 +1,12 @@
 #pragma once
-// Fixed-shape Driver+cubin graph execution and codec I/O contracts.
+// Backend-agnostic fixed-shape graph execution and codec I/O contracts.
 
+#include "mlvc/core/assets.hpp"
 #include "mlvc/core/tensor.hpp"
 #include "mlvc/core/yuv.hpp"
 
 #include <cstddef>
+#include <functional>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -15,6 +17,8 @@ namespace mlvc {
 struct BackendOptions {
     std::string model_dir;
     int device_id = 0;
+    std::string backend_name;
+    std::shared_ptr<const ModelAssetReader> asset_reader;
 };
 
 // Feeds one model output directly into an input of the next invocation. The
@@ -81,7 +85,13 @@ public:
     virtual void wait_codec_slot(std::size_t slot) = 0;
 };
 
-// Driver+cubin runtime entry points.
+using BackendFactory =
+    std::function<std::unique_ptr<InferenceBackend>(const BackendOptions&)>;
+
+void register_backend(std::string name, BackendFactory factory,
+                      bool make_default = false);
+std::vector<std::string> available_backends();
+std::string_view default_backend_name() noexcept;
 const char* compiled_backend_name_c_str() noexcept;
 inline std::string_view compiled_backend_name() noexcept
 {

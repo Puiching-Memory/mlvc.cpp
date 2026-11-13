@@ -22,6 +22,10 @@ mlvc_configure_target(mlvc_core)
 mlvc_enable_ipo(mlvc_core)
 
 if(MLVC_EMBED_MODELS)
+    if(NOT CMAKE_SYSTEM_NAME MATCHES "Linux|Android" OR MSVC)
+        message(FATAL_ERROR
+            "MLVC_EMBED_MODELS=ON currently requires an ELF target with GNU/Clang ASM (.incbin)")
+    endif()
     file(GLOB MLVC_MODEL_MANIFESTS CONFIGURE_DEPENDS
         LIST_DIRECTORIES false "${MLVC_MODEL_ROOT}/*/*/model_bundle.pb")
     if(NOT MLVC_MODEL_MANIFESTS)

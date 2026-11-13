@@ -11,11 +11,18 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
-#include <immintrin.h>
 #include <stdexcept>
 #include <string>
 #include <system_error>
 #include <utility>
+
+#if (defined(__x86_64__) || defined(_M_X64) || defined(__i386__)) && \
+    (defined(__GNUC__) || defined(__clang__))
+#  define MLVC_HAS_X86_F16C_AVX2 1
+#  include <immintrin.h>
+#else
+#  define MLVC_HAS_X86_F16C_AVX2 0
+#endif
 
 namespace mlvc {
 namespace {
@@ -51,9 +58,9 @@ PmfTable parse_table(const wire::PmfTable& value)
     return result;
 }
 
-GaussianPmf load_gaussian(const std::filesystem::path& model_dir)
+GaussianPmf load_gaussian(const ModelAssetReader& assets)
 {
-    const auto value = detail::read_model_proto<wire::GaussianPmf>(model_dir, "gaussian_pmf.pb");
+    const auto value = detail::read_model_proto<wire::GaussianPmf>(assets, "gaussian_pmf.pb");
     if (value.schema_version() != 1 || !value.index_space() || value.scale_levels() > 128)
         throw std::runtime_error("unsupported Gaussian PMF contract");
     GaussianPmf result;
@@ -63,9 +70,9 @@ GaussianPmf load_gaussian(const std::filesystem::path& model_dir)
     return result;
 }
 
-BitEstimatorPmf load_bit_estimator(const std::filesystem::path& model_dir)
+BitEstimatorPmf load_bit_estimator(const ModelAssetReader& assets)
 {
-    const auto value = detail::read_model_proto<wire::BitEstimatorPmf>(model_dir, "bit_estimator_pmf.pb");
+    const auto value = detail::read_model_proto<wire::BitEstimatorPmf>(assets, "bit_estimator_pmf.pb");
     if (value.schema_version() != 1 || value.qp_num() > 65536 || value.channels() > 65536)
         throw std::runtime_error("unsupported bit-estimator PMF contract");
     BitEstimatorPmf result;
@@ -100,6 +107,7 @@ bool shape_equals(std::span<const std::int64_t> actual,
         std::equal(actual.begin(), actual.end(), expected.begin());
 }
 
+#if MLVC_HAS_X86_F16C_AVX2
 __attribute__((target("f16c,avx2")))
 void integer_values_f16c(const Float16Storage* source, std::int32_t* result,
                          std::size_t count)
@@ -130,6 +138,7 @@ void integer_values_f16c(const Float16Storage* source, std::int32_t* result,
         result[i] = static_cast<std::int32_t>(value);
     }
 }
+#endif
 
 void integer_values(TensorView tensor, std::vector<std::int32_t>& result)
 {
@@ -137,10 +146,12 @@ void integer_values(TensorView tensor, std::vector<std::int32_t>& result)
         throw std::runtime_error("entropy input must be FP16");
     const std::span<const Float16Storage> source = tensor.fp16_data();
     result.resize(source.size());
+#if MLVC_HAS_X86_F16C_AVX2
     if (__builtin_cpu_supports("f16c") && __builtin_cpu_supports("avx2")) {
         integer_values_f16c(source.data(), result.data(), source.size());
         return;
     }
+#endif
     for (std::size_t i = 0; i < source.size(); ++i) {
         const float value = half_to_float(source[i]);
         if (!std::isfinite(value) || value < -32768.0F || value > 32767.0F)
@@ -150,6 +161,7 @@ void integer_values(TensorView tensor, std::vector<std::int32_t>& result)
     }
 }
 
+#if MLVC_HAS_X86_F16C_AVX2
 __attribute__((target("f16c,avx2")))
 void fp16_values_f16c(const std::int32_t* values, Float16Storage* storage,
                       std::size_t count)
@@ -166,6 +178,7 @@ void fp16_values_f16c(const std::int32_t* values, Float16Storage* storage,
     for (; i < count; ++i)
         storage[i] = float_to_half(static_cast<float>(values[i]));
 }
+#endif
 
 void fp16_values(const std::vector<std::int32_t>& values,
                  MutableTensorView destination)
@@ -175,10 +188,12 @@ void fp16_values(const std::vector<std::int32_t>& values,
         throw std::runtime_error("entropy output must be matching FP16 storage");
     }
     const std::span<Float16Storage> storage = destination.fp16_data();
+#if MLVC_HAS_X86_F16C_AVX2
     if (__builtin_cpu_supports("f16c") && __builtin_cpu_supports("avx2")) {
         fp16_values_f16c(values.data(), storage.data(), values.size());
         return;
     }
+#endif
     for (std::size_t i = 0; i < values.size(); ++i)
         storage[i] = float_to_half(static_cast<float>(values[i]));
 }
@@ -205,10 +220,10 @@ public:
 
 class EntropyCodec::Impl final {
 public:
-    Impl(const std::filesystem::path& model_dir, ModelConfig model_config)
+    Impl(const ModelAssetReader& assets, ModelConfig model_config)
         : config(std::move(model_config)),
-          gaussian_pmf(load_gaussian(model_dir)),
-          bit_estimator_pmf(load_bit_estimator(model_dir)),
+          gaussian_pmf(load_gaussian(assets)),
+          bit_estimator_pmf(load_bit_estimator(assets)),
           gaussian(gaussian_pmf), bit_estimator(bit_estimator_pmf),
           encode_buffer(1U << 20)
     {
@@ -271,9 +286,19 @@ public:
     mutable msrtc_rans::RansDecoderStream decode_stream;
 };
 
+EntropyCodec::EntropyCodec(std::shared_ptr<const ModelAssetReader> assets,
+                           const ModelConfig& config)
+    : impl_([&]() {
+          if (!assets)
+              throw std::runtime_error("entropy asset reader must not be null");
+          return std::make_unique<Impl>(*assets, config);
+      }())
+{
+}
+
 EntropyCodec::EntropyCodec(const std::filesystem::path& model_dir,
                            const ModelConfig& config)
-    : impl_(std::make_unique<Impl>(model_dir, config))
+    : EntropyCodec(make_model_asset_reader(model_dir), config)
 {
 }
 

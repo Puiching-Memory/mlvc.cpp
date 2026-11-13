@@ -39,6 +39,7 @@ struct CliOptions {
     std::optional<double> max_abs_error;
     std::optional<double> max_rmse;
     bool print_backend_name = false;
+    bool list_backends = false;
 };
 
 struct BenchmarkCase {
@@ -53,14 +54,16 @@ void print_usage(const char* argv0)
     std::fprintf(stderr,
         "usage: %s --model-dir DIR --case FILE [options]\n"
         "options:\n"
-        "  --device-id N             CUDA device index (default: 0)\n"
+        "  --backend NAME            inference backend to use (default: runtime default)\n"
+        "  --device-id N             backend device index (default: 0)\n"
         "  --warmup N                warm-up iterations (default: 10)\n"
         "  --iterations N            measured iterations (default: 100)\n"
         "  --result FILE             write result JSON instead of stdout only\n"
         "  --save-outputs DIR        save final output tensors as raw files\n"
         "  --max-abs-error VALUE     fail if an FP16 output exceeds this error\n"
         "  --max-rmse VALUE          fail if an FP16 output exceeds this RMSE\n"
-        "  --backend-name            print the compiled backend and exit\n",
+        "  --backend-name            print the default backend and exit\n"
+        "  --list-backends           list registered backends and exit\n",
         argv0);
 }
 
@@ -107,6 +110,8 @@ CliOptions parse_cli(int argc, char** argv)
 
         if (argument == "--model-dir") {
             options.backend.model_dir = value(argument);
+        } else if (argument == "--backend") {
+            options.backend.backend_name = value(argument);
         } else if (argument == "--case") {
             options.case_path = value(argument);
         } else if (argument == "--device-id") {
@@ -126,6 +131,8 @@ CliOptions parse_cli(int argc, char** argv)
             options.max_rmse = parse_tolerance(value(argument), argument);
         } else if (argument == "--backend-name") {
             options.print_backend_name = true;
+        } else if (argument == "--list-backends") {
+            options.list_backends = true;
         } else if (argument == "--help") {
             print_usage(argv[0]);
             std::exit(0);
@@ -134,7 +141,7 @@ CliOptions parse_cli(int argc, char** argv)
         }
     }
 
-    if (!options.print_backend_name) {
+    if (!options.print_backend_name && !options.list_backends) {
         if (options.backend.model_dir.empty())
             throw std::runtime_error("--model-dir is required");
         if (options.case_path.empty())
@@ -275,8 +282,13 @@ std::string utc_timestamp()
 {
     const std::time_t now = std::time(nullptr);
     std::tm utc{};
+#ifdef _WIN32
+    if (gmtime_s(&utc, &now) != 0)
+        throw std::runtime_error("failed to obtain UTC timestamp");
+#else
     if (gmtime_r(&now, &utc) == nullptr)
         throw std::runtime_error("failed to obtain UTC timestamp");
+#endif
     char buffer[sizeof("2026-09-02T00:00:00Z")];
     if (std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &utc) == 0)
         throw std::runtime_error("failed to format UTC timestamp");
@@ -523,6 +535,11 @@ int main(int argc, char** argv)
         if (options.print_backend_name) {
             std::printf("%.*s\n", static_cast<int>(mlvc::compiled_backend_name().size()),
                         mlvc::compiled_backend_name().data());
+            return 0;
+        }
+        if (options.list_backends) {
+            for (const std::string& name : mlvc::available_backends())
+                std::printf("%s\n", name.c_str());
             return 0;
         }
 

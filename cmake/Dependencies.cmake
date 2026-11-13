@@ -31,22 +31,34 @@ set(JSON_Install OFF CACHE INTERNAL "Do not install nlohmann/json")
 add_subdirectory("${NLOHMANN_JSON_DIR}"
                  "${PROJECT_BINARY_DIR}/_deps/nlohmann_json" EXCLUDE_FROM_ALL)
 
-set(MLVC_CUTLASS_DIR "${PROJECT_SOURCE_DIR}/third_party/cutlass")
-if(NOT EXISTS "${MLVC_CUTLASS_DIR}/include/cutlass/cutlass.h")
-    message(FATAL_ERROR
-        "CUTLASS source submodule is missing. Run: "
-        "git submodule update --init --recursive --depth 1")
+if(MLVC_BACKEND STREQUAL "driver_cubin")
+    set(MLVC_CUTLASS_DIR "${PROJECT_SOURCE_DIR}/third_party/cutlass")
+    if(NOT EXISTS "${MLVC_CUTLASS_DIR}/include/cutlass/cutlass.h")
+        message(FATAL_ERROR
+            "CUTLASS source submodule is missing. Run: "
+            "git submodule update --init --recursive --depth 1")
+    endif()
+    find_package(CUDAToolkit 13.3 REQUIRED)
 endif()
-find_package(CUDAToolkit 13.3 REQUIRED)
-find_package(Python3 COMPONENTS Interpreter REQUIRED)
-execute_process(
-    COMMAND "${Python3_EXECUTABLE}" -c
-        "import google.protobuf; assert google.protobuf.__version__ == '6.33.5'"
-    RESULT_VARIABLE _mlvc_python_proto_result
-    ERROR_QUIET)
-if(NOT _mlvc_python_proto_result EQUAL 0)
-    message(FATAL_ERROR
-        "Model tools require Python protobuf==6.33.5. Activate the model environment "
-        "or set Python3_EXECUTABLE to its interpreter.")
+
+set(_mlvc_python_protobuf_ok FALSE)
+if(MLVC_EMBED_MODELS)
+    enable_language(ASM)
+    find_package(Python3 COMPONENTS Interpreter REQUIRED)
+elseif(BUILD_TESTING)
+    find_package(Python3 COMPONENTS Interpreter QUIET)
 endif()
-enable_language(ASM)
+if(Python3_FOUND)
+    execute_process(
+        COMMAND "${Python3_EXECUTABLE}" -c
+            "import google.protobuf; assert google.protobuf.__version__ == '6.33.5'"
+        RESULT_VARIABLE _mlvc_python_proto_result
+        ERROR_QUIET)
+    if(_mlvc_python_proto_result EQUAL 0)
+        set(_mlvc_python_protobuf_ok TRUE)
+    elseif(MLVC_EMBED_MODELS)
+        message(FATAL_ERROR
+            "Model embedding requires Python protobuf==6.33.5. Activate the model environment "
+            "or set Python3_EXECUTABLE to its interpreter.")
+    endif()
+endif()

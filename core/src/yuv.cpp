@@ -177,18 +177,19 @@ FramePadding frame_padding(int width, int height,
                         0, model_height - active_height, !native};
 }
 
-Tensor prepare_model_input(const Yuv420Frame& frame,
+Tensor prepare_model_input(Yuv420FrameView source,
                            int model_width, int model_height,
                            float pixel_range, FramePadding& padding)
 {
-    padding = frame_padding(frame.width, frame.height, model_width, model_height);
+    const int width = source.width();
+    const int height = source.height();
+    padding = frame_padding(width, height, model_width, model_height);
     validate_pixel_range(pixel_range);
-    const Yuv420FrameView source = yuv420_view(frame);
     std::vector<std::int64_t> shape{1, 3, model_height, model_width};
     std::vector<Float16Storage> values(checked_tensor_element_count(shape));
-    const int active_width = padding.rotated ? frame.height : frame.width;
-    const int active_height = padding.rotated ? frame.width : frame.height;
-    const int uv_width = frame.width / 2;
+    const int active_width = padding.rotated ? height : width;
+    const int active_height = padding.rotated ? width : height;
+    const int uv_width = width / 2;
 
     auto source_coordinate = [&](int y, int x) {
         if (padding.rotated)
@@ -205,7 +206,7 @@ Tensor prepare_model_input(const Yuv420Frame& frame,
                 if (channel == 0) {
                     sample = source.y()[
                         static_cast<std::size_t>(source_y) *
-                            static_cast<std::size_t>(frame.width) +
+                            static_cast<std::size_t>(width) +
                         static_cast<std::size_t>(source_x)];
                 } else {
                     const std::span<const std::uint8_t> plane =
@@ -230,10 +231,21 @@ Tensor prepare_model_input(const Yuv420Frame& frame,
     return Tensor{"x", std::move(shape), std::move(values)};
 }
 
-Yuv420Frame prepare_model_output(const Tensor& tensor, int width, int height,
-                                 float pixel_range,
-                                 const FramePadding& padding)
+Tensor prepare_model_input(const Yuv420Frame& frame,
+                           int model_width, int model_height,
+                           float pixel_range, FramePadding& padding)
 {
+    return prepare_model_input(yuv420_view(frame), model_width, model_height,
+                               pixel_range, padding);
+}
+
+void prepare_model_output_into(const Tensor& tensor,
+                               MutableYuv420FrameView output,
+                               float pixel_range,
+                               const FramePadding& padding)
+{
+    const int width = output.width();
+    const int height = output.height();
     validate_dimensions(width, height);
     validate_pixel_range(pixel_range);
     tensor.validate();
@@ -248,14 +260,6 @@ Yuv420Frame prepare_model_output(const Tensor& tensor, int width, int height,
     }
 
     const auto& values = std::get<std::vector<Float16Storage>>(tensor.data);
-    Yuv420Frame result{width, height,
-        std::vector<std::uint8_t>(static_cast<std::size_t>(width) *
-                                  static_cast<std::size_t>(height)),
-        std::vector<std::uint8_t>(static_cast<std::size_t>(width / 2) *
-                                  static_cast<std::size_t>(height / 2)),
-        std::vector<std::uint8_t>(static_cast<std::size_t>(width / 2) *
-                                  static_cast<std::size_t>(height / 2))};
-
     auto sample = [&](int channel, int y, int x) {
         int model_y = y;
         int model_x = x;
@@ -274,11 +278,14 @@ Yuv420Frame prepare_model_output(const Tensor& tensor, int width, int height,
         return half_to_float(values[index]) / pixel_range;
     };
 
+    const std::span<std::uint8_t> y_plane = output.y();
+    const std::span<std::uint8_t> u_plane = output.u();
+    const std::span<std::uint8_t> v_plane = output.v();
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x)
-            result.y[static_cast<std::size_t>(y) *
-                         static_cast<std::size_t>(width) +
-                     static_cast<std::size_t>(x)] =
+            y_plane[static_cast<std::size_t>(y) *
+                        static_cast<std::size_t>(width) +
+                    static_cast<std::size_t>(x)] =
                 quantize_byte(sample(0, y, x));
     }
     for (int y = 0; y < height / 2; ++y) {
@@ -295,10 +302,26 @@ Yuv420Frame prepare_model_output(const Tensor& tensor, int width, int height,
                 static_cast<std::size_t>(y) *
                     static_cast<std::size_t>(width / 2) +
                 static_cast<std::size_t>(x);
-            result.u[index] = quantize_byte(u * 0.25F);
-            result.v[index] = quantize_byte(v * 0.25F);
+            u_plane[index] = quantize_byte(u * 0.25F);
+            v_plane[index] = quantize_byte(v * 0.25F);
         }
     }
+}
+
+Yuv420Frame prepare_model_output(const Tensor& tensor, int width, int height,
+                                 float pixel_range,
+                                 const FramePadding& padding)
+{
+    validate_dimensions(width, height);
+    Yuv420Frame result{width, height,
+        std::vector<std::uint8_t>(static_cast<std::size_t>(width) *
+                                  static_cast<std::size_t>(height)),
+        std::vector<std::uint8_t>(static_cast<std::size_t>(width / 2) *
+                                  static_cast<std::size_t>(height / 2)),
+        std::vector<std::uint8_t>(static_cast<std::size_t>(width / 2) *
+                                  static_cast<std::size_t>(height / 2))};
+    prepare_model_output_into(
+        tensor, mutable_yuv420_view(result), pixel_range, padding);
     return result;
 }
 

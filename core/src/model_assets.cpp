@@ -7,13 +7,14 @@
 #include <span>
 #include <stdexcept>
 #include <string_view>
+#include <utility>
 
 #ifdef MLVC_HAS_EMBEDDED_MODELS
 extern "C" const unsigned char mlvc_embedded_models_start[];
 extern "C" const unsigned char mlvc_embedded_models_end[];
 #endif
 
-namespace mlvc::detail {
+namespace mlvc {
 namespace {
 
 constexpr std::string_view kEmbeddedPrefix = "embedded:";
@@ -91,37 +92,112 @@ std::vector<std::byte> read_file(const std::filesystem::path& path)
     return result;
 }
 
+class DirectoryAssetReader final : public ModelAssetReader {
+public:
+    explicit DirectoryAssetReader(std::filesystem::path directory)
+        : directory_(std::move(directory))
+    {
+    }
+
+    std::string location_label() const override { return directory_.string(); }
+
+    bool exists(const std::filesystem::path& relative_path) const override
+    {
+        return std::filesystem::is_regular_file(directory_ / relative_path);
+    }
+
+    std::vector<std::byte> read_binary(
+        const std::filesystem::path& relative_path) const override
+    {
+        return read_file(directory_ / relative_path);
+    }
+
+private:
+    std::filesystem::path directory_;
+};
+
+class EmbeddedAssetReader final : public ModelAssetReader {
+public:
+    explicit EmbeddedAssetReader(std::string profile)
+        : profile_(std::move(profile))
+    {
+        if (profile_.empty() || profile_.find('/') != std::string::npos ||
+            profile_.find('\\') != std::string::npos) {
+            throw std::runtime_error("invalid embedded model profile: " + profile_);
+        }
+    }
+
+    std::string location_label() const override
+    {
+        return std::string(kEmbeddedPrefix) + profile_;
+    }
+
+    bool exists(const std::filesystem::path& relative_path) const override
+    {
+#ifdef MLVC_HAS_EMBEDDED_MODELS
+        return find_embedded_asset(profile_, relative_path.generic_string()).has_value();
+#else
+        (void)relative_path;
+        return false;
+#endif
+    }
+
+    std::vector<std::byte> read_binary(
+        const std::filesystem::path& relative_path) const override
+    {
+#ifdef MLVC_HAS_EMBEDDED_MODELS
+        const auto asset = find_embedded_asset(
+            profile_, relative_path.generic_string());
+        if (asset)
+            return {asset->begin(), asset->end()};
+        throw std::runtime_error(
+            "embedded model asset not found: " + profile_ + "/" +
+            relative_path.generic_string());
+#else
+        (void)relative_path;
+        throw std::runtime_error(
+            "embedded models are disabled in this build (" + location_label() + ")");
+#endif
+    }
+
+private:
+    std::string profile_;
+};
+
 }  // namespace
 
-bool model_asset_exists(const std::filesystem::path& model_dir,
-                        const std::filesystem::path& relative_path)
+std::shared_ptr<const ModelAssetReader> make_directory_asset_reader(
+    std::filesystem::path directory)
 {
-    const auto profile = embedded_profile(model_dir);
-    if (!profile)
-        return std::filesystem::is_regular_file(model_dir / relative_path);
-#ifdef MLVC_HAS_EMBEDDED_MODELS
-    return find_embedded_asset(*profile, relative_path.generic_string()).has_value();
-#else
-    return false;
-#endif
+    return std::make_shared<DirectoryAssetReader>(std::move(directory));
 }
 
-std::vector<std::byte> read_model_binary(
-    const std::filesystem::path& model_dir,
-    const std::filesystem::path& relative_path)
+std::shared_ptr<const ModelAssetReader> make_embedded_asset_reader(
+    std::string_view profile)
 {
-    const auto profile = embedded_profile(model_dir);
-    if (!profile)
-        return read_file(model_dir / relative_path);
-#ifdef MLVC_HAS_EMBEDDED_MODELS
-    const auto asset = find_embedded_asset(
-        *profile, relative_path.generic_string());
-    if (asset)
-        return {asset->begin(), asset->end()};
-#endif
-    throw std::runtime_error(
-        "embedded model asset not found: " + *profile + "/" +
-        relative_path.generic_string());
+    return std::make_shared<EmbeddedAssetReader>(std::string(profile));
+}
+
+std::shared_ptr<const ModelAssetReader> make_model_asset_reader(
+    const std::filesystem::path& location)
+{
+    if (const auto profile = embedded_profile(location))
+        return make_embedded_asset_reader(*profile);
+    return make_directory_asset_reader(location);
+}
+
+std::shared_ptr<const ModelAssetReader> resolve_model_asset_reader(
+    const std::filesystem::path& model_dir,
+    std::shared_ptr<const ModelAssetReader> override_reader)
+{
+    if (override_reader)
+        return override_reader;
+    if (!model_dir.empty())
+        return make_model_asset_reader(model_dir);
+    const std::filesystem::path embedded = default_model_location();
+    if (embedded.empty())
+        throw std::runtime_error("no embedded model; supply --model-dir with an AOT bundle");
+    return make_model_asset_reader(embedded);
 }
 
 std::vector<std::string> list_embedded_model_profiles()
@@ -147,4 +223,30 @@ std::filesystem::path default_model_location()
     return std::string(kEmbeddedPrefix) + profile;
 }
 
-}  // namespace mlvc::detail
+namespace detail {
+
+bool model_asset_exists(const std::filesystem::path& model_dir,
+                        const std::filesystem::path& relative_path)
+{
+    return make_model_asset_reader(model_dir)->exists(relative_path);
+}
+
+std::vector<std::byte> read_model_binary(
+    const std::filesystem::path& model_dir,
+    const std::filesystem::path& relative_path)
+{
+    return make_model_asset_reader(model_dir)->read_binary(relative_path);
+}
+
+std::vector<std::string> list_embedded_model_profiles()
+{
+    return mlvc::list_embedded_model_profiles();
+}
+
+std::filesystem::path default_model_location()
+{
+    return mlvc::default_model_location();
+}
+
+}  // namespace detail
+}  // namespace mlvc

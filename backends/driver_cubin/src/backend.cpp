@@ -2,6 +2,7 @@
 
 #include "aot_graph.hpp"
 
+#include "mlvc/core/assets.hpp"
 #include "mlvc/runtime/backend.hpp"
 
 #include <cstddef>
@@ -33,8 +34,10 @@ public:
     void load(const std::string& model_name,
               const ModelExecutionConfig& config) override
     {
+        const auto assets = resolve_model_asset_reader(
+            options_.model_dir, options_.asset_reader);
         graph_ = std::make_unique<driver_cubin_backend::AotGraph>(
-            options_.model_dir, model_name, config, driver_, module_);
+            *assets, model_name, config, driver_, module_);
     }
 
     std::vector<Tensor> run(const std::vector<Tensor>& inputs) override
@@ -121,14 +124,18 @@ private:
 
 }  // namespace
 
-const char* compiled_backend_name_c_str() noexcept
+namespace driver_cubin_backend {
+
+void register_driver_cubin_backend()
 {
-    return "driver-cubin";
+    mlvc::register_backend(
+        "driver-cubin",
+        [](const BackendOptions& options) {
+            return std::make_unique<DriverCubinBackend>(options);
+        },
+        true);
 }
 
-std::unique_ptr<InferenceBackend> create_backend(const BackendOptions& options)
-{
-    return std::make_unique<DriverCubinBackend>(options);
-}
+}  // namespace driver_cubin_backend
 
 }  // namespace mlvc

@@ -1,22 +1,24 @@
-#include "graph_descriptor.hpp"
-#include "model_proto.hpp"
+#include "mlvc/core/assets.hpp"
 #include "mlvc/core/model.hpp"
+#include "mlvc/runtime/aot_graph_proto.hpp"
 
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <span>
 #include <stdexcept>
 #include <string>
-#include <unistd.h>
 
 namespace {
 using namespace mlvc;
-using namespace mlvc::driver_cubin_backend;
+using namespace mlvc::aot;
 
 void require(bool condition, const char* message)
 {
     if (!condition) throw std::runtime_error(message);
 }
+
 template <typename Operation>
 void rejects(Operation operation)
 {
@@ -60,7 +62,7 @@ void test_graph()
     wire::Graph decoded;
     require(decoded.ParseFromString(graph.SerializeAsString()), "Protobuf round trip");
     const auto runtime = decode_graph(decoded);
-    require(runtime.nodes.at(0).op == wire::ADD && runtime.nodes.at(0).inputs.at(0) == 1,
+    require(runtime.nodes.at(0).op == Op::ADD && runtime.nodes.at(0).inputs.at(0) == 1,
             "typed graph decoding");
     auto invalid = graph;
     invalid.set_schema_version(2);
@@ -90,8 +92,9 @@ void test_graph()
 
 void test_file_decoder()
 {
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
     const auto directory = std::filesystem::temp_directory_path() /
-        ("mlvc-proto-" + std::to_string(getpid()));
+        ("mlvc-proto-" + std::to_string(stamp));
     require(std::filesystem::create_directory(directory), "temporary directory already exists");
     const auto path = directory / "graph.pb";
     try {
@@ -99,12 +102,16 @@ void test_file_decoder()
             std::ofstream file(path, std::ios::binary);
             require(example().SerializeToOstream(&file), "serialize model file");
         }
-        decode_graph(detail::read_model_proto<wire::Graph>(directory, "graph.pb"));
+        const auto reader = make_directory_asset_reader(directory);
+        const auto binary = reader->read_binary("graph.pb");
+        const auto runtime = decode_graph_binary(binary);
+        require(runtime.nodes.at(0).op == Op::ADD, "binary graph decoding");
         {
             std::ofstream file(path, std::ios::binary | std::ios::trunc);
             file << "{\"schema_version\":2}";
         }
-        rejects([&] { detail::read_model_proto<wire::Graph>(directory, "graph.pb"); });
+        const auto bad_binary = reader->read_binary("graph.pb");
+        rejects([&] { decode_graph_binary(bad_binary); });
         std::filesystem::remove(path);
         std::filesystem::remove(directory);
     } catch (...) {

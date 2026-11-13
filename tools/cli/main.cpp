@@ -16,18 +16,19 @@ void print_usage(const char* argv0)
     std::fprintf(stderr,
         "usage:\n"
         "  %s --backend-name\n"
+        "  %s --list-backends\n"
         "  %s --list-model-profiles\n"
         "  %s encode --input IN.yuv|- --output OUT.mlvc|- --width W --height H\n"
         "       [--model-dir DIR | --model-profile NAME] [--frames N]\n"
-        "       [--q-index N] [--device-id N]\n"
+        "       [--q-index N] [--backend NAME] [--device-id N]\n"
         "       [--encode-device-id N]\n"
         "  %s decode --input IN.mlvc|- --output OUT.yuv|- --width W --height H\n"
         "       [--model-dir DIR | --model-profile NAME] [--frames N]\n"
-        "       [--device-id N]\n"
+        "       [--backend NAME] [--device-id N]\n"
         "       [--decode-device-id N]\n"
         "  common: [--debug-dir DIR]\n"
         "  stream: use '-' for stdin/stdout; named FIFO paths are also supported\n",
-        argv0, argv0, argv0, argv0);
+        argv0, argv0, argv0, argv0, argv0);
 }
 
 int parse_integer(const char* text, const char* option, bool allow_zero)
@@ -53,6 +54,11 @@ int main(int argc, char** argv)
                         mlvc::compiled_backend_name().data());
             return 0;
         }
+        if (argc == 2 && std::strcmp(argv[1], "--list-backends") == 0) {
+            for (const std::string& name : mlvc::available_backends())
+                std::printf("%s\n", name.c_str());
+            return 0;
+        }
         if (argc == 2 && std::strcmp(argv[1], "--list-model-profiles") == 0) {
             for (const std::string& profile : mlvc::available_model_profiles())
                 std::printf("%s\n", profile.c_str());
@@ -74,7 +80,9 @@ int main(int argc, char** argv)
                     throw std::runtime_error(std::string(argv[i]) + " requires a value");
                 return argv[++i];
             };
-            if (std::strcmp(argv[i], "--device-id") == 0) {
+            if (std::strcmp(argv[i], "--backend") == 0) {
+                options.backend_name = value();
+            } else if (std::strcmp(argv[i], "--device-id") == 0) {
                 options.device_id = parse_integer(value(), "--device-id", true);
             } else if (std::strcmp(argv[i], "--encode-device-id") == 0) {
                 if (command != "encode")
@@ -123,11 +131,13 @@ int main(int argc, char** argv)
         // Binary output may be stdout.  Keep the human-readable summary on
         // stderr so it cannot corrupt a downstream decoder or muxer.
         FILE* status = options.output_path == "-" ? stderr : stdout;
+        const std::string active_backend = !options.backend_name.empty()
+            ? options.backend_name
+            : std::string(mlvc::compiled_backend_name());
         std::fprintf(status,
-                     "%s complete: backend=%.*s frames=%d input=%zu output=%zu "
+                     "%s complete: backend=%s frames=%d input=%zu output=%zu "
                      "elapsed=%.3f s throughput=%.2f fps\n",
-                     command.c_str(), static_cast<int>(mlvc::compiled_backend_name().size()),
-                     mlvc::compiled_backend_name().data(), stats.frames,
+                     command.c_str(), active_backend.c_str(), stats.frames,
                      stats.input_bytes, stats.output_bytes, stats.elapsed_seconds, fps);
         return 0;
     } catch (const std::exception& error) {

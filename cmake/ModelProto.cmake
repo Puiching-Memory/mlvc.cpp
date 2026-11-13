@@ -8,11 +8,40 @@ set(ABSL_BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(ABSL_ENABLE_INSTALL OFF CACHE BOOL "" FORCE)
 add_subdirectory("${PROJECT_SOURCE_DIR}/third_party/abseil"
                  "${PROJECT_BINARY_DIR}/_deps/abseil" EXCLUDE_FROM_ALL)
+set(MLVC_PROTOC_EXECUTABLE "" CACHE FILEPATH
+    "Host protoc executable for schema compilation (auto-detected when cross-compiling)")
+set(_mlvc_use_external_protoc OFF)
+if(MLVC_PROTOC_EXECUTABLE)
+    if(NOT EXISTS "${MLVC_PROTOC_EXECUTABLE}")
+        message(FATAL_ERROR
+            "MLVC_PROTOC_EXECUTABLE does not exist: ${MLVC_PROTOC_EXECUTABLE}")
+    endif()
+    set(_mlvc_use_external_protoc ON)
+elseif(CMAKE_CROSSCOMPILING)
+    find_program(_mlvc_host_protoc NAMES protoc)
+    if(_mlvc_host_protoc)
+        set(MLVC_PROTOC_EXECUTABLE "${_mlvc_host_protoc}" CACHE FILEPATH
+            "Host protoc executable for schema compilation" FORCE)
+        set(_mlvc_use_external_protoc ON)
+    else()
+        message(FATAL_ERROR
+            "Cross-compiling requires a host protoc executable matching the "
+            "bundled Protobuf schema compiler. Pass -DMLVC_PROTOC_EXECUTABLE=...")
+    endif()
+endif()
+
 set(protobuf_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(protobuf_BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-# protoc's Rust generator requires upb even when deployed messages use Lite.
-# This is a build-host dependency only; the codec links libprotobuf-lite.
-set(protobuf_BUILD_LIBUPB ON CACHE BOOL "" FORCE)
+set(protobuf_MSVC_STATIC_RUNTIME OFF CACHE BOOL "" FORCE)
+if(_mlvc_use_external_protoc)
+    set(protobuf_BUILD_PROTOC_BINARIES OFF CACHE BOOL "" FORCE)
+    set(protobuf_BUILD_LIBUPB OFF CACHE BOOL "" FORCE)
+else()
+    set(protobuf_BUILD_PROTOC_BINARIES ON CACHE BOOL "" FORCE)
+    # protoc's Rust generator requires upb even when deployed messages use Lite.
+    # This is a build-host dependency only; the codec links libprotobuf-lite.
+    set(protobuf_BUILD_LIBUPB ON CACHE BOOL "" FORCE)
+endif()
 set(protobuf_WITH_ZLIB OFF CACHE BOOL "" FORCE)
 set(protobuf_INSTALL OFF CACHE BOOL "" FORCE)
 set(protobuf_LOCAL_DEPENDENCIES_ONLY ON CACHE BOOL "" FORCE)
@@ -44,12 +73,19 @@ endif()
 set(MLVC_PROTO_DIR "${PROJECT_BINARY_DIR}/generated/proto")
 file(MAKE_DIRECTORY "${MLVC_PROTO_DIR}")
 set(MLVC_PROTO_SCHEMA "${PROJECT_SOURCE_DIR}/proto/mlvc_model.proto")
+if(_mlvc_use_external_protoc)
+    set(_mlvc_protoc_command "${MLVC_PROTOC_EXECUTABLE}")
+    set(_mlvc_protoc_depends "${MLVC_PROTOC_EXECUTABLE}")
+else()
+    set(_mlvc_protoc_command "$<TARGET_FILE:protobuf::protoc>")
+    set(_mlvc_protoc_depends protobuf::protoc)
+endif()
 add_custom_command(
     OUTPUT "${MLVC_PROTO_DIR}/mlvc_model.pb.cc" "${MLVC_PROTO_DIR}/mlvc_model.pb.h"
-    COMMAND $<TARGET_FILE:protobuf::protoc>
+    COMMAND "${_mlvc_protoc_command}"
         "--proto_path=${PROJECT_SOURCE_DIR}/proto" "--cpp_out=${MLVC_PROTO_DIR}"
         "${MLVC_PROTO_SCHEMA}"
-    DEPENDS protobuf::protoc "${MLVC_PROTO_SCHEMA}"
+    DEPENDS ${_mlvc_protoc_depends} "${MLVC_PROTO_SCHEMA}"
     VERBATIM)
 add_library(mlvc_model_proto STATIC "${MLVC_PROTO_DIR}/mlvc_model.pb.cc")
 target_include_directories(mlvc_model_proto SYSTEM PUBLIC "${MLVC_PROTO_DIR}")
@@ -74,10 +110,10 @@ endif()
 # Python bindings are checked in for standalone model tooling; regenerate from
 # this target when the schema changes, using the exact same compiler.
 add_custom_target(mlvc_generate_python_proto
-    COMMAND $<TARGET_FILE:protobuf::protoc>
+    COMMAND "${_mlvc_protoc_command}"
         "--proto_path=${PROJECT_SOURCE_DIR}/proto"
         "--python_out=${PROJECT_SOURCE_DIR}/tools/mlvc_proto" "${MLVC_PROTO_SCHEMA}"
-    DEPENDS protobuf::protoc "${MLVC_PROTO_SCHEMA}"
+    DEPENDS ${_mlvc_protoc_depends} "${MLVC_PROTO_SCHEMA}"
     VERBATIM)
 install(FILES "${PROJECT_SOURCE_DIR}/third_party/protobuf/LICENSE"
     DESTINATION "share/licenses/protobuf")

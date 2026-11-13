@@ -80,9 +80,16 @@ MutableYuv420FrameView mutable_yuv420_view(Yuv420Frame& frame);
 
 FramePadding frame_padding(int width, int height,
                            int model_width, int model_height);
+Tensor prepare_model_input(Yuv420FrameView frame,
+                           int model_width, int model_height,
+                           float pixel_range, FramePadding& padding);
 Tensor prepare_model_input(const Yuv420Frame& frame,
                            int model_width, int model_height,
                            float pixel_range, FramePadding& padding);
+void prepare_model_output_into(const Tensor& tensor,
+                               MutableYuv420FrameView output,
+                               float pixel_range,
+                               const FramePadding& padding);
 Yuv420Frame prepare_model_output(const Tensor& tensor, int width, int height,
                                  float pixel_range,
                                  const FramePadding& padding);

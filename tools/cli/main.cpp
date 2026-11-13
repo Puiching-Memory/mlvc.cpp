@@ -20,11 +20,11 @@ void print_usage(const char* argv0)
         "  %s --list-model-profiles\n"
         "  %s encode --input IN.yuv|- --output OUT.mlvc|- --width W --height H\n"
         "       [--model-dir DIR | --model-profile NAME] [--frames N]\n"
-        "       [--q-index N] [--backend NAME] [--device-id N]\n"
+        "       [--q-index N] [--backend NAME] [--device-id N] [--threads N]\n"
         "       [--encode-device-id N]\n"
         "  %s decode --input IN.mlvc|- --output OUT.yuv|- --width W --height H\n"
         "       [--model-dir DIR | --model-profile NAME] [--frames N]\n"
-        "       [--backend NAME] [--device-id N]\n"
+        "       [--backend NAME] [--device-id N] [--threads N]\n"
         "       [--decode-device-id N]\n"
         "  common: [--debug-dir DIR]\n"
         "  stream: use '-' for stdin/stdout; named FIFO paths are also supported\n",
@@ -84,6 +84,8 @@ int main(int argc, char** argv)
                 options.backend_name = value();
             } else if (std::strcmp(argv[i], "--device-id") == 0) {
                 options.device_id = parse_integer(value(), "--device-id", true);
+            } else if (std::strcmp(argv[i], "--threads") == 0) {
+                options.num_threads = parse_integer(value(), "--threads", true);
             } else if (std::strcmp(argv[i], "--encode-device-id") == 0) {
                 if (command != "encode")
                     throw std::runtime_error("--encode-device-id is only valid for encode");

@@ -24,7 +24,7 @@ if(UNIX AND NOT APPLE)
     target_link_options(mlvc_c_api_tests PRIVATE "LINKER:--disable-new-dtags")
 endif()
 # Resolve the codec's transitive driver dependency on driverless build hosts.
-if(MLVC_BACKEND STREQUAL "driver_cubin" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(MLVC_BACKEND MATCHES "^(driver_cubin|all)$" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_options(mlvc_c_api_tests PRIVATE
         "LINKER:-rpath-link,${CUDAToolkit_LIBRARY_DIR}/stubs")
 endif()
@@ -68,6 +68,25 @@ mlvc_configure_target(mlvc_runtime_decoupling_tests)
 mlvc_enable_ipo(mlvc_runtime_decoupling_tests)
 add_test(NAME mlvc_runtime_decoupling COMMAND mlvc_runtime_decoupling_tests)
 
+if(MLVC_BACKEND MATCHES "^(cpu|all)$")
+    add_executable(mlvc_cpu_backend_tests unit/cpu_backend_tests.cpp)
+    target_include_directories(mlvc_cpu_backend_tests PRIVATE
+        "${PROJECT_SOURCE_DIR}/core/include"
+        "${PROJECT_SOURCE_DIR}/runtime/include"
+        "${PROJECT_SOURCE_DIR}/codec/include")
+    target_link_libraries(mlvc_cpu_backend_tests PRIVATE
+        mlvc_core
+        mlvc_runtime
+        mlvc_backend
+        mlvc_model_proto)
+    if(UNIX AND NOT APPLE)
+        target_link_options(mlvc_cpu_backend_tests PRIVATE "LINKER:--disable-new-dtags")
+    endif()
+    mlvc_configure_target(mlvc_cpu_backend_tests)
+    mlvc_enable_ipo(mlvc_cpu_backend_tests)
+    add_test(NAME mlvc_cpu_backend COMMAND mlvc_cpu_backend_tests)
+endif()
+
 if(_mlvc_python_protobuf_ok)
     add_test(NAME mlvc_model_package
         COMMAND "${Python3_EXECUTABLE}"
@@ -87,16 +106,46 @@ if(EXISTS "${MLVC_TEST_ASSETS_DIR}/references/mlvc-psnr-v1/gray-q21-2f/reference
                 "${MLVC_MODEL_ROOT}/${_mlvc_profile}/640x368")
             set(_mlvc_reference_dir
                 "${MLVC_TEST_ASSETS_DIR}/references/${_mlvc_profile}/gray-q21-2f")
-            set(_mlvc_conformance_args
-                --binary "$<TARGET_FILE:mlvc_tool_demo>"
-                --model-dir "embedded:${_mlvc_profile}"
-                --bundle-dir "${_mlvc_model_dir}"
-                --reference-dir "${_mlvc_reference_dir}")
-            add_test(NAME "mlvc_codec_conformance_${_mlvc_profile}"
-                COMMAND "${Python3_EXECUTABLE}" "${_mlvc_conformance_script}"
-                        ${_mlvc_conformance_args})
-            set_tests_properties("mlvc_codec_conformance_${_mlvc_profile}"
-                PROPERTIES LABELS "gpu;conformance" TIMEOUT 300)
+            if(MLVC_EMBED_MODELS)
+                set(_mlvc_conformance_model_arg "embedded:${_mlvc_profile}")
+            else()
+                set(_mlvc_conformance_model_arg "${_mlvc_model_dir}")
+            endif()
+            if(MLVC_BACKEND MATCHES "^(driver_cubin|all)$")
+                set(_mlvc_conformance_args
+                    --binary "$<TARGET_FILE:mlvc_tool_demo>"
+                    --backend driver-cubin
+                    --model-dir "${_mlvc_conformance_model_arg}"
+                    --bundle-dir "${_mlvc_model_dir}"
+                    --reference-dir "${_mlvc_reference_dir}")
+                add_test(NAME "mlvc_codec_conformance_${_mlvc_profile}"
+                    COMMAND "${Python3_EXECUTABLE}" "${_mlvc_conformance_script}"
+                            ${_mlvc_conformance_args})
+                set_tests_properties("mlvc_codec_conformance_${_mlvc_profile}"
+                    PROPERTIES LABELS "gpu;conformance" TIMEOUT 300)
+            endif()
+            if(MLVC_BACKEND MATCHES "^(cpu|all)$")
+                set(_mlvc_cpu_conformance_args
+                    --binary "$<TARGET_FILE:mlvc_tool_demo>"
+                    --backend cpu
+                    --model-dir "${_mlvc_conformance_model_arg}"
+                    --bundle-dir "${_mlvc_model_dir}"
+                    --reference-dir "${_mlvc_reference_dir}")
+                if(CMAKE_CROSSCOMPILING_EMULATOR)
+                    list(APPEND _mlvc_cpu_conformance_args
+                        --emulator "${CMAKE_CROSSCOMPILING_EMULATOR}")
+                endif()
+                if(MLVC_BACKEND STREQUAL "all")
+                    set(_mlvc_cpu_test_name "mlvc_codec_conformance_cpu_${_mlvc_profile}")
+                else()
+                    set(_mlvc_cpu_test_name "mlvc_codec_conformance_${_mlvc_profile}")
+                endif()
+                add_test(NAME "${_mlvc_cpu_test_name}"
+                    COMMAND "${Python3_EXECUTABLE}" "${_mlvc_conformance_script}"
+                            ${_mlvc_cpu_conformance_args})
+                set_tests_properties("${_mlvc_cpu_test_name}"
+                    PROPERTIES LABELS "cpu;conformance" TIMEOUT 600)
+            endif()
         endforeach()
         add_custom_target(mlvc_codec_compatibility
             COMMAND "${CMAKE_CTEST_COMMAND}" --output-on-failure -L conformance

@@ -251,8 +251,10 @@ void prepare_model_output_into(const Tensor& tensor,
     tensor.validate();
     if (tensor.data_type() != TensorDataType::kFloat16)
         throw std::runtime_error("model output x_hat is not FP16");
-    const auto [model_height, model_width] =
+    const auto model_dims =
         padded_dimensions(width, height, padding);
+    const int model_height = model_dims.first;
+    const int model_width = model_dims.second;
     const std::vector<std::int64_t> expected_shape{
         1, 3, model_height, model_width};
     if (tensor.shape != expected_shape) {

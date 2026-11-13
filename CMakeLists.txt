@@ -6,8 +6,8 @@ include(CMakePackageConfigHelpers)
 include(CTest)
 
 set(MLVC_BACKEND "AUTO" CACHE STRING
-    "Inference backend to build (AUTO, driver_cubin, none)")
-set_property(CACHE MLVC_BACKEND PROPERTY STRINGS AUTO driver_cubin none)
+    "Inference backend to build (AUTO, cpu, driver_cubin, all, none)")
+set_property(CACHE MLVC_BACKEND PROPERTY STRINGS AUTO cpu driver_cubin all none)
 
 set(_mlvc_is_linux_x86_64 FALSE)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
@@ -19,22 +19,22 @@ if(MLVC_BACKEND STREQUAL "AUTO")
     if(_mlvc_is_linux_x86_64)
         set(_mlvc_resolved_backend "driver_cubin")
     else()
-        set(_mlvc_resolved_backend "none")
+        set(_mlvc_resolved_backend "cpu")
     endif()
     set(MLVC_BACKEND "${_mlvc_resolved_backend}" CACHE STRING
-        "Inference backend to build (AUTO, driver_cubin, none)" FORCE)
+        "Inference backend to build (AUTO, cpu, driver_cubin, all, none)" FORCE)
 endif()
 
-if(NOT MLVC_BACKEND MATCHES "^(driver_cubin|none)$")
+if(NOT MLVC_BACKEND MATCHES "^(cpu|driver_cubin|all|none)$")
     message(FATAL_ERROR
         "Unsupported MLVC_BACKEND='${MLVC_BACKEND}'. "
-        "Supported values: AUTO, driver_cubin, none.")
+        "Supported values: AUTO, cpu, driver_cubin, all, none.")
 endif()
-if(MLVC_BACKEND STREQUAL "driver_cubin" AND NOT _mlvc_is_linux_x86_64)
+if(MLVC_BACKEND MATCHES "^(driver_cubin|all)$" AND NOT _mlvc_is_linux_x86_64)
     message(FATAL_ERROR
-        "MLVC_BACKEND=driver_cubin supports Linux x86_64 NVIDIA hosts only "
+        "MLVC_BACKEND=${MLVC_BACKEND} requires a Linux x86_64 NVIDIA host "
         "(current target: ${CMAKE_SYSTEM_NAME} ${CMAKE_SYSTEM_PROCESSOR}). "
-        "Configure with -DMLVC_BACKEND=none for portable/decoupled builds.")
+        "Configure with -DMLVC_BACKEND=cpu or -DMLVC_BACKEND=none.")
 endif()
 message(STATUS "MLVC inference backend: ${MLVC_BACKEND}")
 
@@ -50,7 +50,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 set(_mlvc_default_embed_models OFF)
-if(MLVC_BACKEND STREQUAL "driver_cubin")
+if(MLVC_BACKEND MATCHES "^(driver_cubin|all)$")
     set(_mlvc_default_embed_models ON)
 endif()
 option(MLVC_ENABLE_IPO "Enable interprocedural optimization in Release builds" ON)
@@ -77,6 +77,12 @@ endif()
 
 function(mlvc_enable_ipo target)
     if(MLVC_ENABLE_IPO AND MLVC_IPO_SUPPORTED AND TARGET "${target}")
+        get_target_property(_mlvc_target_type "${target}" TYPE)
+        # CMake's WINDOWS_EXPORT_ALL_SYMBOLS scanner cannot read MSVC /GL LTCG objects.
+        if(MSVC AND (_mlvc_target_type STREQUAL "SHARED_LIBRARY"
+                     OR _mlvc_target_type STREQUAL "OBJECT_LIBRARY"))
+            return()
+        endif()
         set_property(TARGET "${target}"
             PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     endif()
@@ -114,7 +120,17 @@ function(mlvc_configure_target target)
     target_link_libraries("${target}" PRIVATE mlvc_project_options)
 endfunction()
 
+if(OHOS AND (CMAKE_C_COMPILER_ID MATCHES "Clang" OR CMAKE_CXX_COMPILER_ID MATCHES "Clang"))
+    # Huawei ohos.toolchain.cmake sets external toolchain paths that emit
+    # unused --gcc-toolchain warnings on C/C++ compile steps under Clang 15.
+    add_compile_options(-Wno-unused-command-line-argument)
+endif()
+
 include(cmake/Dependencies.cmake)
+
+if(WIN32)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+endif()
 
 add_subdirectory(core)
 add_subdirectory(runtime)

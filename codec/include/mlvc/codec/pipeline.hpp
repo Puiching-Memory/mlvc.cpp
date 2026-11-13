@@ -4,6 +4,7 @@
 #include "mlvc/core/bitstream.hpp"
 #include "mlvc/core/model.hpp"
 #include "mlvc/core/yuv.hpp"
+#include "mlvc/runtime/backend.hpp"
 
 #include <cstddef>
 #include <memory>
@@ -18,6 +19,9 @@ struct CodecOptions {
     int q_index = 21;
     int frames = 0;
     int device_id = 0;
+    int num_threads = 0;
+    ExecutionPreference execution_preference = ExecutionPreference::kAuto;
+    bool allow_cpu_fallback = true;
     // A path of "-" selects stdin/stdout.  POSIX named FIFOs are also
     // supported for live frame-by-frame operation.
     std::string input_path;
@@ -41,6 +45,9 @@ struct SessionOptions {
     int height = 360;
     int q_index = 21;
     int device_id = 0;
+    int num_threads = 0;
+    ExecutionPreference execution_preference = ExecutionPreference::kAuto;
+    bool allow_cpu_fallback = true;
     std::string model_dir;
     std::string debug_dir;
     std::string backend_name;

@@ -56,6 +56,7 @@ void print_usage(const char* argv0)
         "options:\n"
         "  --backend NAME            inference backend to use (default: runtime default)\n"
         "  --device-id N             backend device index (default: 0)\n"
+        "  --threads N               CPU thread count (0 = auto)\n"
         "  --warmup N                warm-up iterations (default: 10)\n"
         "  --iterations N            measured iterations (default: 100)\n"
         "  --result FILE             write result JSON instead of stdout only\n"
@@ -116,6 +117,8 @@ CliOptions parse_cli(int argc, char** argv)
             options.case_path = value(argument);
         } else if (argument == "--device-id") {
             options.backend.device_id = parse_unsigned<int>(value(argument), argument, true);
+        } else if (argument == "--threads") {
+            options.backend.num_threads = parse_unsigned<int>(value(argument), argument, true);
         } else if (argument == "--warmup") {
             options.warmup_iterations =
                 parse_unsigned<std::size_t>(value(argument), argument, true);

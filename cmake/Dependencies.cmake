@@ -31,7 +31,7 @@ set(JSON_Install OFF CACHE INTERNAL "Do not install nlohmann/json")
 add_subdirectory("${NLOHMANN_JSON_DIR}"
                  "${PROJECT_BINARY_DIR}/_deps/nlohmann_json" EXCLUDE_FROM_ALL)
 
-if(MLVC_BACKEND STREQUAL "driver_cubin")
+if(MLVC_BACKEND MATCHES "^(driver_cubin|all)$")
     set(MLVC_CUTLASS_DIR "${PROJECT_SOURCE_DIR}/third_party/cutlass")
     if(NOT EXISTS "${MLVC_CUTLASS_DIR}/include/cutlass/cutlass.h")
         message(FATAL_ERROR
@@ -39,6 +39,10 @@ if(MLVC_BACKEND STREQUAL "driver_cubin")
             "git submodule update --init --recursive --depth 1")
     endif()
     find_package(CUDAToolkit 13.3 REQUIRED)
+endif()
+
+if(MLVC_BACKEND MATCHES "^(cpu|all)$")
+    find_package(Threads REQUIRED)
 endif()
 
 set(_mlvc_python_protobuf_ok FALSE)

@@ -32,6 +32,9 @@ SessionOptions make_session_options(const CodecOptions& options)
     session.height = options.height;
     session.q_index = options.q_index;
     session.device_id = options.device_id;
+    session.num_threads = options.num_threads;
+    session.execution_preference = options.execution_preference;
+    session.allow_cpu_fallback = options.allow_cpu_fallback;
     session.model_dir = options.model_dir;
     session.debug_dir = options.debug_dir;
     session.backend_name = options.backend_name;
@@ -45,6 +48,9 @@ BackendOptions make_backend_options(const SessionOptions& options,
     BackendOptions result;
     result.model_dir = options.model_dir.empty() ? assets->location_label() : options.model_dir;
     result.device_id = options.device_id;
+    result.num_threads = options.num_threads;
+    result.execution_preference = options.execution_preference;
+    result.allow_cpu_fallback = options.allow_cpu_fallback;
     result.backend_name = options.backend_name;
     result.asset_reader = assets;
     return result;

@@ -26,6 +26,16 @@ def sha256(path: Path) -> str:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--binary", type=Path, required=True)
+    parser.add_argument("--backend", help="explicit backend name for mlvc_demo")
+    parser.add_argument(
+        "--threads",
+        type=int,
+        help="explicit thread count for CPU backend",
+    )
+    parser.add_argument(
+        "--emulator",
+        help="optional user-mode emulator (e.g. qemu-aarch64-static)",
+    )
     parser.add_argument("--model-dir", required=True)
     parser.add_argument(
         "--bundle-dir",
@@ -52,26 +62,33 @@ def run_codec(
     manifest = json.loads(
         (args.reference_dir / "reference.json").read_text(encoding="utf-8")
     )
-    cmd = [
-        str(args.binary.resolve()),
-        command,
-        "--input",
-        str(input_path),
-        "--output",
-        str(output_path),
-        "--width",
-        str(manifest["width"]),
-        "--height",
-        str(manifest["height"]),
-        "--frames",
-        str(manifest["frames"]),
-        "--model-dir",
-        (
-            args.model_dir
-            if args.model_dir.startswith("embedded:")
-            else str(Path(args.model_dir).resolve())
-        ),
-    ]
+    cmd = (
+        ([args.emulator] if args.emulator else [])
+        + [
+            str(args.binary.resolve()),
+            command,
+            "--input",
+            str(input_path),
+            "--output",
+            str(output_path),
+            "--width",
+            str(manifest["width"]),
+            "--height",
+            str(manifest["height"]),
+            "--frames",
+            str(manifest["frames"]),
+            "--model-dir",
+            (
+                args.model_dir
+                if args.model_dir.startswith("embedded:")
+                else str(Path(args.model_dir).resolve())
+            ),
+        ]
+    )
+    if args.backend:
+        cmd.extend(["--backend", args.backend])
+    if args.threads is not None:
+        cmd.extend(["--threads", str(args.threads)])
     if command == "encode":
         cmd.extend(["--q-index", str(manifest["q_index"])])
     if debug_dir:

@@ -36,7 +36,7 @@ mlvc_configure_target(mlvc_tool_benchmark)
 mlvc_enable_ipo(mlvc_tool_benchmark)
 
 # Resolve the driver SONAME against the toolkit stub on driverless build hosts.
-if(MLVC_BACKEND STREQUAL "driver_cubin" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+if(MLVC_BACKEND MATCHES "^(driver_cubin|all)$" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_options(mlvc_tool_demo PRIVATE
         "LINKER:-rpath-link,${CUDAToolkit_LIBRARY_DIR}/stubs")
     target_link_options(mlvc_tool_benchmark PRIVATE
@@ -47,3 +47,7 @@ install(TARGETS mlvc_tool_demo mlvc_tool_benchmark
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(FILES "${NLOHMANN_JSON_DIR}/LICENSE.MIT"
     DESTINATION "share/licenses/nlohmann_json")
+if(MLVC_BACKEND MATCHES "^(cpu|all)$")
+    install(FILES "${PROJECT_SOURCE_DIR}/third_party/kleidiai/LICENSES/Apache-2.0.txt"
+        DESTINATION "share/licenses/kleidiai")
+endif()

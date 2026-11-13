@@ -14,9 +14,19 @@
 
 namespace mlvc {
 
+enum class ExecutionPreference {
+    kAuto,
+    kCpu,
+    kGpu,
+    kNpu,
+};
+
 struct BackendOptions {
     std::string model_dir;
     int device_id = 0;
+    int num_threads = 0;  // 0 = auto (physical/big cores on CPU)
+    ExecutionPreference execution_preference = ExecutionPreference::kAuto;
+    bool allow_cpu_fallback = true;
     std::string backend_name;
     std::shared_ptr<const ModelAssetReader> asset_reader;
 };

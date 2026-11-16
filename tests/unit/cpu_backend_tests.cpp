@@ -500,9 +500,20 @@ void test_conv_and_epilogues()
     const auto c_wide = gb.add_conv("c_wide", spatial_out, w_wide_id, 0, {1, 1}, {0, 0, 0, 0}, 1, {1, WOC, H, W});
     const auto wide_res_out = gb.add_binary(wire::ADD, "wide_res_out", c_wide, res_wide_id, {1, WOC, H, W});
 
+    // Stride-2 spatial 3x3 conv (pad=1, asymmetric taps) to verify kx=0..2 indexing under stride>1.
+    const int OH_S2 = 2, OW_S2 = 3;
+    std::vector<float> w_s2(16 * 16 * 9, 0.0F);
+    for (int c = 0; c < 16; ++c) {
+        w_s2[(static_cast<std::size_t>(c) * 16U + static_cast<std::size_t>(c)) * 9U + 2U] = 0.25F; // (ky=0, kx=2)
+        w_s2[(static_cast<std::size_t>(c) * 16U + static_cast<std::size_t>(c)) * 9U + 6U] = 0.50F; // (ky=2, kx=0)
+    }
+    const auto w_s2_id = gb.add_weight_fp16("w_s2", {16, 16, 3, 3}, w_s2);
+    const auto sp_s2_out = gb.add_conv("sp_s2", spatial_out, w_s2_id, 0, {2, 2}, {1, 1, 1, 1}, 1, {1, 16, OH_S2, OW_S2});
+
     gb.mark_output(reglu_out);
     gb.mark_output(spatial_out);
     gb.mark_output(wide_res_out);
+    gb.mark_output(sp_s2_out);
 
     BackendOptions opts;
     opts.backend_name = "cpu";
@@ -520,7 +531,7 @@ void test_conv_and_epilogues()
     const auto x_tensor = make_fp16_tensor("x", {1, IC, H, W}, x_vals);
     const auto rw_tensor = make_fp16_tensor("res_wide", {1, WOC, H, W}, rw_vals);
     const auto outs = backend->run({x_tensor, rw_tensor});
-    require(outs.size() == 3U, "expected 3 outputs");
+    require(outs.size() == 4U, "expected 4 outputs");
 
     // Compute scalar ground truth.
     std::vector<float> exp_reglu(16 * H * W, 0.0F);
@@ -563,6 +574,25 @@ void test_conv_and_epilogues()
     }
     check_close(outs[2], exp_wide, 2e-2F, "Wide tiled ResidualAdd (OC>64) mismatch");
 
+    std::vector<float> exp_s2(16 * OH_S2 * OW_S2, 0.0F);
+    for (int c = 0; c < 16; ++c) {
+        for (int oy = 0; oy < OH_S2; ++oy) {
+            for (int ox = 0; ox < OW_S2; ++ox) {
+                float acc = 0.0F;
+                const int iy_t = oy * 2 - 1;
+                const int ix_r = ox * 2 + 1;
+                if (iy_t >= 0 && iy_t < H && ix_r >= 0 && ix_r < W)
+                    acc += 0.25F * exp_spatial[(c * H + iy_t) * W + ix_r];
+                const int iy_b = oy * 2 + 1;
+                const int ix_l = ox * 2 - 1;
+                if (iy_b >= 0 && iy_b < H && ix_l >= 0 && ix_l < W)
+                    acc += 0.50F * exp_spatial[(c * H + iy_b) * W + ix_l];
+                exp_s2[(c * OH_S2 + oy) * OW_S2 + ox] = acc;
+            }
+        }
+    }
+    check_close(outs[3], exp_s2, 2e-2F, "Stride-2 spatial conv mismatch");
+
     // Multi-thread 1 vs 4 determinism.
     BackendOptions opts1 = opts;
     opts1.num_threads = 1;
@@ -570,7 +600,7 @@ void test_conv_and_epilogues()
     b1_single->load("ConvNet", {});
     const auto outs1 = b1_single->run({x_tensor, rw_tensor});
     require(outs[0].data == outs1[0].data && outs[1].data == outs1[1].data &&
-            outs[2].data == outs1[2].data,
+            outs[2].data == outs1[2].data && outs[3].data == outs1[3].data,
             "1-thread and 4-thread execution must be bit-identical");
 }
 
@@ -922,15 +952,32 @@ void test_gemm_tail_shapes()
     const auto c_clp = gb.add_conv("c_clp", out_res, w_clp_id, 0, {1, 1}, {0, 0, 0, 0}, 1, {1, 3, H, W});
     const auto out_clp = gb.add_clip("out_clp", c_clp, zero_id, one_id, {1, 3, H, W});
 
+    // Fused ReGLU with N % 32 == 0 and eff_n >= 64 (triggers split_n + in-register ReGLU).
+    const std::int64_t OC_FUSED_HALF = 64, OC_FUSED_REG = 128;
+    std::vector<float> w_freg(OC_FUSED_REG * IC, 0.0F), b_freg(OC_FUSED_REG, 0.0F);
+    for (std::size_t oc = 0; oc < static_cast<std::size_t>(OC_FUSED_REG); ++oc) {
+        b_freg[oc] = (static_cast<float>(oc % 9U) - 4.0F) * 0.04F;
+        for (std::size_t ic = 0; ic < static_cast<std::size_t>(IC); ++ic)
+            w_freg[oc * IC + ic] = ((oc * 3U + ic) % 7U == 0U) ? 0.10F : -0.04F;
+    }
+    const auto w_freg_id = gb.add_weight_fp16("w_freg", {OC_FUSED_REG, IC, 1, 1}, w_freg);
+    const auto b_freg_id = gb.add_weight_fp16("b_freg", {OC_FUSED_REG}, b_freg);
+    const auto c_freg = gb.add_conv("c_freg", x_id, w_freg_id, b_freg_id, {1, 1}, {0, 0, 0, 0}, 1, {1, OC_FUSED_REG, H, W});
+    const auto fg_slice = gb.add_slice_1d_axis("fg", c_freg, 0, OC_FUSED_HALF, 1, {1, OC_FUSED_HALF, H, W});
+    const auto fl_slice = gb.add_slice_1d_axis("fl", c_freg, OC_FUSED_HALF, OC_FUSED_REG, 1, {1, OC_FUSED_HALF, H, W});
+    const auto fg_clp = gb.add_clip("fcg", fg_slice, zero_id, one_id, {1, OC_FUSED_HALF, H, W});
+    const auto out_fused_reglu = gb.add_binary(wire::MUL, "fused_reglu", fg_clp, fl_slice, {1, OC_FUSED_HALF, H, W});
+
     gb.mark_output(out_reglu);
     gb.mark_output(out_lr);
     gb.mark_output(out_res);
     gb.mark_output(out_clp);
+    gb.mark_output(out_fused_reglu);
 
     BackendOptions opts;
     opts.backend_name = "cpu";
     opts.asset_reader = gb.build();
-    opts.num_threads = 2;
+    opts.num_threads = 4;
 
     std::vector<float> x_v(IC * H * W);
     for (std::size_t i = 0; i < x_v.size(); ++i)

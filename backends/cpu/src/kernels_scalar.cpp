@@ -630,16 +630,20 @@ void execute_gemm_nhwc(
     if (m == 0 || n == 0)
         return;
 
-    const std::size_t out_cols =
-        epilogue.kind == GemmEpilogueKind::kReglu ? (n / 2U) : n;
+    const bool is_reglu = (epilogue.kind == GemmEpilogueKind::kReglu);
+    const std::size_t out_cols = is_reglu ? (n / 2U) : n;
+    const bool fused_reglu =
+        is_reglu && kernels.gemm.supports_fused_reglu && (n % 32U == 0U);
     constexpr std::size_t kRowBlock = 24U;
     const std::size_t m_tiles = (m + kRowBlock - 1U) / kRowBlock;
-    const bool split_n = (epilogue.kind != GemmEpilogueKind::kReglu) &&
-                         (m_tiles < pool.thread_count() * 2U) && (n >= 64U) &&
-                         (n % 16U == 0U);
+    const std::size_t eff_n = is_reglu ? out_cols : n;
+    const bool can_split_n = !is_reglu || fused_reglu;
+    const bool split_n = can_split_n &&
+                         (m_tiles < pool.thread_count() * 2U) && (eff_n >= 64U) &&
+                         (eff_n % 16U == 0U);
     if (split_n) {
         constexpr std::size_t kColBlock = 64U;
-        const std::size_t n_tiles = (n + kColBlock - 1U) / kColBlock;
+        const std::size_t n_tiles = (eff_n + kColBlock - 1U) / kColBlock;
         const std::size_t block_elems = 16U + k * 16U;
         const std::size_t total_tasks = m_tiles * n_tiles;
         pool.parallel_for(total_tasks, 1U, [&](std::size_t t0, std::size_t t1) {
@@ -649,10 +653,12 @@ void execute_gemm_nhwc(
                 const std::size_t m0 = mt * kRowBlock;
                 const std::size_t mc = std::min(kRowBlock, m - m0);
                 const std::size_t n0 = nt * kColBlock;
-                const std::size_t nc = std::min(kColBlock, n - n0);
+                const std::size_t nc = std::min(kColBlock, eff_n - n0);
                 GemmEpilogue sub_epi = epilogue;
                 if (sub_epi.residual)
                     sub_epi.residual += n0;
+                if (fused_reglu)
+                    sub_epi.reglu_linear_rhs = rhs_packed + ((out_cols + n0) / 16U) * block_elems;
                 kernels.gemm.run_block(
                     mc, nc, k,
                     lhs + m0 * k, k,
@@ -665,8 +671,8 @@ void execute_gemm_nhwc(
     }
 
     pool.parallel_for(m_tiles, 1U, [&](std::size_t mt0, std::size_t mt1) {
-        std::vector<Float16Storage> scratch;
-        if (epilogue.kind == GemmEpilogueKind::kReglu)
+        thread_local std::vector<Float16Storage> scratch;
+        if (is_reglu && !fused_reglu && scratch.size() < kRowBlock * n)
             scratch.resize(kRowBlock * n);
         for (std::size_t mt = mt0; mt < mt1; ++mt) {
             const std::size_t m0 = mt * kRowBlock;
@@ -676,7 +682,9 @@ void execute_gemm_nhwc(
                 lhs + m0 * k, k,
                 rhs_packed,
                 dst + m0 * out_cols, out_cols,
-                epilogue, m0, scratch.data(), scratch.size());
+                epilogue, m0,
+                (is_reglu && !fused_reglu) ? scratch.data() : nullptr,
+                (is_reglu && !fused_reglu) ? scratch.size() : 0U);
         }
     });
 }
@@ -688,22 +696,29 @@ void execute_spatial_conv_nhwc(
     int kh, int kw, int sh, int sw, int ph, int pw,
     const GemmEpilogue& epilogue, CpuThreadPool& pool)
 {
-    const std::size_t out_cols =
-        epilogue.kind == GemmEpilogueKind::kReglu ? static_cast<std::size_t>(oc / 2)
-                                                 : static_cast<std::size_t>(oc);
+    const bool is_reglu = (epilogue.kind == GemmEpilogueKind::kReglu);
+    const std::size_t out_cols = is_reglu
+        ? static_cast<std::size_t>(oc / 2)
+        : static_cast<std::size_t>(oc);
+    const bool fused_reglu =
+        is_reglu && kernels.gemm.supports_fused_reglu && (oc % 32 == 0);
     const std::size_t total_spatial = static_cast<std::size_t>(n) * oh * ow;
     const std::size_t k_dim = static_cast<std::size_t>(kh) * kw * ic;
     const std::size_t row_bytes = static_cast<std::size_t>(ic) * sizeof(Float16Storage);
+    const std::size_t kw_row_bytes = static_cast<std::size_t>(kw) * row_bytes;
     const int in_plane = ih * iw;
     const int out_plane = oh * ow;
-    constexpr std::size_t kStripRows = 12U;
+    constexpr std::size_t kStripRows = 24U;
     const std::size_t strips = (total_spatial + kStripRows - 1U) / kStripRows;
 
     pool.parallel_for(strips, 1U, [&](std::size_t s0, std::size_t s1) {
-        std::vector<Float16Storage> im2col_buf(kStripRows * k_dim);
-        std::vector<Float16Storage> scratch;
-        if (epilogue.kind == GemmEpilogueKind::kReglu)
-            scratch.resize(kStripRows * static_cast<std::size_t>(oc));
+        thread_local std::vector<Float16Storage> im2col_buf;
+        if (im2col_buf.size() < kStripRows * k_dim)
+            im2col_buf.resize(kStripRows * k_dim);
+        thread_local std::vector<Float16Storage> scratch;
+        const std::size_t need_scratch = kStripRows * static_cast<std::size_t>(oc);
+        if (is_reglu && !fused_reglu && scratch.size() < need_scratch)
+            scratch.resize(need_scratch);
 
         for (std::size_t st = s0; st < s1; ++st) {
             const std::size_t m0 = st * kStripRows;
@@ -717,17 +732,31 @@ void execute_spatial_conv_nhwc(
                 const Float16Storage* in_batch =
                     input + static_cast<std::size_t>(batch) * in_plane * ic;
                 Float16Storage* col_dst = im2col_buf.data() + mr * k_dim;
+                const int iy0 = oy * sh - ph;
+                const int ix0 = ox * sw - pw;
+                if (iy0 >= 0 && iy0 + kh <= ih && ix0 >= 0 && ix0 + kw <= iw) {
+                    const std::size_t row_stride = static_cast<std::size_t>(iw) * ic;
+                    const Float16Storage* src_p =
+                        in_batch + static_cast<std::size_t>(iy0) * row_stride +
+                        static_cast<std::size_t>(ix0) * ic;
+                    for (int ky = 0; ky < kh; ++ky) {
+                        std::memcpy(col_dst, src_p, kw_row_bytes);
+                        col_dst += static_cast<std::size_t>(kw) * ic;
+                        src_p += row_stride;
+                    }
+                    continue;
+                }
                 for (int ky = 0; ky < kh; ++ky) {
-                    const int iy = oy * sh - ph + ky;
+                    const int iy = iy0 + ky;
                     if (iy < 0 || iy >= ih) {
-                        std::memset(col_dst, 0, static_cast<std::size_t>(kw) * row_bytes);
+                        std::memset(col_dst, 0, kw_row_bytes);
                         col_dst += static_cast<std::size_t>(kw) * ic;
                         continue;
                     }
                     const Float16Storage* in_row =
                         in_batch + static_cast<std::size_t>(iy) * iw * ic;
                     for (int kx = 0; kx < kw; ++kx) {
-                        const int ix = ox * sw - pw + kx;
+                        const int ix = ix0 + kx;
                         if (ix >= 0 && ix < iw) {
                             std::memcpy(col_dst, in_row + static_cast<std::size_t>(ix) * ic,
                                         row_bytes);
@@ -742,7 +771,9 @@ void execute_spatial_conv_nhwc(
                 mc, static_cast<std::size_t>(oc), k_dim,
                 im2col_buf.data(), k_dim, rhs_packed,
                 output + m0 * out_cols, out_cols,
-                epilogue, m0, scratch.data(), scratch.size());
+                epilogue, m0,
+                (is_reglu && !fused_reglu) ? scratch.data() : nullptr,
+                (is_reglu && !fused_reglu) ? scratch.size() : 0U);
         }
     });
 }

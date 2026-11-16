@@ -26,6 +26,9 @@ struct GemmEpilogue {
     float clamp_min = -std::numeric_limits<float>::infinity();
     float clamp_max = std::numeric_limits<float>::infinity();
     const Float16Storage* residual = nullptr;
+    // Non-null when kReglu N-dimension is sliced across blocks: points to the
+    // packed linear weights corresponding to this gate slice (`n` = slice width).
+    const Float16Storage* reglu_linear_rhs = nullptr;
 };
 
 enum class UnaryKind {
@@ -57,6 +60,7 @@ std::vector<Float16Storage> pack_depthwise_weights(
     std::size_t channels, std::size_t kh, std::size_t kw);
 
 struct GemmTileOps {
+    bool supports_fused_reglu = false;
     // Executes GEMM on a contiguous M-block slice of LHS [m_rows, k]
     // producing [m_rows, n] in dst_base with optional epilogue.
     // Note: residual inside epilogue has row stride dst_stride, pre-offset to the
@@ -165,17 +169,18 @@ struct Arm64AsmGemmArgs {
     float alpha;
     float clamp_min;
     float clamp_max;
+    std::size_t reglu_linear_offset;
 };
 
 extern "C" {
 void mlvc_arm64_gemm_neon_fp32_4x16(const Arm64AsmGemmArgs* args) noexcept;
-void mlvc_arm64_gemm_fp16fml_6x16(const Arm64AsmGemmArgs* args) noexcept;
+void mlvc_arm64_gemm_fp16fml_4x16(const Arm64AsmGemmArgs* args) noexcept;
 }
 
 using Arm64AsmGemmFn = void (*)(const Arm64AsmGemmArgs*) noexcept;
 
 void arm64_run_asm_gemm_block(
-    Arm64AsmGemmFn gemm_fn, bool use_fp16_reglu,
+    Arm64AsmGemmFn gemm_fn, bool use_fp16_reglu, bool supports_fused_reglu,
     std::size_t m_rows, std::size_t n, std::size_t k,
     const Float16Storage* lhs_block, std::size_t lhs_stride,
     const Float16Storage* rhs_packed,

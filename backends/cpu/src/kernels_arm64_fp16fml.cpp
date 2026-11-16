@@ -12,7 +12,7 @@ void fp16fml_run_block(
     Float16Storage* scratch, std::size_t scratch_elems)
 {
     arm64_run_asm_gemm_block(
-        &mlvc_arm64_gemm_fp16fml_6x16, true,
+        &mlvc_arm64_gemm_fp16fml_4x16, true, true,
         m_rows, n, k, lhs_block, lhs_stride, rhs_packed,
         dst_block, dst_stride, epilogue, row_offset, scratch, scratch_elems);
 }
@@ -24,6 +24,7 @@ const KernelSet& get_arm64_fp16fml_kernels() noexcept
     static const KernelSet fml_set = []() {
         KernelSet k = get_arm64_neon_fp32_kernels(true);
         k.mode = GemmMode::kArm64Fp16Fml;
+        k.gemm.supports_fused_reglu = true;
         k.gemm.run_block = &fp16fml_run_block;
         return k;
     }();

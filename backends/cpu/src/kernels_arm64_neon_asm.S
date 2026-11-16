@@ -234,6 +234,7 @@
     .type MLVC_ASM_SYM(mlvc_arm64_gemm_neon_fp32_4x16), %function
 #endif
 MLVC_ASM_SYM(mlvc_arm64_gemm_neon_fp32_4x16):
+    hint    #25                     // paciasp + BTI c landing pad (NOP pre-ARMv8.3/v8.5)
     ldr     x1, [x0, #ARG_M_ROWS]
     cbz     x1, .Lneon_early_exit
     ldr     x2, [x0, #ARG_N_COLS]
@@ -428,6 +429,7 @@ MLVC_ASM_SYM(mlvc_arm64_gemm_neon_fp32_4x16):
     add     sp, sp, #FRAME_SIZE
 
 .Lneon_early_exit:
+    hint    #29                     // autiasp (NOP pre-ARMv8.3)
     ret
 
 #if !defined(__APPLE__)
@@ -436,4 +438,15 @@ MLVC_ASM_SYM(mlvc_arm64_gemm_neon_fp32_4x16):
 
 #if defined(__linux__) || defined(__ANDROID__) || defined(__OHOS__)
     .section .note.GNU-stack,"",%progbits
+    .section .note.gnu.property,"a",%note
+    .p2align 3, 0x0
+    .long 4
+    .long 16
+    .long 5                         // NT_GNU_PROPERTY_TYPE_0
+    .asciz "GNU"
+    .p2align 3, 0x0
+    .long 0xc0000000                // GNU_PROPERTY_AARCH64_FEATURE_1_AND
+    .long 4
+    .long 3                         // BTI (1) | PAC (2)
+    .long 0
 #endif

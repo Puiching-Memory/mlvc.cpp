@@ -24,6 +24,7 @@ static_assert(offsetof(Arm64AsmGemmArgs, epi_kind) == 72U, "ASM offset mismatch:
 static_assert(offsetof(Arm64AsmGemmArgs, alpha) == 80U, "ASM offset mismatch: alpha");
 static_assert(offsetof(Arm64AsmGemmArgs, clamp_min) == 84U, "ASM offset mismatch: clamp_min");
 static_assert(offsetof(Arm64AsmGemmArgs, clamp_max) == 88U, "ASM offset mismatch: clamp_max");
+static_assert(offsetof(Arm64AsmGemmArgs, reglu_linear_offset) == 96U, "ASM offset mismatch: reglu_linear_offset");
 
 namespace {
 
@@ -95,10 +96,119 @@ void arm64_neon_fp32_run_block(
     Float16Storage* scratch, std::size_t scratch_elems)
 {
     arm64_run_asm_gemm_block(
-        &mlvc_arm64_gemm_neon_fp32_4x16, false,
+        &mlvc_arm64_gemm_neon_fp32_4x16, false, false,
         m_rows, n, k, lhs_block, lhs_stride, rhs_packed,
         dst_block, dst_stride, epilogue, row_offset, scratch, scratch_elems);
 }
+
+namespace {
+
+inline void dw3x3_accumulate_channels(
+    const Float16Storage* bias,
+    const Float16Storage* const* neighbors,
+    const Float16Storage* const* wrows,
+    int kcount, Float16Storage* out_px, int channels) noexcept
+{
+    int c = 0;
+    for (; c + 8 <= channels; c += 8) {
+        const float32x4x2_t b = neon_f16x8_to_f32x8(vld1q_u16(bias + c));
+        float32x4_t acc0 = b.val[0];
+        float32x4_t acc1 = b.val[1];
+        for (int idx = 0; idx < kcount; ++idx) {
+            const float32x4x2_t iv = neon_f16x8_to_f32x8(vld1q_u16(neighbors[idx] + c));
+            const float32x4x2_t wv = neon_f16x8_to_f32x8(vld1q_u16(wrows[idx] + c));
+            acc0 = vfmaq_f32(acc0, iv.val[0], wv.val[0]);
+            acc1 = vfmaq_f32(acc1, iv.val[1], wv.val[1]);
+        }
+        vst1q_u16(out_px + c, neon_f32x8_to_u16x8(acc0, acc1));
+    }
+    for (; c < channels; ++c) {
+        float acc = half_to_float(bias[c]);
+        for (int idx = 0; idx < kcount; ++idx)
+            acc += half_to_float(neighbors[idx][c]) * half_to_float(wrows[idx][c]);
+        out_px[c] = float_to_half(acc);
+    }
+}
+
+inline void dw3x3_interior_pixel(
+    const Float16Storage* bias, const Float16Storage* weights, std::size_t pad_c,
+    const Float16Storage* r0, const Float16Storage* r1, const Float16Storage* r2,
+    Float16Storage* out_px, int channels) noexcept
+{
+    const std::size_t ch = static_cast<std::size_t>(channels);
+    const Float16Storage* n00 = r0 - ch;
+    const Float16Storage* n01 = r0;
+    const Float16Storage* n02 = r0 + ch;
+    const Float16Storage* n10 = r1 - ch;
+    const Float16Storage* n11 = r1;
+    const Float16Storage* n12 = r1 + ch;
+    const Float16Storage* n20 = r2 - ch;
+    const Float16Storage* n21 = r2;
+    const Float16Storage* n22 = r2 + ch;
+
+    int c = 0;
+    for (; c + 8 <= channels; c += 8) {
+        const float32x4x2_t b = neon_f16x8_to_f32x8(vld1q_u16(bias + c));
+        float32x4_t acc0 = b.val[0];
+        float32x4_t acc1 = b.val[1];
+        auto mac = [&](const Float16Storage* ip, const Float16Storage* wp) {
+            const float32x4x2_t iv = neon_f16x8_to_f32x8(vld1q_u16(ip));
+            const float32x4x2_t wv = neon_f16x8_to_f32x8(vld1q_u16(wp));
+            acc0 = vfmaq_f32(acc0, iv.val[0], wv.val[0]);
+            acc1 = vfmaq_f32(acc1, iv.val[1], wv.val[1]);
+        };
+        mac(n00 + c, weights + 0U * pad_c + c);
+        mac(n01 + c, weights + 1U * pad_c + c);
+        mac(n02 + c, weights + 2U * pad_c + c);
+        mac(n10 + c, weights + 3U * pad_c + c);
+        mac(n11 + c, weights + 4U * pad_c + c);
+        mac(n12 + c, weights + 5U * pad_c + c);
+        mac(n20 + c, weights + 6U * pad_c + c);
+        mac(n21 + c, weights + 7U * pad_c + c);
+        mac(n22 + c, weights + 8U * pad_c + c);
+        vst1q_u16(out_px + c, neon_f32x8_to_u16x8(acc0, acc1));
+    }
+    for (; c < channels; ++c) {
+        float acc = half_to_float(bias[c]);
+        acc += half_to_float(n00[c]) * half_to_float(weights[0U * pad_c + c]);
+        acc += half_to_float(n01[c]) * half_to_float(weights[1U * pad_c + c]);
+        acc += half_to_float(n02[c]) * half_to_float(weights[2U * pad_c + c]);
+        acc += half_to_float(n10[c]) * half_to_float(weights[3U * pad_c + c]);
+        acc += half_to_float(n11[c]) * half_to_float(weights[4U * pad_c + c]);
+        acc += half_to_float(n12[c]) * half_to_float(weights[5U * pad_c + c]);
+        acc += half_to_float(n20[c]) * half_to_float(weights[6U * pad_c + c]);
+        acc += half_to_float(n21[c]) * half_to_float(weights[7U * pad_c + c]);
+        acc += half_to_float(n22[c]) * half_to_float(weights[8U * pad_c + c]);
+        out_px[c] = float_to_half(acc);
+    }
+}
+
+void dw3x3_border_pixel(
+    const Float16Storage* bias, const Float16Storage* weights, std::size_t pad_c,
+    const Float16Storage* in_batch, int h, int w, int channels,
+    int oy, int ox, Float16Storage* out_px) noexcept
+{
+    const Float16Storage* neighbors[9] = {};
+    const Float16Storage* wrows[9] = {};
+    int kcount = 0;
+    for (int ky = 0; ky < 3; ++ky) {
+        const int iy = oy + ky - 1;
+        if (iy < 0 || iy >= h)
+            continue;
+        const Float16Storage* in_r = in_batch + static_cast<std::size_t>(iy) * w * channels;
+        for (int kx = 0; kx < 3; ++kx) {
+            const int ix = ox + kx - 1;
+            if (ix < 0 || ix >= w)
+                continue;
+            neighbors[kcount] = in_r + static_cast<std::size_t>(ix) * channels;
+            wrows[kcount] = weights + static_cast<std::size_t>(ky * 3 + kx) * pad_c;
+            ++kcount;
+        }
+    }
+    dw3x3_accumulate_channels(bias, neighbors, wrows, kcount, out_px, channels);
+}
+
+}  // namespace
 
 void arm64_neon_depthwise3x3_s1p1(
     const Float16Storage* input, const Float16Storage* packed_weight,
@@ -109,6 +219,7 @@ void arm64_neon_depthwise3x3_s1p1(
     const Float16Storage* bias = packed_weight;
     const Float16Storage* weights = packed_weight + pad_c;
     const int hw = h * w;
+    const std::size_t row_stride = static_cast<std::size_t>(w) * channels;
     const std::size_t total_rows = static_cast<std::size_t>(n) * h;
 
     pool.parallel_for(total_rows, 2U, [&](std::size_t r0, std::size_t r1) {
@@ -118,47 +229,28 @@ void arm64_neon_depthwise3x3_s1p1(
             const Float16Storage* in_batch =
                 input + static_cast<std::size_t>(batch) * hw * channels;
             Float16Storage* out_row =
-                output + (static_cast<std::size_t>(batch) * h + oy) * w * channels;
+                output + (static_cast<std::size_t>(batch) * h + oy) * row_stride;
 
-            for (int ox = 0; ox < w; ++ox) {
-                Float16Storage* out_px = out_row + static_cast<std::size_t>(ox) * channels;
-                const Float16Storage* neighbors[9] = {};
-                const Float16Storage* wrows[9] = {};
-                int kcount = 0;
-                for (int ky = 0; ky < 3; ++ky) {
-                    const int iy = oy + ky - 1;
-                    if (iy < 0 || iy >= h)
-                        continue;
-                    const Float16Storage* in_r =
-                        in_batch + static_cast<std::size_t>(iy) * w * channels;
-                    for (int kx = 0; kx < 3; ++kx) {
-                        const int ix = ox + kx - 1;
-                        if (ix < 0 || ix >= w)
-                            continue;
-                        neighbors[kcount] = in_r + static_cast<std::size_t>(ix) * channels;
-                        wrows[kcount] = weights + static_cast<std::size_t>(ky * 3 + kx) * pad_c;
-                        ++kcount;
-                    }
+            if (oy > 0 && oy + 1 < h && w >= 2) {
+                dw3x3_border_pixel(bias, weights, pad_c, in_batch, h, w, channels, oy, 0, out_row);
+                const Float16Storage* ir0 = in_batch + static_cast<std::size_t>(oy - 1) * row_stride;
+                const Float16Storage* ir1 = ir0 + row_stride;
+                const Float16Storage* ir2 = ir1 + row_stride;
+                for (int ox = 1; ox + 1 < w; ++ox) {
+                    const std::size_t xoff = static_cast<std::size_t>(ox) * channels;
+                    dw3x3_interior_pixel(
+                        bias, weights, pad_c,
+                        ir0 + xoff, ir1 + xoff, ir2 + xoff,
+                        out_row + xoff, channels);
                 }
-
-                int c = 0;
-                for (; c + 8 <= channels; c += 8) {
-                    const float32x4x2_t b = neon_f16x8_to_f32x8(vld1q_u16(bias + c));
-                    float32x4_t acc0 = b.val[0];
-                    float32x4_t acc1 = b.val[1];
-                    for (int idx = 0; idx < kcount; ++idx) {
-                        const float32x4x2_t iv = neon_f16x8_to_f32x8(vld1q_u16(neighbors[idx] + c));
-                        const float32x4x2_t wv = neon_f16x8_to_f32x8(vld1q_u16(wrows[idx] + c));
-                        acc0 = vfmaq_f32(acc0, iv.val[0], wv.val[0]);
-                        acc1 = vfmaq_f32(acc1, iv.val[1], wv.val[1]);
-                    }
-                    vst1q_u16(out_px + c, neon_f32x8_to_u16x8(acc0, acc1));
-                }
-                for (; c < channels; ++c) {
-                    float acc = half_to_float(bias[c]);
-                    for (int idx = 0; idx < kcount; ++idx)
-                        acc += half_to_float(neighbors[idx][c]) * half_to_float(wrows[idx][c]);
-                    out_px[c] = float_to_half(acc);
+                dw3x3_border_pixel(
+                    bias, weights, pad_c, in_batch, h, w, channels,
+                    oy, w - 1, out_row + static_cast<std::size_t>(w - 1) * channels);
+            } else {
+                for (int ox = 0; ox < w; ++ox) {
+                    dw3x3_border_pixel(
+                        bias, weights, pad_c, in_batch, h, w, channels,
+                        oy, ox, out_row + static_cast<std::size_t>(ox) * channels);
                 }
             }
         }
@@ -321,7 +413,7 @@ void arm64_nhwc_to_nchw(const Float16Storage* nhwc, Float16Storage* nchw,
 }  // namespace
 
 void arm64_run_asm_gemm_block(
-    Arm64AsmGemmFn gemm_fn, bool use_fp16_reglu,
+    Arm64AsmGemmFn gemm_fn, bool use_fp16_reglu, bool supports_fused_reglu,
     std::size_t m_rows, std::size_t n, std::size_t k,
     const Float16Storage* lhs_block, std::size_t lhs_stride,
     const Float16Storage* rhs_packed,
@@ -330,9 +422,13 @@ void arm64_run_asm_gemm_block(
     Float16Storage* scratch, std::size_t scratch_elems)
 {
     const bool is_reglu = (epilogue.kind == GemmEpilogueKind::kReglu);
+    const bool use_fused_reglu =
+        is_reglu && supports_fused_reglu &&
+        (epilogue.reglu_linear_rhs != nullptr || (n % 32U == 0U));
+
     std::vector<Float16Storage> local_reglu;
     Float16Storage* reglu_buf = nullptr;
-    if (is_reglu) {
+    if (is_reglu && !use_fused_reglu) {
         const std::size_t req = m_rows * n;
         if (scratch && scratch_elems >= req) {
             reglu_buf = scratch;
@@ -344,14 +440,29 @@ void arm64_run_asm_gemm_block(
 
     Arm64AsmGemmArgs args{};
     args.m_rows = m_rows;
-    args.n_cols = n;
+    if (use_fused_reglu) {
+        const std::size_t gate_cols =
+            epilogue.reglu_linear_rhs ? n : (n / 2U);
+        const Float16Storage* linear_rhs = epilogue.reglu_linear_rhs
+            ? epilogue.reglu_linear_rhs
+            : (rhs_packed + (gate_cols / 16U) * (16U + k * 16U));
+        args.n_cols = gate_cols;
+        args.dst = dst_block;
+        args.dst_stride = dst_stride * sizeof(Float16Storage);
+        args.epi_kind = 4U;
+        args.reglu_linear_offset =
+            static_cast<std::size_t>(linear_rhs - rhs_packed) * sizeof(Float16Storage);
+    } else {
+        args.n_cols = n;
+        args.dst = is_reglu ? reglu_buf : dst_block;
+        args.dst_stride = (is_reglu ? n : dst_stride) * sizeof(Float16Storage);
+        args.epi_kind = map_asm_epilogue_kind(epilogue);
+        args.reglu_linear_offset = 0U;
+    }
     args.k_dim = k;
     args.lhs = lhs_block;
     args.lhs_stride = lhs_stride * sizeof(Float16Storage);
     args.rhs = rhs_packed;
-    args.dst = is_reglu ? reglu_buf : dst_block;
-    args.dst_stride = (is_reglu ? n : dst_stride) * sizeof(Float16Storage);
-    args.epi_kind = map_asm_epilogue_kind(epilogue);
     args.res = (args.epi_kind == 3U)
         ? (epilogue.residual + row_offset * dst_stride)
         : nullptr;
@@ -361,7 +472,7 @@ void arm64_run_asm_gemm_block(
 
     gemm_fn(&args);
 
-    if (is_reglu) {
+    if (is_reglu && !use_fused_reglu) {
         if (use_fp16_reglu) {
             arm64_fp16_reglu_post(
                 reglu_buf, dst_block, m_rows, n, dst_stride,

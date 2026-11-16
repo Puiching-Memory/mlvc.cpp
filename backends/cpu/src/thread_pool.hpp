@@ -72,6 +72,8 @@ private:
     std::condition_variable done_cv_;
     std::atomic<std::uint64_t> generation_{0};
     std::atomic<TaskContext*> active_task_{nullptr};
+    std::atomic<std::size_t> sleeping_workers_{0};
+    std::atomic<bool> caller_waiting_{false};
     std::atomic<bool> shutdown_{false};
 };
 

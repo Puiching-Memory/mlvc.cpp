@@ -125,12 +125,14 @@ void CpuThreadPool::run_task_chunks(TaskContext* task)
 void CpuThreadPool::dispatch_task(TaskContext* task)
 {
     active_task_.store(task, std::memory_order_release);
-    generation_.fetch_add(1, std::memory_order_acq_rel);
-    // Always wake any parked workers while avoiding locks when workers are spinning.
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
+    generation_.fetch_add(1, std::memory_order_seq_cst);
+    // Skip mutex+condvar wakeup syscall when all workers are spinning in user space.
+    if (sleeping_workers_.load(std::memory_order_seq_cst) > 0) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+        }
+        worker_cv_.notify_all();
     }
-    worker_cv_.notify_all();
 
     // Caller thread participates as worker 0 to eliminate master/worker idle waste.
     run_task_chunks(task);
@@ -143,10 +145,14 @@ void CpuThreadPool::dispatch_task(TaskContext* task)
         cpu_relax();
     }
     if (task->remaining_workers.load(std::memory_order_acquire) != 0) {
-        std::unique_lock<std::mutex> lock(mutex_);
-        done_cv_.wait(lock, [&]() {
-            return task->remaining_workers.load(std::memory_order_acquire) == 0;
-        });
+        caller_waiting_.store(true, std::memory_order_seq_cst);
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            done_cv_.wait(lock, [&]() {
+                return task->remaining_workers.load(std::memory_order_acquire) == 0;
+            });
+        }
+        caller_waiting_.store(false, std::memory_order_release);
     }
 
     active_task_.store(nullptr, std::memory_order_release);
@@ -175,11 +181,15 @@ void CpuThreadPool::worker_loop(std::size_t /*worker_index*/)
         }
 
         if (!task && !shutdown_.load(std::memory_order_acquire)) {
-            std::unique_lock<std::mutex> lock(mutex_);
-            worker_cv_.wait(lock, [&]() {
-                return shutdown_.load(std::memory_order_acquire) ||
-                       generation_.load(std::memory_order_acquire) != seen_generation;
-            });
+            sleeping_workers_.fetch_add(1, std::memory_order_seq_cst);
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                worker_cv_.wait(lock, [&]() {
+                    return shutdown_.load(std::memory_order_acquire) ||
+                           generation_.load(std::memory_order_acquire) != seen_generation;
+                });
+            }
+            sleeping_workers_.fetch_sub(1, std::memory_order_release);
             if (shutdown_.load(std::memory_order_acquire))
                 return;
             seen_generation = generation_.load(std::memory_order_acquire);
@@ -193,7 +203,8 @@ void CpuThreadPool::worker_loop(std::size_t /*worker_index*/)
 
         run_task_chunks(task);
 
-        if (task->remaining_workers.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        if (task->remaining_workers.fetch_sub(1, std::memory_order_seq_cst) == 1 &&
+            caller_waiting_.load(std::memory_order_seq_cst)) {
             std::lock_guard<std::mutex> lock(mutex_);
             done_cv_.notify_one();
         }

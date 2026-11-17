@@ -9,9 +9,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
-import model_package as package
-from model_wire import pb, write_message, read_message, GRAPH_SCHEMA
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools" / "python"))
+from mlvc_tools import package
+from mlvc_tools.wire import pb, write_message, read_message, GRAPH_SCHEMA
 
 
 class PackageTests(unittest.TestCase):

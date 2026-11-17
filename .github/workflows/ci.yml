@@ -55,7 +55,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y ca-certificates clang curl python3-venv
           python3 -m venv build/proto-tools
-          build/proto-tools/bin/pip install protobuf==6.33.5
+          build/proto-tools/bin/pip install -r tools/python/requirements-proto.txt
           echo "$PWD/build/proto-tools/bin" >> "$GITHUB_PATH"
           curl --fail --location --retry 3 --output /tmp/cuda-keyring.deb \
             https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb
@@ -71,7 +71,7 @@ jobs:
 
       - name: Build, test, and create CI package
         run: |
-          ./tools/package.sh --jobs 2 \
+          ./tools/scripts/package.sh --jobs 2 \
             --build-root "build/ci-${{ matrix.compiler }}" \
             --output-dir "packages/${{ matrix.compiler }}" \
             --skip-gpu-tests --skip-models

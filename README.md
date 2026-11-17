@@ -26,9 +26,9 @@ library or public Protobuf header is needed by installed applications. Build-hos
 `protobuf==6.33.5`. Regenerate Python bindings after schema edits with the CMake
 target `mlvc_generate_python_proto`.
 
-The profile registry and diagnostic/benchmark reports remain human-readable JSON;
-the codec library does not link the JSON library. Binary model descriptions use
-AOT schema 3 and bundle schema 2. Previous JSON model bundles are unsupported.
+The profile registry remains human-readable JSON; no C++ target links a JSON
+library. Binary model descriptions use AOT schema 3 and bundle schema 2.
+Previous JSON model bundles are unsupported.
 
 ## Requirements
 
@@ -36,7 +36,6 @@ AOT schema 3 and bundle schema 2. Previous JSON model bundles are unsupported.
 - CUDA Toolkit 13.3 on the build host.
 - Pinned source submodules: Microsoft MLVC (`msrtc_rans` and model source),
   NVIDIA CUTLASS, Protobuf v33.5, and Abseil 20250512.1.
-  nlohmann/json is used only by the standalone benchmark tool.
 - Original registered `mlvc-psnr-v1.ckpt` and `mlvc-s-psnr-v1.ckpt` checkpoints.
 - An NVIDIA driver compatible with the generated GPU code on the deployment host.
 
@@ -47,12 +46,13 @@ convolution accumulation; int32 is used for model control inputs.
 ## Prepare source and models
 
 ```bash
-./tools/bootstrap.sh
+./tools/scripts/bootstrap.sh
 # On Ubuntu 26.04, optionally install the pinned build toolkit:
-./tools/bootstrap.sh --with-cuda
+./tools/scripts/bootstrap.sh --with-cuda
 
 uv venv --python 3.12 build/model-venv
-uv pip install --python build/model-venv/bin/python -r tools/requirements-models.txt
+uv pip install --python build/model-venv/bin/python -r tools/python/requirements-models.txt
+uv pip install --python build/model-venv/bin/python -e ./tools/python
 uv pip install --python build/model-venv/bin/python ./third_party/mlvc/packages/msrtc_rans
 source build/model-venv/bin/activate
 ```
@@ -65,17 +65,17 @@ lifetimes, and writes aligned weights. Unsupported live operations fail explicit
 Only model preparation uses PyTorch; no framework model file is loaded at runtime.
 
 ```bash
-build/model-venv/bin/python tools/model_aot.py \
+build/model-venv/bin/python -m mlvc_tools.aot \
   --profile mlvc-psnr-v1 --checkpoint /path/to/mlvc-psnr-v1.ckpt \
   --model-width 640 --model-height 368 \
   --output-dir models/generated/checkpoint/mlvc-psnr-v1/640x368
 
-build/model-venv/bin/python tools/model_package.py assemble \
+build/model-venv/bin/python -m mlvc_tools.package assemble \
   --profile mlvc-psnr-v1 \
   --source-dir models/generated/checkpoint/mlvc-psnr-v1/640x368 \
   --output-dir models/canonical/mlvc-psnr-v1/640x368
 
-build/model-venv/bin/python tools/model_package.py verify \
+build/model-venv/bin/python -m mlvc_tools.package verify \
   --model-dir models/canonical/mlvc-psnr-v1/640x368
 ```
 
@@ -96,18 +96,18 @@ cmake --preset driver-cubin-release
 cmake --build --preset driver-cubin-release -j
 ctest --preset driver-cubin-release
 
-./tools/package.sh --jobs 8
+./tools/scripts/package.sh --jobs 8
 ```
 
 The release is `packages/mlvc_cpp-<version>-driver-cubin-nvidia-linux-x86_64.tar.gz`.
-It contains the codec library, CLI, benchmark, driver probe, C header, CMake
+It contains the codec library, CLI, driver probe, C header, CMake
 package, licenses, `BUILD-MANIFEST.txt`, and `SHA256SUMS`. Models are embedded
 in the library. The driver and system C/C++ runtime libraries are not bundled.
 
 For driverless CI compilation without model assets:
 
 ```bash
-./tools/package.sh --jobs 2 --skip-gpu-tests --skip-models
+./tools/scripts/package.sh --jobs 2 --skip-gpu-tests --skip-models
 ```
 
 These archives have a `-ci` suffix and are compile-only artifacts. CI builds
@@ -179,7 +179,7 @@ Only the C header is installed; core, runtime, CUDA, CUTLASS, and AOT headers
 remain private. Errors return `-1` and a diagnostic instead of crossing the ABI
 as C++ exceptions. See [the Chinese integration guide](docs/integration-guide-zh.md).
 
-## Verification and benchmarks
+## Verification
 
 Run the host compiler checks in the model environment:
 
@@ -197,7 +197,7 @@ Generate official-Python reference fixtures directly from each checkpoint,
 using the corresponding canonical bundle to identify the codec contract:
 
 ```bash
-build/model-venv/bin/python tools/model_reference.py \
+build/model-venv/bin/python -m mlvc_tools.reference \
   --model-dir models/canonical/mlvc-psnr-v1/640x368 \
   --checkpoint /path/to/mlvc-psnr-v1.ckpt \
   --input input.yuv --width 640 --height 360 --frames 2 --q-index 21 \
@@ -216,12 +216,6 @@ for diagnosis. The required gate exercises two I/P frames; it does not establish
 long-sequence, arbitrary-content, or rate-distortion acceptance. See the
 [compatibility contract](docs/codec-compatibility.md).
 
-`model_aot.py` also writes `benchmark-MLVC*.npz` snapshots. Prepare a benchmark
-with `tools/benchmark.py make-case`, run `mlvc_backend_bench --model-dir
-embedded:<profile> --case <case.json>`, and compare results using
-`tools/benchmark.py compare`. Model host-roundtrip timing and full codec timing
-measure different workloads and must be reported separately.
-
 ## Source map
 
 ```text
@@ -230,14 +224,10 @@ codec/                      C API implementation and frame pipeline
 core/                       Model metadata, tensors, YUV, PMF/rANS, containers
 runtime/                    Graph execution and buffered codec contracts
 backends/driver_cubin/      AOT loader, planner, Driver API, CUDA kernels
-tools/model_source.py       Official checkpoint loading and split-model inputs
-tools/model_aot.py          Direct checkpoint-to-AOT compiler
-tools/model_package.py      Canonical bundle verification and embedding
-tools/model_wire.py         Typed Protobuf adapters for offline tooling
-proto/mlvc_model.proto      Model, PMF, graph, bundle, and debug schemas
-tools/model_reference.py    Official eager-Python reference generation
 tools/cli/                  Encode/decode command-line entry point
-tools/benchmark/            FP16 graph latency and tensor parity measurement
+tools/scripts/              Bootstrap, dependency pins, and release packaging
+tools/python/mlvc_tools/    Offline AOT compiler, Protobuf bundler, and references
+proto/mlvc_model.proto      Model, PMF, graph, bundle, and debug schemas
 tests/                      Host safety, C API, AOT, and codec conformance tests
 models/profiles/            Registered checkpoint identities and model parameters
 models/canonical/           Generated, ignored canonical model bundles

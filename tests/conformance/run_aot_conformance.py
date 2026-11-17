@@ -13,10 +13,10 @@ from pathlib import Path
 import torch
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "tools" / "python"))
 sys.path.insert(0, str(ROOT / "tests/unit"))
-from model_wire import read_metadata
-from model_source import example_inputs, load_model, load_profiles
+from mlvc_tools.wire import read_metadata
+from mlvc_tools.source import example_inputs, load_model, load_profiles
 from aot_tests import execute_graph
 
 

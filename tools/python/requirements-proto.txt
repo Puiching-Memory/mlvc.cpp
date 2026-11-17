@@ -1,0 +1,2 @@
+# Minimal build-host and conformance runner dependency (no PyTorch required).
+protobuf==6.33.5

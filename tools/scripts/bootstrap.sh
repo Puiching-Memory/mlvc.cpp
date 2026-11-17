@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # Initialize source submodules and optionally install the CUDA build toolkit.
-# Usage: ./tools/bootstrap.sh [--with-cuda]
-#                             [--no-proxy]
+# Usage: ./tools/scripts/bootstrap.sh [--with-cuda]
+#                                     [--no-proxy]
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=tools/dependencies.env
-source "$ROOT/tools/dependencies.env"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=tools/scripts/dependencies.env
+source "$ROOT/tools/scripts/dependencies.env"
 
 WITH_CUDA=0
 NO_PROXY=0

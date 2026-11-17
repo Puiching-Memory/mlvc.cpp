@@ -3,7 +3,7 @@
 # Use --skip-gpu-tests --skip-models only for compile-only CI smoke packages;
 # those packages are not deployable releases.
 #
-# Usage: ./tools/package.sh [--build-root DIR] [--output-dir DIR] [--model-root DIR]
+# Usage: ./tools/scripts/package.sh [--build-root DIR] [--output-dir DIR] [--model-root DIR]
 #          [--jobs N] [--no-tar] [--skip-gpu-tests] [--skip-models]
 set -euo pipefail
 
@@ -41,9 +41,9 @@ if [[ "$SKIP_MODELS" -eq 1 ]]; then
     }
 fi
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=tools/dependencies.env
-source "$ROOT/tools/dependencies.env"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# shellcheck source=tools/scripts/dependencies.env
+source "$ROOT/tools/scripts/dependencies.env"
 [[ "$BUILD_ROOT" = /* ]] || BUILD_ROOT="$ROOT/$BUILD_ROOT"
 [[ "$OUTPUT_DIR" = /* ]] || OUTPUT_DIR="$ROOT/$OUTPUT_DIR"
 [[ "$MODEL_ROOT" = /* ]] || MODEL_ROOT="$ROOT/$MODEL_ROOT"
@@ -73,9 +73,8 @@ if [[ "$SKIP_GPU_TESTS" -eq 0 ]]; then
         exit 1
     }
 fi
-[[ -f "$ROOT/third_party/mlvc/packages/msrtc_rans/CMakeLists.txt" &&
-   -f "$ROOT/third_party/nlohmann_json/CMakeLists.txt" ]] || {
-    echo "error: source submodules are missing; run tools/bootstrap.sh" >&2
+[[ -f "$ROOT/third_party/mlvc/packages/msrtc_rans/CMakeLists.txt" ]] || {
+    echo "error: source submodules are missing; run tools/scripts/bootstrap.sh" >&2
     exit 1
 }
 
@@ -203,7 +202,6 @@ package_driver_cubin() {
     cmake --install "$build_dir" --config "$BUILD_TYPE" --prefix "$prefix"
 
     local demo="$prefix/bin/mlvc_demo"
-    local benchmark="$prefix/bin/mlvc_backend_bench"
     local probe="$prefix/bin/mlvc_driver_probe"
     local codec_library
     codec_library="$(find "$prefix/lib" -maxdepth 1 -type f \
@@ -213,7 +211,7 @@ package_driver_cubin() {
         return 1
     }
     local binary
-    for binary in "$demo" "$benchmark" "$probe"; do
+    for binary in "$demo" "$probe"; do
         [[ -x "$binary" ]] || {
             echo "error: packaged driver-cubin binary is missing: $binary" >&2
             return 1
@@ -223,17 +221,13 @@ package_driver_cubin() {
         echo "error: packaged driver-cubin library is missing: $codec_library" >&2
         return 1
     }
-    for binary in "$demo" "$benchmark" "$probe" "$codec_library"; do
+    for binary in "$demo" "$probe" "$codec_library"; do
         audit_driver_linkage "$binary"
     done
     local bundled_models="none"
     if [[ "$SKIP_GPU_TESTS" -eq 0 ]]; then
         [[ "$("$demo" --backend-name)" == "$backend" ]] || {
             echo "error: packaged codec is not the $backend variant" >&2
-            return 1
-        }
-        [[ "$("$benchmark" --backend-name)" == "$backend" ]] || {
-            echo "error: packaged benchmark is not the $backend variant" >&2
             return 1
         }
         bundled_models="$("$demo" --list-model-profiles |

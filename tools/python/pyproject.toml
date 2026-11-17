@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mlvc-tools"
+version = "0.1.0"
+description = "Offline model compilation, Protobuf packaging, and reference tools for mlvc.cpp"
+requires-python = ">=3.10"
+dependencies = [
+    "protobuf==6.33.5",
+]
+
+[project.optional-dependencies]
+aot = [
+    "torch==2.10.0",
+    "numpy",
+    "pyyaml",
+    "dataclasses-json",
+]
+models = [
+    "torch==2.10.0",
+    "numpy",
+    "scipy",
+    "pandas",
+    "pillow",
+    "tqdm",
+    "tabulate",
+    "pyyaml",
+    "dataclasses-json",
+    "python-dotenv",
+    "azure-identity",
+    "azure-storage-blob",
+    "azure-ai-ml",
+]
+
+[project.scripts]
+mlvc-aot = "mlvc_tools.aot:main"
+mlvc-package = "mlvc_tools.package:main"
+mlvc-reference = "mlvc_tools.reference:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mlvc_tools*"]

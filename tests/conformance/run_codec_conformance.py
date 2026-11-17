@@ -15,8 +15,8 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
-sys.path.insert(0, str(ROOT / "tools"))
-from model_wire import read_bundle
+sys.path.insert(0, str(ROOT / "tools" / "python"))
+from mlvc_tools.wire import read_bundle
 
 
 def sha256(path: Path) -> str:

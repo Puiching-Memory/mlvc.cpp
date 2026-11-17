@@ -7,7 +7,7 @@ reports. Model assets on disk are exclusively Protobuf and aligned weight blobs.
 from pathlib import Path
 
 from google.protobuf.message import DecodeError
-from mlvc_proto import mlvc_model_pb2 as pb
+from .proto import mlvc_model_pb2 as pb
 
 GRAPH_SCHEMA = 3
 BUNDLE_SCHEMA = 2

@@ -112,7 +112,8 @@ endif()
 add_custom_target(mlvc_generate_python_proto
     COMMAND "${_mlvc_protoc_command}"
         "--proto_path=${PROJECT_SOURCE_DIR}/proto"
-        "--python_out=${PROJECT_SOURCE_DIR}/tools/mlvc_proto" "${MLVC_PROTO_SCHEMA}"
+        "--python_out=${PROJECT_SOURCE_DIR}/tools/python/mlvc_tools/proto"
+        "${MLVC_PROTO_SCHEMA}"
     DEPENDS ${_mlvc_protoc_depends} "${MLVC_PROTO_SCHEMA}"
     VERBATIM)
 install(FILES "${PROJECT_SOURCE_DIR}/third_party/protobuf/LICENSE"

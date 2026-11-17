@@ -2,30 +2,17 @@
 
 import hashlib
 import json
-import sys
-from importlib.machinery import ModuleSpec
-from types import ModuleType
 from dataclasses import replace
-from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "third_party/mlvc/video"))
-
-# Upstream's convenience __init__ imports every exporter and model bundler.
-# Load its source package namespace directly so checkpoint tooling imports only
-# the model/codec modules it actually uses, without optional export dependencies.
-if "conversion" not in sys.modules:
-    package = ModuleType("conversion")
-    package.__path__ = [str(ROOT / "third_party/mlvc/video/conversion")]
-    package.__spec__ = ModuleSpec("conversion", loader=None, is_package=True)
-    sys.modules["conversion"] = package
+from .upstream import REPO_ROOT, ensure_upstream_conversion
 
 
 def load_profiles():
-    return json.loads((ROOT / "models/profiles/profiles.json").read_text())["profiles"]
+    return json.loads((REPO_ROOT / "models/profiles/profiles.json").read_text())["profiles"]
 
 
 def load_model(profile_name, checkpoint, width, height):
+    ensure_upstream_conversion()
     from conversion._full_model import _model_factory
     from conversion._split_model import split_full_model
     from conversion.types import ModelPrecision

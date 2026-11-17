@@ -14,14 +14,22 @@ from pathlib import Path
 from typing import Any
 
 
-ROOT = Path(__file__).resolve().parents[1]
-VIDEO_ROOT = ROOT / "third_party" / "mlvc" / "video"
-sys.path.insert(0, str(VIDEO_ROOT))
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np  # noqa: E402
 
-from model_wire import pb, read_message, read_metadata, read_bundle, pmf_to_dict
-from model_source import load_model  # noqa: E402
+from mlvc_tools.source import load_model  # noqa: E402
+from mlvc_tools.upstream import ensure_upstream_conversion  # noqa: E402
+from mlvc_tools.wire import (  # noqa: E402
+    pb,
+    pmf_to_dict,
+    read_bundle,
+    read_message,
+    read_metadata,
+)
+
+ensure_upstream_conversion()
 from conversion._frame_loop import FrameLoop  # noqa: E402
 from conversion.utils import read_video_frames  # noqa: E402
 

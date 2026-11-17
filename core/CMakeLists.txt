@@ -53,7 +53,7 @@ if(MLVC_EMBED_MODELS)
             "${MLVC_EMBEDDED_MODELS_BINARY}"
             "${MLVC_EMBEDDED_MODELS_INDEX}"
         COMMAND "${Python3_EXECUTABLE}"
-            "${PROJECT_SOURCE_DIR}/tools/model_package.py" embed
+            "${PROJECT_SOURCE_DIR}/tools/python/mlvc_tools/package.py" embed
             --model-root "${MLVC_MODEL_ROOT}"
             --output-data "${MLVC_EMBEDDED_MODELS_BINARY}"
             --output-index "${MLVC_EMBEDDED_MODELS_INDEX}"
@@ -61,9 +61,10 @@ if(MLVC_EMBED_MODELS)
         DEPENDS
             ${MLVC_MODEL_MANIFESTS}
             "${MLVC_PROFILE_FILE}"
-            "${PROJECT_SOURCE_DIR}/tools/model_package.py"
-            "${PROJECT_SOURCE_DIR}/tools/model_wire.py"
-            "${PROJECT_SOURCE_DIR}/tools/mlvc_proto/mlvc_model_pb2.py"
+            "${PROJECT_SOURCE_DIR}/tools/python/mlvc_tools/__init__.py"
+            "${PROJECT_SOURCE_DIR}/tools/python/mlvc_tools/package.py"
+            "${PROJECT_SOURCE_DIR}/tools/python/mlvc_tools/wire.py"
+            "${PROJECT_SOURCE_DIR}/tools/python/mlvc_tools/proto/mlvc_model_pb2.py"
         DEPFILE "${MLVC_EMBEDDED_MODELS_DEPFILE}"
         COMMENT "Embedding validated driver-cubin model bundles"
         VERBATIM)

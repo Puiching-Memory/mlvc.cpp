@@ -3,11 +3,9 @@
 # they do not perform global dependency discovery themselves.
 
 set(MLVC_UPSTREAM_DIR "${PROJECT_SOURCE_DIR}/third_party/mlvc")
-set(NLOHMANN_JSON_DIR "${PROJECT_SOURCE_DIR}/third_party/nlohmann_json")
 set(MLVC_PROFILE_FILE "${PROJECT_SOURCE_DIR}/models/profiles/profiles.json")
 
-if(NOT EXISTS "${MLVC_UPSTREAM_DIR}/packages/msrtc_rans/CMakeLists.txt" OR
-   NOT EXISTS "${NLOHMANN_JSON_DIR}/CMakeLists.txt")
+if(NOT EXISTS "${MLVC_UPSTREAM_DIR}/packages/msrtc_rans/CMakeLists.txt")
     message(FATAL_ERROR
         "Source submodules are missing. Run: "
         "git submodule update --init --recursive --depth 1")
@@ -24,12 +22,6 @@ add_subdirectory("${MLVC_UPSTREAM_DIR}/packages/msrtc_rans"
                  "${PROJECT_BINARY_DIR}/_deps/msrtc_rans" EXCLUDE_FROM_ALL)
 
 include("${PROJECT_SOURCE_DIR}/cmake/ModelProto.cmake")
-
-# JSON is used only by the standalone benchmark tool.
-set(JSON_BuildTests OFF CACHE INTERNAL "Disable nlohmann/json tests")
-set(JSON_Install OFF CACHE INTERNAL "Do not install nlohmann/json")
-add_subdirectory("${NLOHMANN_JSON_DIR}"
-                 "${PROJECT_BINARY_DIR}/_deps/nlohmann_json" EXCLUDE_FROM_ALL)
 
 if(MLVC_BACKEND MATCHES "^(driver_cubin|all)$")
     set(MLVC_CUTLASS_DIR "${PROJECT_SOURCE_DIR}/third_party/cutlass")

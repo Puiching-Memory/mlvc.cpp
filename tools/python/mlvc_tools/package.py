@@ -12,15 +12,27 @@ import hashlib
 import json
 import os
 import shutil
+import sys
 import tempfile
 from pathlib import Path
 from typing import Any
 
-from model_wire import (pb, GRAPH_SCHEMA, BUNDLE_SCHEMA, read_message, write_message,
-                        metadata_to_dict, bundle_to_dict, graph_to_dict)
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from mlvc_tools.wire import (
+    pb,
+    GRAPH_SCHEMA,
+    BUNDLE_SCHEMA,
+    read_message,
+    write_message,
+    metadata_to_dict,
+    bundle_to_dict,
+    graph_to_dict,
+)
 
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[3]
 PROFILE_PATH = ROOT / "models" / "profiles" / "profiles.json"
 COMMON_ARTIFACTS = (
     "metadata.pb",

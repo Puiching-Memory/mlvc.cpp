@@ -10,16 +10,28 @@ from __future__ import annotations
 import argparse
 import hashlib
 import math
+import sys
 import weakref
 from collections import Counter, defaultdict
 from dataclasses import asdict
 from pathlib import Path
 
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 import numpy as np
 import torch
 from torch.utils._python_dispatch import TorchDispatchMode
 from torch.utils._pytree import tree_flatten, tree_map
-from model_wire import pb, GRAPH_SCHEMA, graph_from_dict, metadata_from_dict, pmf_from_dict, write_message
+
+from mlvc_tools.wire import (
+    pb,
+    GRAPH_SCHEMA,
+    graph_from_dict,
+    metadata_from_dict,
+    pmf_from_dict,
+    write_message,
+)
 
 ALIGNMENT = 256
 DTYPES = {torch.float16: "fp16", torch.int32: "int32", torch.int64: "int64"}
@@ -267,7 +279,7 @@ def compile_module(model, inputs, destination, source_hash):
 
 
 def main():
-    from model_source import example_inputs, load_model
+    from mlvc_tools.source import example_inputs, load_model
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", required=True)
@@ -290,10 +302,7 @@ def main():
     summaries = []
     for part, wrapper in split.model_parts.items():
         inputs = example_inputs(part.value, full.model_params, args.model_width, args.model_height)
-        graph, result = compile_module(wrapper.torch_model, inputs, args.output_dir / "aot" / part.value, source_hash)
-        snapshot = {f"{part.value}_input_{n}": t.numpy() for n, t in zip(wrapper.metadata.input_fields, inputs, strict=True)}
-        snapshot.update({f"{part.value}_output_{n}": t.numpy() for n, t in zip(wrapper.metadata.output_fields, result, strict=True)})
-        np.savez(args.output_dir / f"benchmark-{part.value}.npz", **snapshot)
+        graph, _ = compile_module(wrapper.torch_model, inputs, args.output_dir / "aot" / part.value, source_hash)
         summaries.append(dict(part=part.value, nodes=len(graph["nodes"]), weights_bytes=graph["weights_bytes"], arena_bytes=graph["arena_bytes"]))
         print(summaries[-1])
     summary = pb.AotManifest(schema_version=1, checkpoint_sha256=bytes.fromhex(source_hash))

@@ -12,9 +12,9 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools"))
-from model_aot import compile_module
-from model_wire import pb, read_message, graph_to_dict
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools" / "python"))
+from mlvc_tools.aot import compile_module
+from mlvc_tools.wire import pb, read_message, graph_to_dict
 
 
 @torch.inference_mode()

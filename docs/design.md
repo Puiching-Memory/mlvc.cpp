@@ -20,11 +20,12 @@ Lite and Abseil are linked privately and statically.
 
 
 The original registered checkpoint and official model code are the only model
-inputs. `tools/model_source.py` validates the checkpoint SHA-256, constructs the
-official split model, and obtains canonical PMF tables from FP32 parameters.
-`tools/model_aot.py` then captures fixed-shape eager FP16 operations directly
-through PyTorch dispatch. Constant-only work is folded offline; unreachable
-branches are pruned before lowering. Unsupported live operators fail explicitly.
+inputs. `tools/python/mlvc_tools/source.py` validates the checkpoint SHA-256,
+constructs the official split model, and obtains canonical PMF tables from FP32
+parameters. `tools/python/mlvc_tools/aot.py` then captures fixed-shape eager
+FP16 operations directly through PyTorch dispatch. Constant-only work is folded
+offline; unreachable branches are pruned before lowering. Unsupported live
+operators fail explicitly.
 
 The generated source directory contains:
 
@@ -36,12 +37,11 @@ The generated source directory contains:
 | `aot/manifest.pb`                        | Checkpoint provenance and graph summary                               |
 | `aot/MLVCEncoder/{graph.pb,weights.bin}` | Encoder schedule and weights                                          |
 | `aot/MLVCDecoder/{graph.pb,weights.bin}` | Decoder schedule and weights                                          |
-| `benchmark-MLVC*.npz`                      | Captured eager inputs and outputs for model benchmarks                |
 
-`tools/model_package.py assemble` creates a canonical bundle with hashes for
-exactly the eight metadata/PMF/AOT artifacts. Embedding validates both registered
-profiles and writes the read-only model image. Benchmark snapshots remain outside
-the deployment bundle. Both metadata and PMFs come from the same checkpoint.
+`tools/python/mlvc_tools/package.py assemble` creates a canonical bundle with
+hashes for exactly the eight metadata/PMF/AOT artifacts. Embedding validates both
+registered profiles and writes the read-only model image. Both metadata and PMFs
+come from the same checkpoint.
 
 AOT graph schema 3 uses native channel-first pixel shuffle/unshuffle (CRD).
 Weights retain the original PyTorch channel order. Older AOT graphs are rejected;
@@ -219,8 +219,6 @@ are written below the build tree.
 - [x] Streamable stdin/stdout and named-FIFO frame loop with per-frame flush
 - [x] `libmlvc_codec.so` C ABI (`mlvc_encode` / `mlvc_decode`) and CMake export
 - [x] Canonical model packages for MLVC and MLVC-S
-- [x] FP16 backend microbenchmark: same captured inputs, latency distribution,
-      Python-reference tensor error metrics
 - [x] Driver+cubin full Encoder/Decoder graph execution with static arena
 - [x] Codec parity tests: official I/P-frame bitstream decode, backend roundtrip,
       reconstruction, QP schedule, and DPB tensors for both profiles

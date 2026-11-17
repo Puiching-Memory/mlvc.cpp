@@ -415,7 +415,7 @@ std::vector<std::byte> EntropyCodec::encode(
 }
 
 EntropyCodec::DecodedLatents EntropyCodec::decode(
-    const std::vector<std::byte>& payload, int q_index) const
+    std::span<const std::byte> payload, int q_index) const
 {
     Tensor z{"z_raw",
         {1, impl_->config.hyperprior_channels,
@@ -439,7 +439,7 @@ EntropyCodec::DecodedLatents EntropyCodec::decode(
 }
 
 void EntropyCodec::decode_into(
-    const std::vector<std::byte>& payload, int q_index,
+    std::span<const std::byte> payload, int q_index,
     MutableTensorView z_raw, MutableTensorView y_raw_0,
     MutableTensorView y_raw_1) const
 {

@@ -16,6 +16,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "tools" / "python"))
+from mlvc_tools.bitstream import FrameData, decode_bitstream_frames
 from mlvc_tools.wire import read_bundle
 
 
@@ -58,6 +59,7 @@ def run_codec(
     input_path: Path,
     output_path: Path,
     debug_dir: Path | None = None,
+    include_dimensions: bool = True,
 ) -> None:
     manifest = json.loads(
         (args.reference_dir / "reference.json").read_text(encoding="utf-8")
@@ -71,10 +73,6 @@ def run_codec(
             str(input_path),
             "--output",
             str(output_path),
-            "--width",
-            str(manifest["width"]),
-            "--height",
-            str(manifest["height"]),
             "--frames",
             str(manifest["frames"]),
             "--model-dir",
@@ -85,6 +83,13 @@ def run_codec(
             ),
         ]
     )
+    if include_dimensions:
+        cmd.extend([
+            "--width",
+            str(manifest["width"]),
+            "--height",
+            str(manifest["height"]),
+        ])
     if args.backend:
         cmd.extend(["--backend", args.backend])
     if args.threads is not None:
@@ -96,20 +101,13 @@ def run_codec(
     subprocess.run(cmd, check=True)
 
 
-def read_frames(path: Path) -> list[tuple[int, bytes]]:
-    data = path.read_bytes()
-    position = 0
-    frames = []
-    while position < len(data):
-        if position + 8 > len(data):
-            raise AssertionError(f"truncated bitstream header: {path}")
-        q_index, size = struct.unpack_from("<iI", data, position)
-        position += 8
-        payload = data[position : position + size]
-        if len(payload) != size:
-            raise AssertionError(f"truncated bitstream payload: {path}")
-        frames.append((q_index, payload))
-        position += size
+def read_frames(path: Path) -> list[tuple[FrameData, bytes]]:
+    frames = [
+        (frame_data, access_unit)
+        for access_unit, frame_data in decode_bitstream_frames(path.read_bytes())
+    ]
+    if not frames:
+        raise AssertionError(f"bitstream contains no access units: {path}")
     return frames
 
 
@@ -286,6 +284,8 @@ def main() -> None:
         raise AssertionError("model metadata does not match codec reference")
     if sha256(args.reference_dir / manifest["input"]["path"]) != manifest["input"]["sha256"]:
         raise AssertionError("reference input hash mismatch")
+    if manifest["bitstream"].get("container") != "mlvc-nalu-v0":
+        raise AssertionError("reference manifest must use mlvc-nalu-v0 bitstream container")
     if sha256(args.reference_dir / manifest["bitstream"]["path"]) != manifest["bitstream"]["sha256"]:
         raise AssertionError("reference bitstream hash mismatch")
     if sha256(args.reference_dir / manifest["reconstruction"]["path"]) != manifest["reconstruction"]["sha256"]:
@@ -311,26 +311,41 @@ def main() -> None:
             raise AssertionError("reference or backend encoder produced the wrong frame count")
         exact_frames = set(manifest["contract"]["exact_encoder_frames"])
         bitstream_comparison = []
-        for index, ((expected_q, expected), (actual_q, actual)) in enumerate(
+        for index, ((expected_data, expected_au), (actual_data, actual_au)) in enumerate(
             zip(expected_frames, actual_frames)
         ):
-            q_match = expected_q == actual_q
-            payload_match = expected == actual
+            q_match = expected_data.qp == actual_data.qp
+            geometry_match = (
+                actual_data.display_width == manifest["width"]
+                and actual_data.display_height == manifest["height"]
+                and expected_data.frame_type == actual_data.frame_type
+                and expected_data.cur_frame_idx == actual_data.cur_frame_idx
+            )
+            payload_match = expected_data.payload == actual_data.payload
+            au_match = expected_au == actual_au
             if not q_match and not args.diagnostic:
                 raise AssertionError(f"frame {index} q-index mismatch")
-            if index in exact_frames and not payload_match and not args.diagnostic:
-                raise AssertionError(f"frame {index} payload is not bit-exact")
+            if not geometry_match and not args.diagnostic:
+                raise AssertionError(f"frame {index} NALU metadata mismatch")
+            if index in exact_frames and not (payload_match and au_match) and not args.diagnostic:
+                raise AssertionError(f"frame {index} NALU access unit is not bit-exact")
             bitstream_comparison.append(
                 {
                     "frame": index,
                     "q_index_match": q_match,
-                    "expected_q_index": expected_q,
-                    "actual_q_index": actual_q,
-                    "expected_payload_bytes": len(expected),
-                    "actual_payload_bytes": len(actual),
+                    "geometry_match": geometry_match,
+                    "expected_q_index": expected_data.qp,
+                    "actual_q_index": actual_data.qp,
+                    "expected_frame_type": expected_data.frame_type.value,
+                    "actual_frame_type": actual_data.frame_type.value,
+                    "expected_access_unit_bytes": len(expected_au),
+                    "actual_access_unit_bytes": len(actual_au),
+                    "expected_payload_bytes": len(expected_data.payload),
+                    "actual_payload_bytes": len(actual_data.payload),
                     "payload_bit_exact": payload_match,
-                    "payload_sha256": hashlib.sha256(actual).hexdigest(),
-                    "expected_payload_sha256": hashlib.sha256(expected).hexdigest(),
+                    "access_unit_bit_exact": au_match,
+                    "payload_sha256": hashlib.sha256(actual_data.payload).hexdigest(),
+                    "expected_payload_sha256": hashlib.sha256(expected_data.payload).hexdigest(),
                     "required_bit_exact": index in exact_frames,
                 }
             )
@@ -345,7 +360,7 @@ def main() -> None:
             decode_debug,
         )
         roundtrip = work / "roundtrip.yuv"
-        run_codec(args, "decode", encoded, roundtrip)
+        run_codec(args, "decode", encoded, roundtrip, include_dimensions=False)
 
         frame_bytes = manifest["width"] * manifest["height"] * 3 // 2
         reference_decode_reconstruction = compare_yuv(
@@ -386,7 +401,7 @@ def main() -> None:
             "backend": subprocess.check_output(
                 [str(args.binary.resolve()), "--backend-name"], text=True
             ).strip(),
-            "encoded_frame_bytes": [len(payload) for _, payload in actual_frames],
+            "encoded_frame_bytes": [len(au) for _, au in actual_frames],
             "bit_exact_frames": sorted(exact_frames),
             "bitstream_comparison": bitstream_comparison,
             "reference_decode_reconstruction": reference_decode_reconstruction,
@@ -400,7 +415,11 @@ def main() -> None:
             + result["tensors"]
         ) and all(
             item["q_index_match"]
-            and (not item["required_bit_exact"] or item["payload_bit_exact"])
+            and item["geometry_match"]
+            and (
+                not item["required_bit_exact"]
+                or (item["payload_bit_exact"] and item["access_unit_bit_exact"])
+            )
             for item in bitstream_comparison
         )
         if args.result:

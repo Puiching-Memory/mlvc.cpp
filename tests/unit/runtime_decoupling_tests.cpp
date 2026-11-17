@@ -142,7 +142,7 @@ std::shared_ptr<InMemoryAssetReader> make_synthetic_bundle()
     bundle.set_height(64);
     bundle.set_checkpoint_sha256(checkpoint_sha);
     bundle.set_entropy_model_sha256(entropy_sha);
-    bundle.mutable_contract()->set_container("mlvc-frame-le-v1");
+    bundle.mutable_contract()->set_container("mlvc-nalu-v0");
     bundle.mutable_contract()->set_entropy("canonical-pmf-v1");
 
     // 4 scale levels, each accepting symbols in {-1, 0, 1}.
@@ -401,6 +401,12 @@ void test_sessions_without_disk_io()
     const EncodedFrame p0 = encoder.encode_frame(yuv420_view(f0));
     const EncodedFrame p1 = encoder.encode_frame(yuv420_view(f1));
     const EncodedFrame p2 = encoder.encode_frame(yuv420_view(f2), 2);
+    require(p0.frame_type == FrameType::kIFrame &&
+            p1.frame_type == FrameType::kPFrame &&
+            p2.frame_type == FrameType::kIFrame &&
+            !p0.bitstream.empty() && !p1.bitstream.empty() &&
+            !p2.bitstream.empty(),
+            "encoded frames must produce valid NALU access units");
     require(encoder.frame_index() == 3, "encoder frame_index must track encoded frames");
     require(enc_telemetry->encoder_runs == 3 && enc_telemetry->resets == 2,
             "GOP boundary should trigger backend reset_state() on I-frames");

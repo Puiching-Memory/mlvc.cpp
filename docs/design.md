@@ -128,13 +128,19 @@ Each frame is an independent rANS stream.
 
 ## 4. Bitstream container format
 
-Compatible with the official helpers (`save_mlvc_bitstreams` /
-`read_mlvc_bitstreams` in `video/conversion/utils.py`):
+Uses the MLVC v0.x NALU Annex-B container format (`mlvc-nalu-v0`) derived from
+[`microsoft/libmlvc`](https://github.com/microsoft/libmlvc) (MIT License; see
+`licenses/libmlvc/LICENSE`):
 
+```text
+access_unit := [SPS NALU] [PPS NALU] VCL_FRAME_NALU
+nalu        := 0x00 0x00 0x00 0x01 | ebsp_with_0x03_emulation_prevention
+rbsp_frame  := nalu_header(16b) | pps_id(ue) | qp_delta(se) | ltr_slots | [frame_idx/ref/reset] | byte_align | entropy_payload | stop_bit(1)
 ```
-frame  := header (8 bytes LE) + payload
-header := int32 q_index | uint32 payload_size
-```
+
+Every `IDR_N_LP` frame (`20`) is preceded by `SPS` (`33`) and `PPS` (`34`).
+Subsequent inter frames use `TRAIL_R` (`1`) or `TSA_R` (`3`). Coded QP is
+restricted to `[0, 51]`, and legacy `mlvc-frame-le-v1` containers are rejected.
 
 ## 5. Frame loop / DPB (GOP)
 
@@ -213,7 +219,7 @@ are written below the build tree.
 - [x] `core/src/entropy.cpp` — canonical PMF loading + rANS encode/decode
 - [x] `core/src/scales.cpp` — parameterized dual-prior scale extraction/masks
 - [x] `core/src/yuv.cpp` — YUV420 I/O, edge padding, crop, 420/444 conversion
-- [x] `core/src/bitstream.cpp` — official per-frame little-endian container
+- [x] `core/src/bitstream.cpp` — MLVC v0.x NALU Annex-B bitstream builder/parser derived from `microsoft/libmlvc` (MIT License; see `licenses/libmlvc/LICENSE`)
 - [x] `codec/src/pipeline.cpp` — encoder/decoder DPBs, GOP/QP schedule, frame loop
 - [x] `tools/cli/main.cpp` — `encode` and `decode` CLI
 - [x] Streamable stdin/stdout and named-FIFO frame loop with per-frame flush

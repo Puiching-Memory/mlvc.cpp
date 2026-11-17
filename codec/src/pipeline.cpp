@@ -56,6 +56,16 @@ BackendOptions make_backend_options(const SessionOptions& options,
     return result;
 }
 
+void validate_qp(int q_index, const ModelConfig& config, const char* source)
+{
+    if (q_index < kMinBitstreamQp || q_index > kMaxBitstreamQp) {
+        throw std::runtime_error(std::string(source) +
+                                 " must be in [0, 51] for MLVC NALU bitstream");
+    }
+    if (q_index >= config.qp_num)
+        throw std::runtime_error(std::string(source) + " is outside the model range");
+}
+
 void validate_dimensions(int width, int height, const ModelConfig& config,
                          FramePadding* padding_out = nullptr)
 {
@@ -67,15 +77,69 @@ void validate_dimensions(int width, int height, const ModelConfig& config,
         *padding_out = padding;
 }
 
-void validate_file_options(const CodecOptions& options, const ModelConfig& config,
-                           bool encoding)
+void validate_file_options(const CodecOptions& options, bool encoding)
 {
     if (options.input_path.empty() || options.output_path.empty())
         throw std::runtime_error("--input and --output are required");
     if (options.frames < 0)
         throw std::runtime_error("--frames must be non-negative");
-    if (encoding && (options.q_index < 0 || options.q_index >= config.qp_num))
-        throw std::runtime_error("--q-index is outside the model range");
+    if (encoding) {
+        if (options.width <= 0 || options.height <= 0 ||
+            options.width % 2 != 0 || options.height % 2 != 0) {
+            throw std::runtime_error("--width and --height must be positive even integers");
+        }
+    } else if ((options.width == 0) != (options.height == 0)) {
+        throw std::runtime_error(
+            "--width and --height must both be positive even integers or both zero");
+    }
+}
+
+FrameData make_frame_data(const ModelConfig& config, const FramePadding& padding,
+                          int q_index, int gop_frame_index, bool is_idr,
+                          std::span<const std::byte> entropy_payload)
+{
+    FrameData data{};
+    data.mlvc_version = {kSupportedMlvcMajorVersion, kDefaultMlvcMinorVersion};
+    data.model_width = config.model_width;
+    data.model_height = config.model_height;
+    data.crop_offsets = {padding.left, padding.right, padding.top, padding.bottom};
+    data.transpose_flag = padding.rotated;
+    data.frame_idx_bits = kDefaultFrameIdxBits;
+    data.temporal_id = 0;
+    data.max_temporal_layers = 1;
+    data.frame_type = is_idr ? FrameType::kIFrame : FrameType::kPFrame;
+    data.qp = q_index;
+    data.feature_reset_flag = false;
+    data.cur_frame_idx = is_idr ? 0 : gop_frame_index;
+    data.ref_frame_idx = is_idr ? 0 : gop_frame_index - 1;
+    data.payload = entropy_payload;
+    return data;
+}
+
+void validate_decoded_frame(const FrameData& frame_data,
+                            const ModelConfig& config,
+                            const FramePadding& padding,
+                            int expected_width, int expected_height)
+{
+    if (frame_data.model_width != config.model_width ||
+        frame_data.model_height != config.model_height) {
+        throw std::runtime_error(
+            "bitstream model dimensions do not match loaded model");
+    }
+    if (frame_data.display_width() != expected_width ||
+        frame_data.display_height() != expected_height) {
+        throw std::runtime_error(
+            "bitstream display dimensions do not match decoder configuration");
+    }
+    if (frame_data.transpose_flag != padding.rotated ||
+        frame_data.crop_offsets.left != padding.left ||
+        frame_data.crop_offsets.right != padding.right ||
+        frame_data.crop_offsets.top != padding.top ||
+        frame_data.crop_offsets.bottom != padding.bottom) {
+        throw std::runtime_error(
+            "bitstream crop or transpose settings do not match decoder padding");
+    }
+    validate_qp(frame_data.qp, config, "bitstream QP");
 }
 
 std::vector<Float16Storage> zero_reference(const ModelConfig& config)
@@ -261,12 +325,14 @@ CodecIoConfig make_codec_io_config(const CodecOptions& options,
 
 CodecStats encode_buffered(const CodecOptions& options,
                            const ModelConfig& config,
+                           const FramePadding& padding,
                            EntropyCodec& entropy,
                            InferenceBackend& backend,
                            BufferedCodecBackend& buffered,
                            std::istream& input, std::ostream& output,
                            bool stream_output)
 {
+    validate_qp(options.q_index, config, "--q-index");
     buffered.configure_codec_io(make_codec_io_config(options, config));
     const std::size_t slots = buffered.codec_slot_count();
     if (slots < 2)
@@ -274,6 +340,10 @@ CodecStats encode_buffered(const CodecOptions& options,
 
     const auto started = std::chrono::steady_clock::now();
     CodecStats stats;
+    BitstreamEncoder bitstream_encoder;
+    std::vector<int> slot_gop_frames(slots, 0);
+    std::vector<bool> slot_is_idr(slots, false);
+    int gop_frame_index = 0;
     int submitted = 0;
     auto consume = [&](std::size_t slot) {
         buffered.wait_codec_slot(slot);
@@ -290,17 +360,21 @@ CodecStats encode_buffered(const CodecOptions& options,
         validate_fp16_tensor(y0, y_shape, "y_raw_0");
         validate_fp16_tensor(y1, y_shape, "y_raw_1");
 
-        EncodedFrame encoded;
-        encoded.q_index = options.q_index;
-        encoded.payload = entropy.encode(y1, y0, z, options.q_index);
-        write_encoded_frame(output, encoded);
+        const std::vector<std::byte> entropy_payload =
+            entropy.encode(y1, y0, z, options.q_index);
+        const FrameData frame_data = make_frame_data(
+            config, padding, options.q_index, slot_gop_frames[slot],
+            slot_is_idr[slot], entropy_payload);
+        const std::span<const std::byte> access_unit =
+            bitstream_encoder.encode(frame_data);
+        write_access_unit(output, access_unit);
         if (stream_output)
             output.flush();
         if (!output)
             throw std::runtime_error("failed to flush output bitstream");
         ++stats.frames;
         stats.input_bytes += yuv420_frame_bytes(options.width, options.height);
-        stats.output_bytes += encoded.payload.size() + 8;
+        stats.output_bytes += access_unit.size();
     };
 
     while (options.frames == 0 || submitted < options.frames) {
@@ -311,13 +385,22 @@ CodecStats encode_buffered(const CodecOptions& options,
         if (!read_yuv420_frame(input, frame))
             break;
 
-        const int gop_frame = config.frame_in_gop(submitted);
-        if (gop_frame == 0)
+        const bool periodic_idr =
+            (submitted == 0) ||
+            (config.iframe_period && gop_frame_index >= *config.iframe_period) ||
+            (gop_frame_index >= (1 << kDefaultFrameIdxBits));
+        if (periodic_idr)
+            gop_frame_index = 0;
+        const bool is_idr = (gop_frame_index == 0);
+        if (is_idr)
             backend.reset_state();
-        const int shifted_q = options.q_index + config.q_index_shift(gop_frame);
+        const int shifted_q = options.q_index + config.q_index_shift(gop_frame_index);
         if (shifted_q < 0 || shifted_q >= config.total_qp_num)
             throw std::runtime_error("shifted q-index is outside the model range");
+        slot_gop_frames[slot] = gop_frame_index;
+        slot_is_idr[slot] = is_idr;
         buffered.submit_encoder(slot, shifted_q);
+        ++gop_frame_index;
         ++submitted;
     }
     while (stats.frames < submitted)
@@ -335,10 +418,13 @@ CodecStats encode_buffered(const CodecOptions& options,
 
 CodecStats decode_buffered(const CodecOptions& options,
                            const ModelConfig& config,
+                           const FramePadding& padding,
                            EntropyCodec& entropy,
                            InferenceBackend& backend,
                            BufferedCodecBackend& buffered,
-                           std::istream& input, std::ostream& output,
+                           AccessUnitReader& reader,
+                           std::optional<std::vector<std::byte>> initial_au,
+                           std::ostream& output,
                            bool stream_output)
 {
     buffered.configure_codec_io(make_codec_io_config(options, config));
@@ -348,6 +434,7 @@ CodecStats decode_buffered(const CodecOptions& options,
 
     const auto started = std::chrono::steady_clock::now();
     CodecStats stats;
+    BitstreamDecoder bitstream_decoder;
     int submitted = 0;
     auto consume = [&](std::size_t slot) {
         buffered.wait_codec_slot(slot);
@@ -360,17 +447,28 @@ CodecStats decode_buffered(const CodecOptions& options,
         stats.output_bytes += yuv420_frame_bytes(options.width, options.height);
     };
 
-    EncodedFrame encoded;
+    std::vector<std::byte> access_unit;
+    auto next_access_unit = [&]() -> bool {
+        if (initial_au.has_value()) {
+            access_unit = std::move(*initial_au);
+            initial_au.reset();
+            return true;
+        }
+        return reader.read(access_unit);
+    };
+
     while ((options.frames == 0 || submitted < options.frames) &&
-           read_encoded_frame(input, encoded)) {
+           next_access_unit()) {
         if (submitted - stats.frames == static_cast<int>(slots))
             consume(static_cast<std::size_t>(stats.frames) % slots);
-        if (encoded.q_index < 0 || encoded.q_index >= config.qp_num)
-            throw std::runtime_error("bitstream q-index is outside the model range");
-        const int gop_frame = config.frame_in_gop(submitted);
-        if (gop_frame == 0)
+
+        const FrameData frame_data = bitstream_decoder.decode(access_unit);
+        validate_decoded_frame(frame_data, config, padding,
+                               options.width, options.height);
+        if (frame_data.frame_type == FrameType::kIFrame)
             backend.reset_state();
-        const int shifted_q = encoded.q_index + config.q_index_shift(gop_frame);
+        const int shifted_q =
+            frame_data.qp + config.q_index_shift(frame_data.cur_frame_idx);
         if (shifted_q < 0 || shifted_q >= config.total_qp_num)
             throw std::runtime_error("shifted q-index is outside the model range");
 
@@ -380,9 +478,9 @@ CodecStats decode_buffered(const CodecOptions& options,
         MutableTensorView z = find_tensor_view(inputs, "z_raw");
         MutableTensorView y0 = find_tensor_view(inputs, "y_raw_0");
         MutableTensorView y1 = find_tensor_view(inputs, "y_raw_1");
-        entropy.decode_into(encoded.payload, encoded.q_index, z, y0, y1);
+        entropy.decode_into(frame_data.payload, frame_data.qp, z, y0, y1);
         buffered.submit_decoder(slot, shifted_q);
-        stats.input_bytes += encoded.payload.size() + 8;
+        stats.input_bytes += access_unit.size();
         ++submitted;
     }
     while (stats.frames < submitted)
@@ -417,9 +515,11 @@ struct EncoderSession::Impl {
     ModelConfig config;
     FramePadding padding;
     EntropyCodec entropy;
+    BitstreamEncoder bitstream_encoder;
     std::unique_ptr<InferenceBackend> backend;
     bool device_state = false;
     std::vector<Float16Storage> reference;
+    int gop_frame_index = 0;
     int frame_index = 0;
 
     explicit Impl(const SessionOptions& session_options)
@@ -441,7 +541,9 @@ struct EncoderSession::Impl {
 
     void reset()
     {
+        gop_frame_index = 0;
         frame_index = 0;
+        bitstream_encoder.reset();
         if (device_state)
             backend->reset_state();
         else
@@ -452,17 +554,22 @@ struct EncoderSession::Impl {
     {
         if (frame.width() != options.width || frame.height() != options.height)
             throw std::runtime_error("input YUV frame dimensions do not match session configuration");
-        if (q_index < 0 || q_index >= config.qp_num)
-            throw std::runtime_error("--q-index is outside the model range");
+        validate_qp(q_index, config, "--q-index");
 
-        const int gop_frame = config.frame_in_gop(frame_index);
-        if (gop_frame == 0) {
+        const bool periodic_idr =
+            (frame_index == 0) ||
+            (config.iframe_period && gop_frame_index >= *config.iframe_period) ||
+            (gop_frame_index >= (1 << kDefaultFrameIdxBits));
+        if (periodic_idr)
+            gop_frame_index = 0;
+        const bool is_idr = (gop_frame_index == 0);
+        if (is_idr) {
             if (device_state)
                 backend->reset_state();
             else
                 std::fill(reference.begin(), reference.end(), 0);
         }
-        const int shifted_q = q_index + config.q_index_shift(gop_frame);
+        const int shifted_q = q_index + config.q_index_shift(gop_frame_index);
         if (shifted_q < 0 || shifted_q >= config.total_qp_num)
             throw std::runtime_error("shifted q-index is outside the model range");
 
@@ -502,13 +609,21 @@ struct EncoderSession::Impl {
         validate_fp16_tensor(outputs[latent_offset + 2], y_shape, "y_raw_1");
         write_debug_tensors(options.debug_dir, "encoder", frame_index, "output", outputs);
 
-        EncodedFrame encoded;
-        encoded.q_index = q_index;
-        encoded.payload = entropy.encode(
+        const std::vector<std::byte> entropy_payload = entropy.encode(
             outputs[latent_offset + 2], outputs[latent_offset + 1],
             outputs[latent_offset], q_index);
+        const FrameData frame_data = make_frame_data(
+            config, padding, q_index, gop_frame_index, is_idr, entropy_payload);
+        const std::span<const std::byte> access_unit =
+            bitstream_encoder.encode(frame_data);
+
+        EncodedFrame encoded;
+        encoded.q_index = q_index;
+        encoded.frame_type = frame_data.frame_type;
+        encoded.bitstream.assign(access_unit.begin(), access_unit.end());
         if (!device_state)
             reference = copy_fp16(outputs[0]);
+        ++gop_frame_index;
         ++frame_index;
         return encoded;
     }
@@ -520,6 +635,7 @@ struct DecoderSession::Impl {
     ModelConfig config;
     FramePadding padding;
     EntropyCodec entropy;
+    BitstreamDecoder bitstream_decoder;
     std::unique_ptr<InferenceBackend> backend;
     bool device_state = false;
     std::vector<Float16Storage> reference;
@@ -545,6 +661,7 @@ struct DecoderSession::Impl {
     void reset()
     {
         frame_index = 0;
+        bitstream_decoder.reset();
         if (device_state)
             backend->reset_state();
         else
@@ -556,22 +673,23 @@ struct DecoderSession::Impl {
     {
         if (output.width() != options.width || output.height() != options.height)
             throw std::runtime_error("output YUV frame dimensions do not match session configuration");
-        if (encoded.q_index < 0 || encoded.q_index >= config.qp_num)
-            throw std::runtime_error("bitstream q-index is outside the model range");
 
-        const int gop_frame = config.frame_in_gop(frame_index);
-        if (gop_frame == 0) {
+        const FrameData frame_data = bitstream_decoder.decode(encoded.bitstream);
+        validate_decoded_frame(frame_data, config, padding,
+                               options.width, options.height);
+        if (frame_data.frame_type == FrameType::kIFrame) {
             if (device_state)
                 backend->reset_state();
             else
                 std::fill(reference.begin(), reference.end(), 0);
         }
-        const int shifted_q = encoded.q_index + config.q_index_shift(gop_frame);
+        const int shifted_q =
+            frame_data.qp + config.q_index_shift(frame_data.cur_frame_idx);
         if (shifted_q < 0 || shifted_q >= config.total_qp_num)
             throw std::runtime_error("shifted q-index is outside the model range");
 
         EntropyCodec::DecodedLatents latents =
-            entropy.decode(encoded.payload, encoded.q_index);
+            entropy.decode(frame_data.payload, frame_data.qp);
         std::vector<Tensor> inputs{
             std::move(latents.z_raw), std::move(latents.y_raw_0),
             std::move(latents.y_raw_1)};
@@ -680,13 +798,10 @@ std::vector<std::string> available_model_profiles()
 
 CodecStats encode_video(const CodecOptions& options)
 {
-    if (options.input_path.empty() || options.output_path.empty())
-        throw std::runtime_error("--input and --output are required");
-    if (options.frames < 0)
-        throw std::runtime_error("--frames must be non-negative");
+    validate_file_options(options, true);
 
     EncoderSession session(make_session_options(options));
-    validate_file_options(options, session.model_config(), true);
+    validate_qp(options.q_index, session.model_config(), "--q-index");
 
     std::ifstream input_file;
     std::istream* input = &std::cin;
@@ -711,6 +826,7 @@ CodecStats encode_video(const CodecOptions& options)
         if (auto* buffered = dynamic_cast<BufferedCodecBackend*>(
                 session.impl_->backend.get())) {
             return encode_buffered(options, session.impl_->config,
+                                   session.impl_->padding,
                                    session.impl_->entropy,
                                    *session.impl_->backend, *buffered,
                                    *input, *output, stream_output);
@@ -724,14 +840,14 @@ CodecStats encode_video(const CodecOptions& options)
            read_yuv420_frame(*input, options.width, options.height, frame)) {
         const EncodedFrame encoded =
             session.encode_frame(yuv420_view(frame), options.q_index);
-        write_encoded_frame(*output, encoded);
+        write_access_unit(*output, encoded.bitstream);
         if (stream_output)
             output->flush();
         if (!*output)
             throw std::runtime_error("failed to flush output bitstream");
         ++stats.frames;
         stats.input_bytes += yuv420_frame_bytes(options.width, options.height);
-        stats.output_bytes += encoded.payload.size() + 8;
+        stats.output_bytes += encoded.bitstream.size();
     }
     output->flush();
     if (!*output)
@@ -745,13 +861,7 @@ CodecStats encode_video(const CodecOptions& options)
 
 CodecStats decode_video(const CodecOptions& options)
 {
-    if (options.input_path.empty() || options.output_path.empty())
-        throw std::runtime_error("--input and --output are required");
-    if (options.frames < 0)
-        throw std::runtime_error("--frames must be non-negative");
-
-    DecoderSession session(make_session_options(options));
-    validate_file_options(options, session.model_config(), false);
+    validate_file_options(options, false);
 
     std::ifstream input_file;
     std::istream* input = &std::cin;
@@ -772,22 +882,55 @@ CodecStats decode_video(const CodecOptions& options)
     if (!*output)
         throw std::runtime_error("cannot create output YUV: " + options.output_path);
 
-    if (options.debug_dir.empty()) {
+    AccessUnitReader reader(*input);
+    std::optional<std::vector<std::byte>> initial_au;
+    CodecOptions resolved = options;
+    if (resolved.width == 0 && resolved.height == 0) {
+        std::vector<std::byte> first_au;
+        if (!reader.read(first_au)) {
+            output->flush();
+            if (!*output)
+                throw std::runtime_error("failed to finalize output YUV");
+            return CodecStats{};
+        }
+        BitstreamDecoder probe_decoder;
+        const FrameData first_frame = probe_decoder.decode(first_au);
+        resolved.width = first_frame.display_width();
+        resolved.height = first_frame.display_height();
+        initial_au = std::move(first_au);
+    }
+
+    DecoderSession session(make_session_options(resolved));
+
+    if (resolved.debug_dir.empty()) {
         if (auto* buffered = dynamic_cast<BufferedCodecBackend*>(
                 session.impl_->backend.get())) {
-            return decode_buffered(options, session.impl_->config,
+            return decode_buffered(resolved, session.impl_->config,
+                                   session.impl_->padding,
                                    session.impl_->entropy,
                                    *session.impl_->backend, *buffered,
-                                   *input, *output, stream_output);
+                                   reader, std::move(initial_au),
+                                   *output, stream_output);
         }
     }
 
     const auto started = std::chrono::steady_clock::now();
     CodecStats stats;
-    Yuv420Frame frame = allocate_yuv420_frame(options.width, options.height);
+    Yuv420Frame frame = allocate_yuv420_frame(resolved.width, resolved.height);
+    std::vector<std::byte> access_unit;
+    auto next_access_unit = [&]() -> bool {
+        if (initial_au.has_value()) {
+            access_unit = std::move(*initial_au);
+            initial_au.reset();
+            return true;
+        }
+        return reader.read(access_unit);
+    };
+
     EncodedFrame encoded;
-    while ((options.frames == 0 || stats.frames < options.frames) &&
-           read_encoded_frame(*input, encoded)) {
+    while ((resolved.frames == 0 || stats.frames < resolved.frames) &&
+           next_access_unit()) {
+        encoded.bitstream = std::move(access_unit);
         session.decode_frame_into(encoded, mutable_yuv420_view(frame));
         write_yuv420_frame(*output, yuv420_view(frame));
         if (stream_output)
@@ -795,8 +938,8 @@ CodecStats decode_video(const CodecOptions& options)
         if (!*output)
             throw std::runtime_error("failed to flush output YUV");
         ++stats.frames;
-        stats.input_bytes += encoded.payload.size() + 8;
-        stats.output_bytes += yuv420_frame_bytes(options.width, options.height);
+        stats.input_bytes += encoded.bitstream.size();
+        stats.output_bytes += yuv420_frame_bytes(resolved.width, resolved.height);
     }
     output->flush();
     if (!*output)

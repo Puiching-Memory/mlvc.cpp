@@ -4,8 +4,10 @@
 #include "mlvc/core/model.hpp"
 #include "mlvc/core/tensor.hpp"
 
+#include <cstddef>
 #include <filesystem>
 #include <memory>
+#include <span>
 #include <vector>
 
 namespace mlvc {
@@ -34,9 +36,9 @@ public:
         Tensor y_raw_0;
         Tensor y_raw_1;
     };
-    DecodedLatents decode(const std::vector<std::byte>& payload,
+    DecodedLatents decode(std::span<const std::byte> payload,
                           int q_index) const;
-    void decode_into(const std::vector<std::byte>& payload, int q_index,
+    void decode_into(std::span<const std::byte> payload, int q_index,
                      MutableTensorView z_raw, MutableTensorView y_raw_0,
                      MutableTensorView y_raw_1) const;
 

@@ -40,7 +40,7 @@ void validate_bundle_manifest(const ModelAssetReader& assets,
         bundle.width() != metadata.width() || bundle.height() != metadata.height() ||
         metadata.checkpoint_sha256().size() != 32 || bundle.entropy_model_sha256().size() != 32 ||
         bundle.checkpoint_sha256() != metadata.checkpoint_sha256() ||
-        bundle.contract().container() != "mlvc-frame-le-v1" ||
+        bundle.contract().container() != "mlvc-nalu-v0" ||
         bundle.contract().entropy() != "canonical-pmf-v1")
         throw std::runtime_error("model bundle does not match Protobuf metadata");
 }

@@ -6,6 +6,14 @@ mlvc_configure_target(mlvc_core_safety_tests)
 mlvc_enable_ipo(mlvc_core_safety_tests)
 add_test(NAME mlvc_core_safety COMMAND mlvc_core_safety_tests)
 
+add_executable(mlvc_bitstream_tests unit/bitstream_tests.cpp)
+target_include_directories(mlvc_bitstream_tests PRIVATE
+    "${PROJECT_SOURCE_DIR}/core/include")
+target_link_libraries(mlvc_bitstream_tests PRIVATE mlvc_core)
+mlvc_configure_target(mlvc_bitstream_tests)
+mlvc_enable_ipo(mlvc_bitstream_tests)
+add_test(NAME mlvc_bitstream COMMAND mlvc_bitstream_tests)
+
 add_executable(mlvc_codec_tests unit/codec_tests.cpp)
 target_include_directories(mlvc_codec_tests PRIVATE
     "${PROJECT_SOURCE_DIR}/core/include")

@@ -163,10 +163,18 @@ void test_mlvc_codec(const std::filesystem::path& assets,
     mlvc::EntropyCodec entropy(model_dir, config);
     const std::vector<std::byte> payload = entropy.encode(y1, y0, z, 21);
     std::ifstream reference_stream(reference_root / "reference.mlvc", std::ios::binary);
-    mlvc::EncodedFrame reference_frame;
-    require(mlvc::read_encoded_frame(reference_stream, reference_frame),
-            "cannot read official reference frame");
-    const auto& expected = reference_frame.payload;
+    mlvc::AccessUnitReader reference_reader(reference_stream);
+    std::vector<std::byte> reference_au;
+    require(reference_reader.read(reference_au),
+            "cannot read official reference access unit");
+    mlvc::BitstreamDecoder reference_decoder;
+    const mlvc::FrameData reference_frame = reference_decoder.decode(reference_au);
+    require(reference_frame.qp == 21 &&
+            reference_frame.display_width() == 640 &&
+            reference_frame.display_height() == 360,
+            "unexpected official reference NALU header");
+    const std::vector<std::byte> expected(
+        reference_frame.payload.begin(), reference_frame.payload.end());
     require(payload == expected, "rANS payload differs from Python reference");
 
     auto decoded = entropy.decode(payload, 21);
@@ -214,12 +222,49 @@ void test_mlvc_codec(const std::filesystem::path& assets,
     }
 
     std::stringstream stream(std::ios::in | std::ios::out | std::ios::binary);
-    mlvc::write_encoded_frame(stream, mlvc::EncodedFrame{21, payload});
+    mlvc::BitstreamEncoder encoder;
+    mlvc::FrameData idr_frame;
+    idr_frame.model_width = config.model_width;
+    idr_frame.model_height = config.model_height;
+    idr_frame.crop_offsets = {
+        padding.left, padding.right, padding.top, padding.bottom};
+    idr_frame.transpose_flag = padding.rotated;
+    idr_frame.frame_type = mlvc::FrameType::kIFrame;
+    idr_frame.qp = 21;
+    idr_frame.payload = payload;
+    mlvc::write_access_unit(stream, encoder.encode(idr_frame));
+
+    mlvc::FrameData p_frame = idr_frame;
+    p_frame.frame_type = mlvc::FrameType::kPFrame;
+    p_frame.cur_frame_idx = 1;
+    p_frame.ref_frame_idx = 0;
+    p_frame.qp = 22;
+    mlvc::write_access_unit(stream, encoder.encode(p_frame));
+
     stream.seekg(0);
-    mlvc::EncodedFrame restored;
-    require(mlvc::read_encoded_frame(stream, restored), "cannot read frame container");
-    require(restored.q_index == 21 && restored.payload == payload,
-            "frame container round trip mismatch");
+    mlvc::AccessUnitReader reader(stream);
+    mlvc::BitstreamDecoder decoder;
+    std::vector<std::byte> restored_au;
+    require(reader.read(restored_au), "cannot read IDR NALU access unit");
+    const mlvc::FrameData restored_idr = decoder.decode(restored_au);
+    require(restored_idr.qp == 21 &&
+            restored_idr.frame_type == mlvc::FrameType::kIFrame &&
+            restored_idr.display_width() == 640 &&
+            restored_idr.display_height() == 360 &&
+            std::equal(restored_idr.payload.begin(), restored_idr.payload.end(),
+                       payload.begin(), payload.end()),
+            "IDR NALU container round trip mismatch");
+
+    require(reader.read(restored_au), "cannot read P-frame NALU access unit");
+    const mlvc::FrameData restored_p = decoder.decode(restored_au);
+    require(restored_p.qp == 22 &&
+            restored_p.frame_type == mlvc::FrameType::kPFrame &&
+            restored_p.cur_frame_idx == 1 &&
+            restored_p.ref_frame_idx == 0 &&
+            std::equal(restored_p.payload.begin(), restored_p.payload.end(),
+                       payload.begin(), payload.end()),
+            "P-frame NALU container round trip mismatch");
+    require(!reader.read(restored_au), "unexpected trailing access unit");
 }
 
 void test_mlvc_s_codec(const std::filesystem::path& assets,
@@ -255,10 +300,14 @@ void test_mlvc_s_codec(const std::filesystem::path& assets,
     mlvc::EntropyCodec entropy(model_dir, config);
     const std::vector<std::byte> payload = entropy.encode(y1, y0, z, 21);
     std::ifstream reference_stream(reference_root / "reference.mlvc", std::ios::binary);
-    mlvc::EncodedFrame reference_frame;
-    require(mlvc::read_encoded_frame(reference_stream, reference_frame),
-            "cannot read official reference frame");
-    const auto& expected = reference_frame.payload;
+    mlvc::AccessUnitReader reference_reader(reference_stream);
+    std::vector<std::byte> reference_au;
+    require(reference_reader.read(reference_au),
+            "cannot read official reference access unit");
+    mlvc::BitstreamDecoder reference_decoder;
+    const mlvc::FrameData reference_frame = reference_decoder.decode(reference_au);
+    const std::vector<std::byte> expected(
+        reference_frame.payload.begin(), reference_frame.payload.end());
     require(payload == expected, "MLVC-S rANS payload differs from Python reference");
     const auto decoded = entropy.decode(payload, 21);
     require(fp16_numerically_equal(decoded.z_raw, z),

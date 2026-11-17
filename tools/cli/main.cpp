@@ -22,9 +22,9 @@ void print_usage(const char* argv0)
         "       [--model-dir DIR | --model-profile NAME] [--frames N]\n"
         "       [--q-index N] [--backend NAME] [--device-id N] [--threads N]\n"
         "       [--encode-device-id N]\n"
-        "  %s decode --input IN.mlvc|- --output OUT.yuv|- --width W --height H\n"
-        "       [--model-dir DIR | --model-profile NAME] [--frames N]\n"
-        "       [--backend NAME] [--device-id N] [--threads N]\n"
+        "  %s decode --input IN.mlvc|- --output OUT.yuv|-\n"
+        "       [--width W --height H] [--model-dir DIR | --model-profile NAME]\n"
+        "       [--frames N] [--backend NAME] [--device-id N] [--threads N]\n"
         "       [--decode-device-id N]\n"
         "  common: [--debug-dir DIR]\n"
         "  stream: use '-' for stdin/stdout; named FIFO paths are also supported\n",
@@ -73,6 +73,10 @@ int main(int argc, char** argv)
             throw std::runtime_error("command must be encode or decode");
 
         mlvc::CodecOptions options;
+        if (command == "decode") {
+            options.width = 0;
+            options.height = 0;
+        }
         std::string model_profile;
         for (int i = 2; i < argc; ++i) {
             auto value = [&]() -> const char* {

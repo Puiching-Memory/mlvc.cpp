@@ -38,12 +38,14 @@ ldd "$MLVC_PREFIX/lib/libmlvc_codec.so"
   --model-profile mlvc-s-psnr-v1 --device-id 0
 "$MLVC_PREFIX/bin/mlvc_demo" decode \
   --input output.mlvc --output reconstructed.yuv \
-  --width 640 --height 360 --frames 60 \
-  --model-profile mlvc-s-psnr-v1 --device-id 0
+  --frames 60 --model-profile mlvc-s-psnr-v1 --device-id 0
 ```
 
-`--frames 0` 处理到 EOF。码流每帧只保存原始 q-index、payload 长度和 rANS 数据，
-解码端必须另行获得相同 profile、原始宽高和 GOP 规则。
+`--frames 0` 处理到 EOF，`--q-index` 需在 `[0, 51]`（且在模型范围内）。码流采用
+源自 `microsoft/libmlvc` 的 v0.x NALU Annex-B 容器（`mlvc-nalu-v0`），按 Access Unit
+携带 `SPS`（版本 `0.1`、模型尺寸、裁剪偏置与旋转标志）、`PPS`、`IDR_N_LP` /
+`TRAIL_R` / `TSA_R`、`qp`、GOP 帧号与 rANS 数据；`decode` 可省略 `--width` /
+`--height` 由 `SPS` 自动识别，也可显式传入以校验一致性。
 `--model-dir` 可指定完整的 AOT 模型目录，适合开发时覆盖内嵌模型。
 
 ## 连续视频与双 GPU
@@ -57,8 +59,7 @@ cat input.yuv \
       --width 640 --height 360 --frames 0 --q-index 21 \
       --encode-device-id 0 2>encode.log \
   | "$MLVC_PREFIX/bin/mlvc_demo" decode --input - --output - \
-      --width 640 --height 360 --frames 0 \
-      --decode-device-id 1 2>decode.log \
+      --frames 0 --decode-device-id 1 2>decode.log \
   > reconstructed.yuv
 ```
 
@@ -111,7 +112,7 @@ target_link_libraries(my_application PRIVATE mlvc::mlvc_codec)
 ## 服务集成
 
 浏览器、手机和微信小程序通过业务协议调用 Linux GPU 服务。服务端负责会话、
-原始宽高、profile、GOP 起点及码流传输；预览客户端需要可播放的输出格式。
+profile、GOP 起点及 NALU 码流传输（`SPS` 已包含显示尺寸）；预览客户端需要可播放的输出格式。
 当前仓库提供编解码库和 CLI，HTTP/WebSocket 服务需由应用实现。
 
 连续会话应复用同一个编解码进程，限制队列长度并明确背压和断流后的重启规则。

@@ -19,6 +19,16 @@ if __package__ in (None, ""):
 
 import numpy as np  # noqa: E402
 
+from mlvc_tools.bitstream import (  # noqa: E402
+    BitstreamEncoder,
+    DEFAULT_FRAME_IDX_BITS,
+    FrameData,
+    FrameType,
+    MAX_BITSTREAM_QP,
+    MIN_BITSTREAM_QP,
+    decode_bitstream_frames,
+    frame_padding,
+)
 from mlvc_tools.source import load_model  # noqa: E402
 from mlvc_tools.upstream import ensure_upstream_conversion  # noqa: E402
 from mlvc_tools.wire import (  # noqa: E402
@@ -113,26 +123,78 @@ def save_repeated_input(
             stream.write(to_bytes(uv[1]))
 
 
-def frame_payloads(path: Path) -> list[dict[str, Any]]:
+def read_raw_mlvc_frames(path: Path) -> list[tuple[int, bytes]]:
     data = path.read_bytes()
     position = 0
-    records = []
+    frames: list[tuple[int, bytes]] = []
     while position < len(data):
         if position + 8 > len(data):
-            raise ValueError("truncated reference bitstream header")
+            raise ValueError("truncated raw FrameLoop bitstream header")
         q_index, size = struct.unpack_from("<iI", data, position)
         position += 8
         payload = data[position : position + size]
         if len(payload) != size:
-            raise ValueError("truncated reference bitstream payload")
+            raise ValueError("truncated raw FrameLoop bitstream payload")
+        frames.append((q_index, payload))
+        position += size
+    return frames
+
+
+def encode_nalu_bitstream(
+    raw_frames: list[tuple[int, bytes]],
+    width: int,
+    height: int,
+    model_width: int,
+    model_height: int,
+    iframe_period: int | None,
+) -> bytes:
+    crop_offsets, transpose_flag = frame_padding(width, height, model_width, model_height)
+    encoder = BitstreamEncoder()
+    encoded = bytearray()
+    gop_frame_index = 0
+    for frame_index, (frame_q_index, payload) in enumerate(raw_frames):
+        periodic_idr = (
+            frame_index == 0
+            or (iframe_period is not None and gop_frame_index >= iframe_period)
+            or gop_frame_index >= (1 << DEFAULT_FRAME_IDX_BITS)
+        )
+        if periodic_idr:
+            gop_frame_index = 0
+        is_idr = gop_frame_index == 0
+        frame_data = FrameData(
+            model_width=model_width,
+            model_height=model_height,
+            crop_offsets=crop_offsets,
+            transpose_flag=transpose_flag,
+            frame_idx_bits=DEFAULT_FRAME_IDX_BITS,
+            temporal_id=0,
+            max_temporal_layers=1,
+            frame_type=FrameType.I_FRAME if is_idr else FrameType.P_FRAME,
+            qp=frame_q_index,
+            feature_reset_flag=False,
+            cur_frame_idx=0 if is_idr else gop_frame_index,
+            ref_frame_idx=0 if is_idr else gop_frame_index - 1,
+            payload=payload,
+        )
+        encoded.extend(encoder.encode(frame_data))
+        gop_frame_index += 1
+    return bytes(encoded)
+
+
+def frame_payloads(path: Path) -> list[dict[str, Any]]:
+    records = []
+    for access_unit, frame_data in decode_bitstream_frames(path.read_bytes()):
         records.append(
             {
-                "q_index": q_index,
-                "payload_bytes": size,
-                "payload_sha256": hashlib.sha256(payload).hexdigest(),
+                "q_index": frame_data.qp,
+                "frame_type": frame_data.frame_type.value,
+                "cur_frame_idx": frame_data.cur_frame_idx,
+                "access_unit_bytes": len(access_unit),
+                "access_unit_sha256": hashlib.sha256(access_unit).hexdigest(),
+                "payload_bytes": len(frame_data.payload),
+                "payload_sha256": hashlib.sha256(frame_data.payload).hexdigest(),
             }
         )
-        position += size
     return records
 
 
@@ -140,6 +202,8 @@ def main() -> None:
     args = parse_args()
     if args.frames < 2:
         raise ValueError("codec conformance fixtures require at least I and P frames")
+    if not (MIN_BITSTREAM_QP <= args.q_index <= MAX_BITSTREAM_QP):
+        raise ValueError("--q-index must be in [0, 51] for MLVC NALU bitstream")
     model_dir = args.model_dir.resolve()
     input_path = args.input.resolve()
     output_dir = args.output_dir.resolve()
@@ -151,6 +215,7 @@ def main() -> None:
     torch.set_num_threads(min(torch.get_num_threads(), 8))
     metadata = read_metadata(model_dir)
     shape = metadata["params"]["split_model_params"]
+    iframe_period = metadata["params"]["full_model_params"].get("iframe_period")
     _, split_model, gaussian, estimator = load_model(
         metadata["name"], args.checkpoint, shape["model_width"], shape["model_height"]
     )
@@ -176,7 +241,16 @@ def main() -> None:
     )
 
     generated = frame_loop_output / f"q_index={args.q_index}"
-    shutil.move(generated / "output.mlvc", output_dir / "reference.mlvc")
+    raw_frames = read_raw_mlvc_frames(generated / "output.mlvc")
+    nalu_bitstream = encode_nalu_bitstream(
+        raw_frames,
+        args.width,
+        args.height,
+        shape["model_width"],
+        shape["model_height"],
+        iframe_period,
+    )
+    (output_dir / "reference.mlvc").write_bytes(nalu_bitstream)
     shutil.move(generated / "output.yuv", output_dir / "reference.yuv")
     shutil.rmtree(frame_loop_output)
     save_repeated_input(
@@ -225,6 +299,7 @@ def main() -> None:
         "q_index": args.q_index,
         "input": {"path": "input.yuv", "sha256": sha256(output_dir / "input.yuv")},
         "bitstream": {
+            "container": "mlvc-nalu-v0",
             "path": "reference.mlvc",
             "sha256": sha256(output_dir / "reference.mlvc"),
             "frames": frame_payloads(output_dir / "reference.mlvc"),

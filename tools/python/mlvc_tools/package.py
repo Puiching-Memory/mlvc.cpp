@@ -105,7 +105,7 @@ def verify_package(output_dir: Path) -> dict[str, Any]:
     checkpoint = bytes.fromhex(profile["weights_sha256"])
     if bundle.checkpoint_sha256 != checkpoint or bundle.model_version != profile["model_version"]:
         raise ValueError("bundle checkpoint identity mismatch")
-    if bundle.contract.container != "mlvc-frame-le-v1" or bundle.contract.entropy != "canonical-pmf-v1":
+    if bundle.contract.container != "mlvc-nalu-v0" or bundle.contract.entropy != "canonical-pmf-v1":
         raise ValueError("unsupported bundle codec contract")
     for name, record in manifest["artifacts"].items():
         if record["path"] != name:
@@ -184,7 +184,7 @@ def assemble(args: argparse.Namespace) -> None:
     bundle = pb.ModelBundle(schema_version=BUNDLE_SCHEMA, profile=args.profile,
         model_version=profile["model_version"], width=metadata.width, height=metadata.height,
         checkpoint_sha256=bytes.fromhex(profile["weights_sha256"]), entropy_model_sha256=entropy_hash.digest())
-    bundle.contract.CopyFrom(pb.CodecContract(container="mlvc-frame-le-v1", entropy="canonical-pmf-v1",
+    bundle.contract.CopyFrom(pb.CodecContract(container="mlvc-nalu-v0", entropy="canonical-pmf-v1",
         decoder_max_yuv_sample_error=1, decoder_min_psnr_db=60.0))
     for name, record in sorted(artifacts.items()):
         bundle.artifacts.add(path=name, size_bytes=record["bytes"], sha256=bytes.fromhex(record["sha256"]))

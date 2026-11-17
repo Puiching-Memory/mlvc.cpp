@@ -1,4 +1,5 @@
 set(MLVC_CORE_SOURCES
+    src/bit_io.cpp
     src/bitstream.cpp
     src/entropy.cpp
     src/model.cpp
@@ -82,3 +83,6 @@ if(MLVC_EMBED_MODELS)
     target_include_directories(mlvc_core PRIVATE "${MLVC_EMBEDDED_MODELS_DIR}")
     target_compile_definitions(mlvc_core PRIVATE MLVC_HAS_EMBEDDED_MODELS=1)
 endif()
+
+install(FILES "${PROJECT_SOURCE_DIR}/licenses/libmlvc/LICENSE"
+    DESTINATION "share/licenses/libmlvc")

@@ -5,7 +5,8 @@ NVIDIA Driver API and embedded CUDA kernels. **Driver+cubin is the only runtime.
 
 The codec implements 8-bit YUV420 input/output, padding/cropping, recurrent GOP
 and reference-feature state, canonical PMF tables, rANS entropy coding, and the
-official per-frame bitstream container. Both MLVC and MLVC-S are supported.
+MLVC v0.x NALU Annex-B bitstream container derived from
+`microsoft/libmlvc`. Both MLVC and MLVC-S are supported.
 
 The deployed `libmlvc_codec.so` embeds model metadata, entropy tables, fixed-shape
 operator schedules, FP16 weights, and a multi-architecture fatbin. Its GPU
@@ -124,13 +125,13 @@ After extracting a release:
 ./bin/mlvc_demo --list-model-profiles
 ./bin/mlvc_demo encode --input in.yuv --output out.mlvc \
   --width 640 --height 360 --frames 60 --q-index 21
-./bin/mlvc_demo decode --input out.mlvc --output rec.yuv \
-  --width 640 --height 360 --frames 60
+./bin/mlvc_demo decode --input out.mlvc --output rec.yuv --frames 60
 ```
 
 Both commands default to embedded `mlvc-psnr-v1`. Select the smaller model with
 `--model-profile mlvc-s-psnr-v1`. `--model-dir` overrides the embedded model with
 a complete AOT bundle for development. `--frames 0` processes until EOF;
+`--q-index` must lie in `[0, 51]` (and within the loaded model's `qp_num`).
 `--device-id` selects a GPU. Encoding and decoding can run in separate processes
 on separate GPUs using `--encode-device-id` / `--decode-device-id`.
 
@@ -141,13 +142,17 @@ is sent to stderr when binary output is stdout:
 cat in.yuv \
   | ./bin/mlvc_demo encode --input - --output - --width 640 --height 360 \
       --frames 60 --q-index 21 --encode-device-id 0 2>encode.log \
-  | ./bin/mlvc_demo decode --input - --output - --width 640 --height 360 \
-      --frames 60 --decode-device-id 1 2>decode.log \
+  | ./bin/mlvc_demo decode --input - --output - --frames 60 \
+      --decode-device-id 1 2>decode.log \
   > rec.yuv
 ```
 
-The bitstream stores QP and payload length per frame. The decoder must be given
-the same profile, original image dimensions, and GOP rules as the encoder.
+The NALU Annex-B bitstream carries `SPS` (version `0.1`, model dimensions,
+crop offsets, transpose flag, temporal layers, and `frame_idx_bits`), `PPS`
+(`init_qp_minus26`), and coded frame NALUs (`IDR_N_LP`, `TRAIL_R`, `TSA_R`,
+`qp_delta`, GOP indices, and the rANS payload). On `decode`, `--width` and
+`--height` are optional and auto-detected from `SPS`, or validated against the
+bitstream when explicitly supplied.
 
 ## C API
 
@@ -221,13 +226,14 @@ long-sequence, arbitrary-content, or rate-distortion acceptance. See the
 ```text
 public/include/mlvc/codec.h  Public C API
 codec/                      C API implementation and frame pipeline
-core/                       Model metadata, tensors, YUV, PMF/rANS, containers
+core/                       Model metadata, tensors, YUV, PMF/rANS, NALU bitstream
 runtime/                    Graph execution and buffered codec contracts
 backends/driver_cubin/      AOT loader, planner, Driver API, CUDA kernels
 tools/cli/                  Encode/decode command-line entry point
 tools/scripts/              Bootstrap, dependency pins, and release packaging
 tools/python/mlvc_tools/    Offline AOT compiler, Protobuf bundler, and references
 proto/mlvc_model.proto      Model, PMF, graph, bundle, and debug schemas
+licenses/                   Third-party attribution and license notices (libmlvc)
 tests/                      Host safety, C API, AOT, and codec conformance tests
 models/profiles/            Registered checkpoint identities and model parameters
 models/canonical/           Generated, ignored canonical model bundles
@@ -242,5 +248,11 @@ documents the exercised hardware, fixtures, checks, and acceptance limits.
 
 ## Acknowledgements
 
-Microsoft MLVC supplies the model implementation and `msrtc_rans` source (MIT).
-NVIDIA CUTLASS supplies CUDA kernel building blocks under its upstream license.
+- [Microsoft MLVC](https://github.com/microsoft/mlvc) supplies the model
+  architecture and `msrtc_rans` entropy coder source (MIT License).
+- [Microsoft libmlvc](https://github.com/microsoft/libmlvc) supplies the v0.x
+  NALU Annex-B bitstream specification, bit I/O / NALU parser-builder design,
+  and frozen conformance test vectors incorporated into `core/` and `tests/`
+  (MIT License; see [licenses/libmlvc/LICENSE](licenses/libmlvc/LICENSE)).
+- NVIDIA CUTLASS supplies CUDA kernel building blocks under its upstream
+  license.

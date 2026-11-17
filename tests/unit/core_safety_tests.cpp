@@ -175,16 +175,39 @@ void test_rotated_output_validation()
 
 void test_bitstream_limit()
 {
-    mlvc::EncodedFrame frame{21, std::vector<std::byte>(5)};
+    mlvc::BitstreamEncoder encoder;
+    mlvc::FrameData frame;
+    frame.model_width = 64;
+    frame.model_height = 64;
+    frame.frame_type = mlvc::FrameType::kIFrame;
+    frame.qp = 21;
+    const std::vector<std::byte> payload(5, std::byte{0x42});
+    frame.payload = payload;
+
+    const auto access_unit = encoder.encode(frame);
     std::stringstream stream(std::ios::in | std::ios::out | std::ios::binary);
-    mlvc::write_encoded_frame(stream, frame);
+    mlvc::write_access_unit(stream, access_unit);
     stream.seekg(0);
 
-    mlvc::EncodedFrame decoded{7, std::vector<std::byte>(2)};
-    require_throws([&] { mlvc::read_encoded_frame(stream, decoded, 4); },
-                   "oversized encoded frame was accepted");
-    require(decoded.q_index == 7 && decoded.payload.size() == 2,
-            "failed frame read modified the destination");
+    mlvc::AccessUnitReader reader(stream, 4);
+    std::vector<std::byte> decoded{std::byte{0x11}, std::byte{0x22}};
+    bool hit_limit = false;
+    try {
+        static_cast<void>(reader.read(decoded));
+    } catch (const mlvc::BitstreamError& error) {
+        hit_limit = (error.code() == mlvc::BitstreamErrorCode::kSizeLimitExceeded);
+    }
+    require(hit_limit, "oversized NALU access unit was accepted");
+    require(decoded == (std::vector<std::byte>{std::byte{0x11}, std::byte{0x22}}),
+            "failed access unit read modified the destination");
+
+    mlvc::FrameData invalid_qp = frame;
+    invalid_qp.qp = 52;
+    require_throws([&] { static_cast<void>(encoder.encode(invalid_qp)); },
+                   "QP above 51 was accepted");
+    invalid_qp.qp = -1;
+    require_throws([&] { static_cast<void>(encoder.encode(invalid_qp)); },
+                   "negative QP was accepted");
 }
 
 }  // namespace

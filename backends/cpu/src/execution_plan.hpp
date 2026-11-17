@@ -6,10 +6,13 @@
 #include "thread_pool.hpp"
 
 #include "mlvc/core/assets.hpp"
+#include "mlvc/core/half.hpp"
 #include "mlvc/core/tensor.hpp"
+#include "mlvc/core/yuv.hpp"
 #include "mlvc/runtime/aot_graph.hpp"
 #include "mlvc/runtime/backend.hpp"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -27,6 +30,16 @@ public:
 
     std::vector<Tensor> run(const std::vector<Tensor>& inputs);
     void reset_state();
+
+    void configure_codec_io(const CodecIoConfig& config);
+    std::size_t codec_slot_count() const noexcept;
+    MutableYuv420FrameView encoder_input_yuv(std::size_t slot);
+    void submit_encoder(std::size_t slot, int shifted_q);
+    std::vector<TensorView> encoder_outputs(std::size_t slot) const;
+    std::vector<MutableTensorView> decoder_inputs(std::size_t slot);
+    void submit_decoder(std::size_t slot, int shifted_q);
+    Yuv420FrameView decoder_output_yuv(std::size_t slot) const;
+    void wait_codec_slot(std::size_t slot);
 
     GemmMode gemm_mode() const noexcept { return kernels_->mode; }
     std::size_t thread_count() noexcept { return pool_.thread_count(); }
@@ -129,12 +142,20 @@ private:
     Float16Storage* fp16_mut(aot::TensorId id);
     const Float16Storage* fp16_const(aot::TensorId id) const;
 
+    struct CodecSlot {
+        std::vector<std::uint8_t> yuv;
+        std::vector<std::vector<std::byte>> inputs;
+        std::vector<std::vector<std::byte>> outputs;
+    };
+
     void compile_steps(const aot::LoadedGraph& loaded, const ModelExecutionConfig& config);
     void allocate_arena();
     void execute_step(const CompiledStep& step);
+    void execute_all_steps_and_swap_states();
 
     const KernelSet* kernels_ = nullptr;
     CpuThreadPool pool_;
+    std::string model_name_;
     std::mutex exec_mutex_;
 
     std::vector<TensorMeta> metas_;
@@ -149,6 +170,14 @@ private:
     std::vector<std::vector<std::byte>> state_output_buffers_;
     std::vector<std::byte> arena_;
     std::vector<CompiledStep> steps_;
+
+    CodecIoConfig codec_io_{};
+    bool codec_io_configured_ = false;
+    std::array<Float16Storage, 256> codec_byte_lut_{};
+    std::size_t x_input_graph_idx_ = 0;
+    std::size_t q_input_graph_idx_ = 0;
+    aot::TensorId x_hat_output_id_ = 0;
+    std::vector<CodecSlot> codec_slots_;
 };
 
 }  // namespace mlvc::cpu_backend

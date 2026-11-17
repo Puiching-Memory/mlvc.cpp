@@ -24,6 +24,13 @@
 #  define MLVC_HAS_X86_F16C_AVX2 0
 #endif
 
+#if defined(__aarch64__)
+#  define MLVC_HAS_ARM64_NEON 1
+#  include <arm_neon.h>
+#else
+#  define MLVC_HAS_ARM64_NEON 0
+#endif
+
 namespace mlvc {
 namespace {
 
@@ -140,6 +147,57 @@ void integer_values_f16c(const Float16Storage* source, std::int32_t* result,
 }
 #endif
 
+#if MLVC_HAS_ARM64_NEON
+void integer_values_neon(const Float16Storage* source, std::int32_t* result,
+                         std::size_t count)
+{
+    const float32x4_t min_val = vdupq_n_f32(-32768.0F);
+    const float32x4_t max_val = vdupq_n_f32(32767.0F);
+    std::size_t i = 0;
+    for (; i + 8 <= count; i += 8) {
+        std::uint16_t bits[8];
+        std::memcpy(bits, source + i, sizeof(bits));
+        const float16x8_t h = vreinterpretq_f16_u16(vld1q_u16(bits));
+        const float32x4_t v0 = vcvt_f32_f16(vget_low_f16(h));
+        const float32x4_t v1 = vcvt_high_f32_f16(h);
+        const uint32x4_t ok0 =
+            vandq_u32(vcgeq_f32(v0, min_val), vcleq_f32(v0, max_val));
+        const uint32x4_t ok1 =
+            vandq_u32(vcgeq_f32(v1, min_val), vcleq_f32(v1, max_val));
+        if (vminvq_u32(vandq_u32(ok0, ok1)) == 0U) {
+            throw std::runtime_error(
+                "entropy symbol is outside signed 16-bit range");
+        }
+        vst1q_s32(result + i, vcvtq_s32_f32(v0));
+        vst1q_s32(result + i + 4, vcvtq_s32_f32(v1));
+    }
+    for (; i < count; ++i) {
+        const float value = half_to_float(source[i]);
+        if (!std::isfinite(value) || value < -32768.0F || value > 32767.0F) {
+            throw std::runtime_error(
+                "entropy symbol is outside signed 16-bit range");
+        }
+        result[i] = static_cast<std::int32_t>(value);
+    }
+}
+
+void fp16_values_neon(const std::int32_t* values, Float16Storage* storage,
+                      std::size_t count) noexcept
+{
+    std::size_t i = 0;
+    for (; i + 8 <= count; i += 8) {
+        const float32x4_t f0 = vcvtq_f32_s32(vld1q_s32(values + i));
+        const float32x4_t f1 = vcvtq_f32_s32(vld1q_s32(values + i + 4));
+        const float16x8_t h = vcvt_high_f16_f32(vcvt_f16_f32(f0), f1);
+        std::uint16_t bits[8];
+        vst1q_u16(bits, vreinterpretq_u16_f16(h));
+        std::memcpy(storage + i, bits, sizeof(bits));
+    }
+    for (; i < count; ++i)
+        storage[i] = float_to_half(static_cast<float>(values[i]));
+}
+#endif
+
 void integer_values(TensorView tensor, std::vector<std::int32_t>& result)
 {
     if (tensor.data_type() != TensorDataType::kFloat16)
@@ -152,6 +210,10 @@ void integer_values(TensorView tensor, std::vector<std::int32_t>& result)
         return;
     }
 #endif
+#if MLVC_HAS_ARM64_NEON
+    integer_values_neon(source.data(), result.data(), source.size());
+    return;
+#else
     for (std::size_t i = 0; i < source.size(); ++i) {
         const float value = half_to_float(source[i]);
         if (!std::isfinite(value) || value < -32768.0F || value > 32767.0F)
@@ -159,6 +221,7 @@ void integer_values(TensorView tensor, std::vector<std::int32_t>& result)
                 "entropy symbol is outside signed 16-bit range");
         result[i] = static_cast<std::int32_t>(value);
     }
+#endif
 }
 
 #if MLVC_HAS_X86_F16C_AVX2
@@ -194,8 +257,13 @@ void fp16_values(const std::vector<std::int32_t>& values,
         return;
     }
 #endif
+#if MLVC_HAS_ARM64_NEON
+    fp16_values_neon(values.data(), storage.data(), values.size());
+    return;
+#else
     for (std::size_t i = 0; i < values.size(); ++i)
         storage[i] = float_to_half(static_cast<float>(values[i]));
+#endif
 }
 
 class CoderPair {

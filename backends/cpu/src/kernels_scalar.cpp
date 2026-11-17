@@ -598,6 +598,8 @@ const KernelSet& get_scalar_kernels() noexcept
         k.y1_tail_nhwc = &scalar_y1_tail_nhwc;
         k.nchw_to_nhwc = &scalar_nchw_to_nhwc;
         k.nhwc_to_nchw = &scalar_nhwc_to_nchw;
+        k.depth_to_space_nhwc = &execute_depth_to_space_nhwc;
+        k.space_to_depth_nhwc = &execute_space_to_depth_nhwc;
         return k;
     }();
     return scalar_set;

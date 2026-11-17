@@ -4,7 +4,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <stdexcept>
+
+#if defined(__aarch64__)
+#include <arm_neon.h>
+#endif
 
 namespace mlvc {
 
@@ -50,9 +55,26 @@ void extract_scales(TensorView z_raw, const ModelConfig& config,
         throw std::runtime_error("scale decoder channel mapping is invalid");
     std::vector<std::int32_t> base_scales(
         static_cast<std::size_t>(base_channels) * z_height * z_width);
-    for (std::size_t index = 0; index < base_scales.size(); ++index) {
-        const float value = std::abs(half_to_float(z[index]));
-        base_scales[index] =
+    std::size_t base_idx = 0;
+#if defined(__aarch64__)
+    const std::size_t count = base_scales.size();
+    const int32x4_t zero = vdupq_n_s32(0);
+    const int32x4_t max_idx = vdupq_n_s32(scale_max_index);
+    for (; base_idx + 8 <= count; base_idx += 8) {
+        std::uint16_t bits[8];
+        std::memcpy(bits, z.data() + base_idx, sizeof(bits));
+        const float16x8_t h = vreinterpretq_f16_u16(vld1q_u16(bits));
+        const float32x4_t a0 = vabsq_f32(vcvt_f32_f16(vget_low_f16(h)));
+        const float32x4_t a1 = vabsq_f32(vcvt_high_f32_f16(h));
+        const int32x4_t s0 = vminq_s32(vmaxq_s32(vcvtq_s32_f32(a0), zero), max_idx);
+        const int32x4_t s1 = vminq_s32(vmaxq_s32(vcvtq_s32_f32(a1), zero), max_idx);
+        vst1q_s32(base_scales.data() + base_idx, s0);
+        vst1q_s32(base_scales.data() + base_idx + 4, s1);
+    }
+#endif
+    for (; base_idx < base_scales.size(); ++base_idx) {
+        const float value = std::abs(half_to_float(z[base_idx]));
+        base_scales[base_idx] =
             std::clamp(static_cast<std::int32_t>(value), 0, scale_max_index);
     }
 

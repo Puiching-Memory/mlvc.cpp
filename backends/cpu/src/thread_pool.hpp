@@ -57,6 +57,7 @@ private:
         std::size_t grain_size = 1;
         std::atomic<std::size_t> next_item{0};
         std::atomic<std::size_t> remaining_workers{0};
+        std::atomic<int> active_fast_threads{0};
         std::exception_ptr first_exception;
         std::mutex error_mutex;
     };

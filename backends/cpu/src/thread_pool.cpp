@@ -1,5 +1,13 @@
 #include "thread_pool.hpp"
 
+#include <array>
+#include <cstdint>
+#include <cstdio>
+
+#if defined(__linux__)
+#include <sched.h>
+#endif
+
 #include <algorithm>
 #include <fstream>
 #include <string>
@@ -103,17 +111,146 @@ CpuThreadPool::~CpuThreadPool()
     }
 }
 
+namespace {
+
+struct CpuTopology {
+    static constexpr int kMaxCpus = 256;
+    bool has_hetero = false;
+    std::array<bool, kMaxCpus> is_little{};
+    std::array<bool, kMaxCpus> is_prime{};
+};
+
+CpuTopology probe_cpu_topology() noexcept
+{
+    CpuTopology topo{};
+#if defined(__linux__)
+    std::array<unsigned long long, CpuTopology::kMaxCpus> freqs{};
+    unsigned long long min_freq = 0;
+    unsigned long long max_freq = 0;
+    int seen = 0;
+    for (int cpu = 0; cpu < CpuTopology::kMaxCpus; ++cpu) {
+        char path[96];
+        std::snprintf(path, sizeof(path),
+                      "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", cpu);
+        FILE* f = std::fopen(path, "r");
+        if (f == nullptr)
+            continue;
+        unsigned long long freq = 0;
+        if (std::fscanf(f, "%llu", &freq) == 1 && freq > 0) {
+            freqs[static_cast<std::size_t>(cpu)] = freq;
+            min_freq = (seen == 0) ? freq : std::min(min_freq, freq);
+            max_freq = std::max(max_freq, freq);
+            ++seen;
+        }
+        std::fclose(f);
+    }
+    if (seen >= 2 && min_freq * 100ULL < max_freq * 85ULL) {
+        topo.has_hetero = true;
+        for (int cpu = 0; cpu < CpuTopology::kMaxCpus; ++cpu) {
+            const unsigned long long freq = freqs[static_cast<std::size_t>(cpu)];
+            if (freq == 0)
+                continue;
+            if (freq * 100ULL < max_freq * 80ULL)
+                topo.is_little[static_cast<std::size_t>(cpu)] = true;
+            else if (freq * 100ULL >= max_freq * 95ULL)
+                topo.is_prime[static_cast<std::size_t>(cpu)] = true;
+        }
+    }
+#endif
+    return topo;
+}
+
+const CpuTopology& cpu_topology() noexcept
+{
+    static const CpuTopology kTopology = probe_cpu_topology();
+    return kTopology;
+}
+
+inline int current_cpu_id() noexcept
+{
+#if defined(__linux__)
+    return sched_getcpu();
+#else
+    return -1;
+#endif
+}
+
+}  // namespace
+
 void CpuThreadPool::run_task_chunks(TaskContext* task)
 {
     try {
-        for (;;) {
-            const std::size_t start =
-                task->next_item.fetch_add(task->grain_size, std::memory_order_relaxed);
-            if (start >= task->total_items)
-                break;
-            const std::size_t end =
-                std::min(start + task->grain_size, task->total_items);
-            task->invoke(task->fn_ptr, start, end);
+        const CpuTopology& topo = cpu_topology();
+        if (!topo.has_hetero) {
+            for (;;) {
+                const std::size_t start =
+                    task->next_item.fetch_add(task->grain_size, std::memory_order_relaxed);
+                if (start >= task->total_items)
+                    break;
+                const std::size_t end =
+                    std::min(start + task->grain_size, task->total_items);
+                task->invoke(task->fn_ptr, start, end);
+            }
+        } else {
+            const int cpu = current_cpu_id();
+            const bool is_little =
+                (cpu >= 0 && cpu < CpuTopology::kMaxCpus) &&
+                topo.is_little[static_cast<std::size_t>(cpu)];
+            const bool is_prime =
+                (cpu >= 0 && cpu < CpuTopology::kMaxCpus) &&
+                topo.is_prime[static_cast<std::size_t>(cpu)];
+
+            struct FastThreadGuard {
+                std::atomic<int>* counter = nullptr;
+                ~FastThreadGuard()
+                {
+                    if (counter != nullptr)
+                        counter->fetch_sub(1, std::memory_order_release);
+                }
+            } fast_guard;
+            if (!is_little) {
+                task->active_fast_threads.fetch_add(1, std::memory_order_acq_rel);
+                fast_guard.counter = &task->active_fast_threads;
+            }
+
+            const std::size_t total = task->total_items;
+            const std::size_t grain = std::max<std::size_t>(1U, task->grain_size);
+            const std::size_t tail_reserve =
+                std::min<std::size_t>(total / 3U, grain * 12U);
+
+            for (;;) {
+                std::size_t cur = task->next_item.load(std::memory_order_relaxed);
+                std::size_t start = 0;
+                std::size_t end = 0;
+                for (;;) {
+                    if (cur >= total) {
+                        start = total;
+                        break;
+                    }
+                    const std::size_t remaining = total - cur;
+                    if (is_little && remaining <= tail_reserve &&
+                        task->active_fast_threads.load(std::memory_order_acquire) > 0) {
+                        start = total;
+                        break;
+                    }
+                    std::size_t chunk = grain;
+                    if (!is_little && remaining > grain * 24U) {
+                        const std::size_t mult =
+                            (is_prime && remaining > grain * 48U) ? 3U : 2U;
+                        chunk = grain * mult;
+                    }
+                    end = (chunk >= remaining) ? total : (cur + chunk);
+                    if (task->next_item.compare_exchange_weak(
+                            cur, end, std::memory_order_relaxed,
+                            std::memory_order_relaxed)) {
+                        start = cur;
+                        break;
+                    }
+                }
+                if (start >= total)
+                    break;
+                task->invoke(task->fn_ptr, start, end);
+            }
         }
     } catch (...) {
         std::lock_guard<std::mutex> err_lock(task->error_mutex);
@@ -167,7 +304,7 @@ void CpuThreadPool::worker_loop(std::size_t /*worker_index*/)
     for (;;) {
         TaskContext* task = nullptr;
         // Brief user-space spin catches back-to-back layers inside one frame without futex wakeup cost.
-        constexpr int kWorkerSpinIters = 2000;
+        constexpr int kWorkerSpinIters = 16000;
         for (int iter = 0; iter < kWorkerSpinIters; ++iter) {
             const std::uint64_t cur_gen = generation_.load(std::memory_order_acquire);
             if (cur_gen != seen_generation) {

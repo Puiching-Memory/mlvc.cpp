@@ -13,7 +13,8 @@
 namespace mlvc::cpu_backend {
 namespace {
 
-class CpuBackend final : public mlvc::InferenceBackend {
+class CpuBackend final : public mlvc::InferenceBackend,
+                         public mlvc::BufferedCodecBackend {
 public:
     explicit CpuBackend(BackendOptions options)
         : options_(std::move(options))
@@ -39,19 +40,74 @@ public:
 
     std::vector<Tensor> run(const std::vector<Tensor>& inputs) override
     {
-        if (!plan_)
-            throw std::runtime_error("cpu: load() must be called before run()");
-        return plan_->run(inputs);
+        return require_plan("run()").run(inputs);
     }
 
     void reset_state() override
     {
-        if (!plan_)
-            throw std::runtime_error("cpu: load() must be called before reset_state()");
-        plan_->reset_state();
+        require_plan("reset_state()").reset_state();
+    }
+
+    void configure_codec_io(const CodecIoConfig& config) override
+    {
+        require_plan("configure_codec_io()").configure_codec_io(config);
+    }
+
+    std::size_t codec_slot_count() const noexcept override
+    {
+        return plan_ ? plan_->codec_slot_count() : 0;
+    }
+
+    MutableYuv420FrameView encoder_input_yuv(std::size_t slot) override
+    {
+        return require_plan("encoder_input_yuv()").encoder_input_yuv(slot);
+    }
+
+    void submit_encoder(std::size_t slot, int shifted_q) override
+    {
+        require_plan("submit_encoder()").submit_encoder(slot, shifted_q);
+    }
+
+    std::vector<TensorView> encoder_outputs(std::size_t slot) const override
+    {
+        return require_plan("encoder_outputs()").encoder_outputs(slot);
+    }
+
+    std::vector<MutableTensorView> decoder_inputs(std::size_t slot) override
+    {
+        return require_plan("decoder_inputs()").decoder_inputs(slot);
+    }
+
+    void submit_decoder(std::size_t slot, int shifted_q) override
+    {
+        require_plan("submit_decoder()").submit_decoder(slot, shifted_q);
+    }
+
+    Yuv420FrameView decoder_output_yuv(std::size_t slot) const override
+    {
+        return require_plan("decoder_output_yuv()").decoder_output_yuv(slot);
+    }
+
+    void wait_codec_slot(std::size_t slot) override
+    {
+        require_plan("wait_codec_slot()").wait_codec_slot(slot);
     }
 
 private:
+    CpuExecutionPlan& require_plan(std::string_view caller)
+    {
+        if (!plan_)
+            throw std::runtime_error("cpu: load() must be called before " + std::string(caller));
+        return *plan_;
+    }
+
+    const CpuExecutionPlan& require_plan(std::string_view caller) const
+    {
+        if (!plan_)
+            throw std::runtime_error("cpu: load() must be called before " + std::string(caller));
+        return *plan_;
+    }
+
     BackendOptions options_;
     std::unique_ptr<CpuExecutionPlan> plan_;
 };

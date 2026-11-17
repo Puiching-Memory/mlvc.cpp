@@ -151,6 +151,14 @@ struct KernelSet {
     void (*nhwc_to_nchw)(const Float16Storage* nhwc, Float16Storage* nchw,
                          std::size_t n, std::size_t hw, std::size_t c,
                          CpuThreadPool& pool) = nullptr;
+
+    void (*depth_to_space_nhwc)(const Float16Storage* input, Float16Storage* output,
+                                int n, int c, int h, int w, int block_size,
+                                CpuThreadPool& pool) = nullptr;
+
+    void (*space_to_depth_nhwc)(const Float16Storage* input, Float16Storage* output,
+                                int n, int c, int h, int w, int block_size,
+                                CpuThreadPool& pool) = nullptr;
 };
 
 const KernelSet& get_scalar_kernels() noexcept;

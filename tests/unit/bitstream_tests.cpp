@@ -2,6 +2,8 @@
 // Copyright (c) 2026 Microsoft Corporation
 // Licensed under the MIT License. See third_party/libmlvc/LICENSE.
 
+#include "test_support.hpp"
+
 #include "core/bitstream.hpp"
 
 #include <algorithm>
@@ -20,8 +22,7 @@ namespace {
 
 void require(bool condition, const std::string& message)
 {
-    if (!condition)
-        throw std::runtime_error(message);
+    MLVC_REQUIRE(condition, message);
 }
 
 std::vector<std::byte> bytes(std::initializer_list<std::uint8_t> vals)
@@ -90,7 +91,7 @@ struct OwningFrame {
     OwningFrame with_ltr(std::initializer_list<std::pair<int, int>> slots) const
     {
         OwningFrame frame = *this;
-        for (const auto [slot_idx, frame_idx] : slots)
+        for (const auto& [slot_idx, frame_idx] : slots)
             frame.ltr_slots[static_cast<std::size_t>(slot_idx)] =
                 mlvc::LtrSlotInfo{frame_idx};
         return frame;
@@ -834,6 +835,42 @@ void test_access_unit_reader_and_validation()
     require(missing_sps, "encoding P-frame before I-frame must throw kMissingSps");
 }
 
+void test_decoder_strong_exception_safety()
+{
+    const auto payload = bytes({0xCA, 0xFE});
+    const auto idr = OwningFrame::i_frame(payload, 320, 180, 26);
+    const auto p1 = idr.as_p_frame(1, 0);
+
+    mlvc::BitstreamEncoder encoder;
+    const auto idr_span = encoder.encode(idr.view());
+    const std::vector<std::byte> idr_au(idr_span.begin(), idr_span.end());
+    const auto p1_span = encoder.encode(p1.view());
+    const std::vector<std::byte> p1_au(p1_span.begin(), p1_span.end());
+
+    mlvc::BitstreamDecoder decoder;
+    const auto decoded_idr = decoder.decode(idr_au);
+    expect_frame_data_equal(decoded_idr, idr.view(), "initial IDR");
+
+    // Feed a corrupt AU containing a PPS referencing unknown SPS ID 1.
+    // Must throw kMissingSps AND leave active SPS/PPS intact for subsequent P-frames.
+    const auto bad_pps_au = bytes({
+        0x00, 0x00, 0x00, 0x01, 0x44, 0x01, 0xAC,
+        0x00, 0x00, 0x00, 0x01, 0x28, 0x01, 0xC0, 0xCA, 0xFE, 0x80,
+    });
+    bool threw_missing_sps = false;
+    try {
+        static_cast<void>(decoder.decode(bad_pps_au));
+    } catch (const mlvc::BitstreamError& err) {
+        threw_missing_sps = (err.code() == mlvc::BitstreamErrorCode::kMissingSps);
+    }
+    require(threw_missing_sps, "bad PPS must throw kMissingSps");
+    require(decoder.sps().sps_id == 0 && decoder.pps().pps_id == 0,
+            "failed decode must not corrupt active SPS/PPS");
+
+    const auto decoded_p1 = decoder.decode(p1_au);
+    expect_frame_data_equal(decoded_p1, p1.view(), "P-frame after failed bad-PPS AU");
+}
+
 }  // namespace
 
 int main()
@@ -842,6 +879,7 @@ int main()
         test_v0_frozen_vectors();
         test_v0_error_vectors();
         test_access_unit_reader_and_validation();
+        test_decoder_strong_exception_safety();
         std::cout << "Bitstream tests passed\n";
         return 0;
     } catch (const std::exception& error) {

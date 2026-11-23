@@ -1,9 +1,11 @@
 #pragma once
 
+#include "aligned_buffer.hpp"
 #include "cpu_features.hpp"
 #include "fusion_matcher.hpp"
 #include "kernels_common.hpp"
 #include "thread_pool.hpp"
+#include "weight_cache.hpp"
 
 #include "core/assets.hpp"
 #include "core/half.hpp"
@@ -15,6 +17,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <vector>
@@ -26,7 +29,8 @@ public:
     CpuExecutionPlan(const ModelAssetReader& assets,
                      const std::string& model_name,
                      const ModelExecutionConfig& config,
-                     int num_threads);
+                     int num_threads,
+                     bool share_thread_pool = false);
 
     std::vector<Tensor> run(const std::vector<Tensor>& inputs);
     void reset_state();
@@ -42,9 +46,11 @@ public:
     void wait_codec_slot(std::size_t slot);
 
     GemmMode gemm_mode() const noexcept { return kernels_->mode; }
-    std::size_t thread_count() noexcept { return pool_.thread_count(); }
+    std::size_t thread_count() const noexcept { return pool_->thread_count(); }
     std::size_t step_count() const noexcept { return steps_.size(); }
     std::size_t arena_bytes() const noexcept { return arena_.size(); }
+    const void* arena_data() const noexcept { return arena_.data(); }
+    const void* weight_bank_identity() const noexcept { return weight_bank_.get(); }
 
 private:
     struct TensorMeta {
@@ -61,9 +67,9 @@ private:
         int state_output_slot = -1;
         std::size_t graph_input_pos = 0;
         std::size_t arena_offset = 0;
-        std::vector<Float16Storage> const_fp16;
-        std::vector<std::int32_t> const_int32;
-        std::vector<std::int64_t> const_int64;
+        const Float16Storage* const_fp16 = nullptr;
+        const std::int32_t* const_int32 = nullptr;
+        const std::int64_t* const_int64 = nullptr;
     };
 
     struct ConvExecInfo {
@@ -84,7 +90,7 @@ private:
         int ph = 0;
         int pw = 0;
         int groups = 1;
-        std::vector<Float16Storage> packed_weights;
+        const Float16Storage* packed_weights = nullptr;
     };
 
     struct SingleOpInfo {
@@ -92,7 +98,6 @@ private:
         std::vector<aot::TensorId> inputs;
         aot::TensorId output = 0;
 
-        // Op-specific predecoded metadata:
         float alpha = 0.0F;
         float clamp_min = 0.0F;
         float clamp_max = 0.0F;
@@ -106,17 +111,14 @@ private:
         std::size_t bcast_spatial = 0;
         std::size_t bcast_channels = 0;
 
-        // Predecoded Slice NCHW metadata:
         int slice_id[4] = {};
         int slice_od[4] = {};
         int slice_starts[4] = {};
         int slice_steps[4] = {};
 
-        // Predecoded Concat dims:
         std::vector<std::vector<int>> concat_in_dims;
         int concat_od[4] = {};
 
-        // Conv metadata (for unfused CONV nodes):
         ConvExecInfo conv;
     };
 
@@ -134,6 +136,15 @@ private:
         std::size_t byte_size = 0;
     };
 
+    struct CodecSlot {
+        std::vector<std::uint8_t> yuv;
+        std::vector<std::vector<std::byte>> inputs;
+        std::vector<std::vector<std::byte>> outputs;
+    };
+
+    static bool needs_nhwc_transpose(const std::vector<std::int64_t>& shape,
+                                     aot::DataType dt) noexcept;
+
     const TensorMeta* find_meta(aot::TensorId id) const noexcept;
     TensorMeta& require_meta(aot::TensorId id);
     const TensorMeta& require_meta(aot::TensorId id) const;
@@ -142,19 +153,20 @@ private:
     Float16Storage* fp16_mut(aot::TensorId id);
     const Float16Storage* fp16_const(aot::TensorId id) const;
 
-    struct CodecSlot {
-        std::vector<std::uint8_t> yuv;
-        std::vector<std::vector<std::byte>> inputs;
-        std::vector<std::vector<std::byte>> outputs;
-    };
+    void write_graph_input_bytes(const TensorMeta& meta, const void* src_raw,
+                                 std::byte* dst_raw);
+    void write_graph_output_bytes(const TensorMeta& meta, const void* src_raw,
+                                  std::byte* dst_raw);
 
-    void compile_steps(const aot::LoadedGraph& loaded, const ModelExecutionConfig& config);
+    void compile_steps(const aot::LoadedGraph& loaded,
+                       const ModelExecutionConfig& config);
     void allocate_arena();
     void execute_step(const CompiledStep& step);
     void execute_all_steps_and_swap_states();
 
     const KernelSet* kernels_ = nullptr;
-    CpuThreadPool pool_;
+    std::shared_ptr<CpuThreadPool> pool_;
+    std::shared_ptr<const SharedWeightBank> weight_bank_;
     std::string model_name_;
     std::mutex exec_mutex_;
 
@@ -166,9 +178,9 @@ private:
     std::vector<ResolvedStateBinding> state_bindings_;
     bool state_initialized_ = false;
 
-    std::vector<std::vector<std::byte>> input_buffers_;
-    std::vector<std::vector<std::byte>> state_output_buffers_;
-    std::vector<std::byte> arena_;
+    std::vector<AlignedByteBuffer> input_buffers_;
+    std::vector<AlignedByteBuffer> state_output_buffers_;
+    AlignedByteBuffer arena_;
     std::vector<CompiledStep> steps_;
 
     CodecIoConfig codec_io_{};

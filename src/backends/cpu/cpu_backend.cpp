@@ -35,7 +35,8 @@ public:
         const auto assets = resolve_model_asset_reader(
             options_.model_dir, options_.asset_reader);
         plan_ = std::make_unique<CpuExecutionPlan>(
-            *assets, model_name, config, options_.num_threads);
+            *assets, model_name, config, options_.num_threads,
+            options_.share_thread_pool);
     }
 
     std::vector<Tensor> run(const std::vector<Tensor>& inputs) override

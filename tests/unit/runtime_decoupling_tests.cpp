@@ -1,87 +1,55 @@
+#include "test_support.hpp"
+
 #include "codec/pipeline.hpp"
 #include "core/assets.hpp"
+#include "core/bitstream.hpp"
 #include "core/half.hpp"
 #include "core/model.hpp"
+#include "core/sha256.hpp"
 #include "core/yuv.hpp"
 #include "runtime/aot_graph.hpp"
 #include "runtime/backend.hpp"
 #include "mlvc_model.pb.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
-#include <map>
 #include <memory>
 #include <span>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace {
 
 using namespace mlvc;
-
-void require(bool condition, const char* message)
-{
-    if (!condition)
-        throw std::runtime_error(message);
-}
-
-std::string canonical_path_key(const std::filesystem::path& path)
-{
-    return path.lexically_normal().generic_string();
-}
+using mlvc::test::InMemoryAssetReader;
 
 std::vector<std::byte> serialize_message(const google::protobuf::MessageLite& message)
 {
-    const std::string encoded = message.SerializeAsString();
-    const auto span = std::as_bytes(std::span<const char>{encoded.data(), encoded.size()});
-    return {span.begin(), span.end()};
+    return mlvc::test::to_bytes(message.SerializeAsString());
 }
 
-class InMemoryAssetReader final : public ModelAssetReader {
-public:
-    explicit InMemoryAssetReader(std::string label) : label_(std::move(label)) {}
-
-    void put(const std::filesystem::path& relative_path, std::vector<std::byte> bytes)
-    {
-        files_[canonical_path_key(relative_path)] = std::move(bytes);
-    }
-
-    std::string location_label() const override { return label_; }
-
-    bool exists(const std::filesystem::path& relative_path) const override
-    {
-        return files_.contains(canonical_path_key(relative_path));
-    }
-
-    std::vector<std::byte> read_binary(
-        const std::filesystem::path& relative_path) const override
-    {
-        const auto found = files_.find(canonical_path_key(relative_path));
-        if (found == files_.end()) {
-            throw std::runtime_error(
-                "missing in-memory asset: " + relative_path.generic_string());
-        }
-        return found->second;
-    }
-
-private:
-    std::string label_;
-    std::map<std::string, std::vector<std::byte>> files_;
-};
+std::string sha256_bytes_str(std::span<const std::byte> data)
+{
+    const Sha256Digest d = sha256_digest(data);
+    return std::string(reinterpret_cast<const char*>(d.data()), d.size());
+}
 
 wire::Graph make_dummy_graph(const std::string& checkpoint_sha,
-                             std::size_t weights_bytes)
+                             const std::vector<std::byte>& weights)
 {
     wire::Graph graph;
     graph.set_schema_version(3);
     graph.set_checkpoint_sha256(checkpoint_sha);
-    graph.set_weights_sha256(std::string(32, 'w'));
-    graph.set_weights_bytes(weights_bytes);
+    graph.set_weights_sha256(sha256_bytes_str(weights));
+    graph.set_weights_bytes(weights.size());
     graph.set_arena_bytes(256);
     graph.set_arena_alignment(256);
     for (std::uint32_t id = 1; id <= 3; ++id) {
@@ -89,9 +57,9 @@ wire::Graph make_dummy_graph(const std::string& checkpoint_sha,
         tensor->set_id(id);
         tensor->set_name("t" + std::to_string(id));
         tensor->set_dtype(wire::FP16);
-        tensor->add_shape(id == 1 ? static_cast<std::int64_t>(weights_bytes / 2) : 1);
+        tensor->add_shape(id == 1 ? static_cast<std::int64_t>(weights.size() / 2) : 1);
     }
-    graph.mutable_tensors(0)->mutable_weight()->set_size_bytes(weights_bytes);
+    graph.mutable_tensors(0)->mutable_weight()->set_size_bytes(weights.size());
     auto* arena = graph.mutable_tensors(2)->mutable_arena();
     arena->set_size_bytes(256);
     arena->set_death(1);
@@ -108,7 +76,6 @@ wire::Graph make_dummy_graph(const std::string& checkpoint_sha,
 std::shared_ptr<InMemoryAssetReader> make_synthetic_bundle()
 {
     const std::string checkpoint_sha(32, 'c');
-    const std::string entropy_sha(32, 'e');
 
     wire::ModelMetadata metadata;
     metadata.set_schema_version(1);
@@ -133,17 +100,6 @@ std::shared_ptr<InMemoryAssetReader> make_synthetic_bundle()
     metadata.set_iframe_period(2);
     metadata.set_disable_feature_reset(true);
     metadata.set_checkpoint_sha256(checkpoint_sha);
-
-    wire::ModelBundle bundle;
-    bundle.set_schema_version(2);
-    bundle.set_profile("synthetic-v1");
-    bundle.set_model_version("v1");
-    bundle.set_width(64);
-    bundle.set_height(64);
-    bundle.set_checkpoint_sha256(checkpoint_sha);
-    bundle.set_entropy_model_sha256(entropy_sha);
-    bundle.mutable_contract()->set_container("mlvc-nalu-v0");
-    bundle.mutable_contract()->set_entropy("canonical-pmf-v1");
 
     // 4 scale levels, each accepting symbols in {-1, 0, 1}.
     wire::GaussianPmf gaussian;
@@ -171,19 +127,44 @@ std::shared_ptr<InMemoryAssetReader> make_synthetic_bundle()
         bit_estimator.mutable_table()->add_values(16384);
     }
 
+    const auto gaussian_bytes = serialize_message(gaussian);
+    const auto bit_est_bytes = serialize_message(bit_estimator);
+    const Sha256Digest g_hash = sha256_digest(gaussian_bytes);
+    const Sha256Digest b_hash = sha256_digest(bit_est_bytes);
+    Sha256 entropy_hasher;
+    entropy_hasher.update(g_hash);
+    entropy_hasher.update(b_hash);
+    const Sha256Digest entropy_digest = entropy_hasher.finalize();
+    const std::string entropy_sha(
+        reinterpret_cast<const char*>(entropy_digest.data()), entropy_digest.size());
+
+    wire::ModelBundle bundle;
+    bundle.set_schema_version(2);
+    bundle.set_profile("synthetic-v1");
+    bundle.set_model_version("v1");
+    bundle.set_width(64);
+    bundle.set_height(64);
+    bundle.set_checkpoint_sha256(checkpoint_sha);
+    bundle.set_entropy_model_sha256(entropy_sha);
+    bundle.mutable_contract()->set_container("mlvc-nalu-v0");
+    bundle.mutable_contract()->set_entropy("canonical-pmf-v1");
+
+    const std::vector<std::byte> enc_weights{
+        std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
+    const std::vector<std::byte> dec_weights{
+        std::byte{5}, std::byte{6}};
+
     auto reader = std::make_shared<InMemoryAssetReader>("memory://synthetic-v1");
     reader->put("metadata.pb", serialize_message(metadata));
     reader->put("model_bundle.pb", serialize_message(bundle));
-    reader->put("gaussian_pmf.pb", serialize_message(gaussian));
-    reader->put("bit_estimator_pmf.pb", serialize_message(bit_estimator));
+    reader->put("gaussian_pmf.pb", gaussian_bytes);
+    reader->put("bit_estimator_pmf.pb", bit_est_bytes);
     reader->put("aot/MLVCEncoder/graph.pb",
-                serialize_message(make_dummy_graph(checkpoint_sha, 4)));
-    reader->put("aot/MLVCEncoder/weights.bin",
-                {std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}});
+                serialize_message(make_dummy_graph(checkpoint_sha, enc_weights)));
+    reader->put("aot/MLVCEncoder/weights.bin", enc_weights);
     reader->put("aot/MLVCDecoder/graph.pb",
-                serialize_message(make_dummy_graph(checkpoint_sha, 2)));
-    reader->put("aot/MLVCDecoder/weights.bin",
-                {std::byte{5}, std::byte{6}});
+                serialize_message(make_dummy_graph(checkpoint_sha, dec_weights)));
+    reader->put("aot/MLVCDecoder/weights.bin", dec_weights);
     return reader;
 }
 
@@ -210,7 +191,7 @@ public:
     void load(const std::string& model_name,
               const ModelExecutionConfig& execution) override
     {
-        require(options_.asset_reader != nullptr,
+        MLVC_REQUIRE(options_.asset_reader != nullptr,
                 "backend should receive resolved ModelAssetReader");
         loaded_ = aot::load_aot_graph(*options_.asset_reader, model_name);
         config_ = load_model_config(*options_.asset_reader);
@@ -227,7 +208,7 @@ public:
     std::vector<Tensor> run(const std::vector<Tensor>& inputs) override
     {
         if (model_name_ == "MLVCEncoder") {
-            require(device_state_ && inputs.size() == 2,
+            MLVC_REQUIRE(device_state_ && inputs.size() == 2,
                     "EncoderSession with device state should pass x and q_index_shifted");
             ++telemetry_->encoder_runs;
             const auto& q_values = std::get<std::vector<std::int32_t>>(inputs[1].data);
@@ -260,7 +241,7 @@ public:
         }
 
         if (model_name_ == "MLVCDecoder") {
-            require(device_state_ && inputs.size() == 4,
+            MLVC_REQUIRE(device_state_ && inputs.size() == 4,
                     "DecoderSession with device state should pass latents and q_index_shifted");
             ++telemetry_->decoder_runs;
             const auto& q_values = std::get<std::vector<std::int32_t>>(inputs[3].data);
@@ -297,14 +278,15 @@ void test_backend_registry_and_aot_assets()
 {
     const auto bundle = make_synthetic_bundle();
     const ModelConfig config = load_model_config(*bundle);
-    require(config.name == "synthetic-v1" && config.model_width == 64,
+    MLVC_REQUIRE(config.name == "synthetic-v1" && config.model_width == 64,
             "ModelConfig loaded via ModelAssetReader");
 
     const aot::LoadedGraph encoder_graph = aot::load_aot_graph(*bundle, "MLVCEncoder");
-    require(encoder_graph.weights.size() == 4, "AOT graph weights loaded via asset reader");
+    MLVC_REQUIRE(encoder_graph.weights.size() == 4, "AOT graph weights loaded via asset reader");
 
     auto mismatched = make_synthetic_bundle();
-    wire::Graph bad_graph = make_dummy_graph(std::string(32, 'x'), 4);
+    const std::vector<std::byte> enc_w{std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
+    wire::Graph bad_graph = make_dummy_graph(std::string(32, 'x'), enc_w);
     mismatched->put("aot/MLVCEncoder/graph.pb", serialize_message(bad_graph));
     bool threw = false;
     try {
@@ -312,7 +294,19 @@ void test_backend_registry_and_aot_assets()
     } catch (const std::exception&) {
         threw = true;
     }
-    require(threw, "mismatched AOT checkpoint SHA must throw");
+    MLVC_REQUIRE(threw, "mismatched AOT checkpoint SHA must throw");
+
+    // Verify tampered weights.bin fails real SHA-256 verification.
+    auto tampered = make_synthetic_bundle();
+    tampered->put("aot/MLVCEncoder/weights.bin",
+                  {std::byte{9}, std::byte{2}, std::byte{3}, std::byte{4}});
+    threw = false;
+    try {
+        (void)aot::load_aot_graph(*tampered, "MLVCEncoder");
+    } catch (const std::exception&) {
+        threw = true;
+    }
+    MLVC_REQUIRE(threw, "tampered AOT weights.bin must fail SHA-256 verification");
 
     auto telemetry = std::make_shared<MockTelemetry>();
     register_backend(
@@ -329,17 +323,17 @@ void test_backend_registry_and_aot_assets()
         true);
 
     const auto names = available_backends();
-    require(std::find(names.begin(), names.end(), "mock-alt") != names.end() &&
+    MLVC_REQUIRE(std::find(names.begin(), names.end(), "mock-alt") != names.end() &&
             std::find(names.begin(), names.end(), "mock-primary") != names.end(),
             "registered backends must appear in available_backends()");
-    require(default_backend_name() == "mock-primary",
+    MLVC_REQUIRE(default_backend_name() == "mock-primary",
             "make_default=true should update default_backend_name()");
 
     BackendOptions opts;
     opts.backend_name = "mock-alt";
     opts.asset_reader = bundle;
     auto created = create_backend(opts);
-    require(created->name() == "mock-alt", "explicit backend selection must pick mock-alt");
+    MLVC_REQUIRE(created->name() == "mock-alt", "explicit backend selection must pick mock-alt");
 
     opts.backend_name = "nonexistent-backend";
     threw = false;
@@ -348,7 +342,7 @@ void test_backend_registry_and_aot_assets()
     } catch (const std::exception&) {
         threw = true;
     }
-    require(threw, "unknown backend name must throw");
+    MLVC_REQUIRE(threw, "unknown backend name must throw");
 }
 
 void test_sessions_without_disk_io()
@@ -401,34 +395,137 @@ void test_sessions_without_disk_io()
     const EncodedFrame p0 = encoder.encode_frame(yuv420_view(f0));
     const EncodedFrame p1 = encoder.encode_frame(yuv420_view(f1));
     const EncodedFrame p2 = encoder.encode_frame(yuv420_view(f2), 2);
-    require(p0.frame_type == FrameType::kIFrame &&
+    MLVC_REQUIRE(p0.frame_type == FrameType::kIFrame &&
             p1.frame_type == FrameType::kPFrame &&
             p2.frame_type == FrameType::kIFrame &&
             !p0.bitstream.empty() && !p1.bitstream.empty() &&
             !p2.bitstream.empty(),
             "encoded frames must produce valid NALU access units");
-    require(encoder.frame_index() == 3, "encoder frame_index must track encoded frames");
-    require(enc_telemetry->encoder_runs == 3 && enc_telemetry->resets == 2,
+    MLVC_REQUIRE(encoder.frame_index() == 3, "encoder frame_index must track encoded frames");
+    MLVC_REQUIRE(enc_telemetry->encoder_runs == 3 && enc_telemetry->resets == 2,
             "GOP boundary should trigger backend reset_state() on I-frames");
-    require(enc_telemetry->shifted_qs == (std::vector<int>{3, 1, 4}),
+    MLVC_REQUIRE(enc_telemetry->shifted_qs == (std::vector<int>{3, 1, 4}),
             "QP shifts across GOP frames should match metadata schedule");
 
     const Yuv420Frame d0 = decoder.decode_frame(p0);
     Yuv420Frame reusable = make_solid_frame(0);
     decoder.decode_frame_into(p1, mutable_yuv420_view(reusable));
     const Yuv420Frame d2 = decoder.decode_frame(p2);
-    require(decoder.frame_index() == 3, "decoder frame_index must track decoded frames");
-    require(dec_telemetry->decoder_runs == 3 && dec_telemetry->resets == 2,
+    MLVC_REQUIRE(decoder.frame_index() == 3, "decoder frame_index must track decoded frames");
+    MLVC_REQUIRE(dec_telemetry->decoder_runs == 3 && dec_telemetry->resets == 2,
             "decoder GOP boundary should reset state identically");
     // Frame 0 had state_token=0 => filler 0.75 * 255 = ~191; Frame 1 had state_token=1 => filler (0.25 + 0.125) * 255 = ~96.
     // Frame 2 reset state => back to state_token=0!
-    require(d0.y.at(0) > 150 && reusable.y.at(0) < 120 && d2.y.at(0) == d0.y.at(0),
+    MLVC_REQUIRE(d0.y.at(0) > 150 && reusable.y.at(0) < 120 && d2.y.at(0) == d0.y.at(0),
             "decoded YUV frames should reflect entropy-coded latents and GOP resets");
 
     encoder.reset();
     decoder.reset();
-    require(encoder.frame_index() == 0 && decoder.frame_index() == 0,
+    MLVC_REQUIRE(encoder.frame_index() == 0 && decoder.frame_index() == 0,
             "explicit reset() should rewind frame counters");
+
+    // Verify force_idr triggers an immediate IDR even mid-GOP.
+    const EncodedFrame idr0 = encoder.encode_frame(yuv420_view(f0));
+    const EncodedFrame forced_idr = encoder.encode_frame(yuv420_view(f1), 1, true);
+    MLVC_REQUIRE(idr0.frame_type == FrameType::kIFrame &&
+                forced_idr.frame_type == FrameType::kIFrame,
+            "force_idr must produce an IDR frame mid-GOP");
+
+    // Verify DecoderSession rejects a P-frame before IDR and rejects frame loss.
+    decoder.reset();
+    MLVC_REQUIRE_THROWS(static_cast<void>(decoder.decode_frame(p1)),
+                        "decoding P-frame before IDR must throw");
+
+    // Verify decode_video() also rejects missing-IDR P-frame on disk streams.
+    {
+        mlvc::test::ScopedTempDir temp("mlvc-pkt-loss");
+        const auto bad_stream_path = temp.path() / "bad.mlvc";
+        const auto out_yuv_path = temp.path() / "out.yuv";
+        {
+            std::ofstream out(bad_stream_path, std::ios::binary);
+            mlvc::write_access_unit(out, p0.bitstream);
+            // Feed p1 twice: second p1 expects ref_frame_idx=0 while last decoded is 1.
+            mlvc::write_access_unit(out, p1.bitstream);
+            mlvc::write_access_unit(out, p1.bitstream);
+        }
+        CodecOptions bad_dec_opts;
+        bad_dec_opts.width = 50;
+        bad_dec_opts.height = 38;
+        bad_dec_opts.input_path = bad_stream_path.string();
+        bad_dec_opts.output_path = out_yuv_path.string();
+        bad_dec_opts.backend_name = "mock-dec";
+        bad_dec_opts.asset_reader = bundle;
+        MLVC_REQUIRE_THROWS(static_cast<void>(decode_video(bad_dec_opts)),
+                            "decode_video must reject mismatched ref_frame_idx");
+    }
+}
+
+void test_execution_preference_and_concurrent_registry()
+{
+    const auto bundle = make_synthetic_bundle();
+    auto telemetry = std::make_shared<MockTelemetry>();
+
+    // Register failing default and NPU backends and verify automatic fallback to
+    // "cpu" when allowed (works identically even when a real GPU is installed).
+    register_backend(
+        "mock-npu-failing",
+        [](const BackendOptions&) -> std::unique_ptr<InferenceBackend> {
+            throw std::runtime_error("simulated accelerator driver unavailable");
+        },
+        true);
+    // Ensure a "cpu" backend is available for fallback check if compiled with MLVC_BACKEND=none.
+    const auto existing = available_backends();
+    if (std::find(existing.begin(), existing.end(), "cpu") == existing.end()) {
+        register_backend(
+            "cpu",
+            [telemetry](const BackendOptions& opts) {
+                return std::make_unique<MockCodecBackend>("cpu", opts, telemetry);
+            },
+            false);
+    }
+
+    BackendOptions fallback_opts;
+    fallback_opts.execution_preference = ExecutionPreference::kNpu;
+    fallback_opts.allow_cpu_fallback = true;
+    fallback_opts.asset_reader = bundle;
+    auto resolved = create_backend(fallback_opts);
+    MLVC_REQUIRE(resolved->name() == "cpu",
+            "accelerator failure with allow_cpu_fallback=true must fall back to cpu");
+
+    BackendOptions auto_fallback_opts;
+    auto_fallback_opts.execution_preference = ExecutionPreference::kAuto;
+    auto_fallback_opts.allow_cpu_fallback = true;
+    auto_fallback_opts.asset_reader = bundle;
+    auto resolved_auto = create_backend(auto_fallback_opts);
+    MLVC_REQUIRE(resolved_auto->name() == "cpu",
+            "default backend failure under kAuto with allow_cpu_fallback=true must fall back to cpu");
+
+    BackendOptions strict_opts = fallback_opts;
+    strict_opts.allow_cpu_fallback = false;
+    MLVC_REQUIRE_THROWS(static_cast<void>(create_backend(strict_opts)),
+            "accelerator failure with allow_cpu_fallback=false must throw");
+
+    // Concurrent registry mutation & default_backend_name() reads must never dangle or race.
+    std::atomic<bool> stop{false};
+    std::thread reader([&]() {
+        while (!stop.load(std::memory_order_acquire)) {
+            const std::string_view name = default_backend_name();
+            const char* cstr = compiled_backend_name_c_str();
+            if (name.empty() || !cstr || cstr[0] == '\0')
+                std::abort();
+        }
+    });
+    for (int i = 0; i < 64; ++i) {
+        const std::string bname = "mock-concurrent-" + std::to_string(i);
+        register_backend(
+            bname,
+            [bname, telemetry](const BackendOptions& opts) {
+                return std::make_unique<MockCodecBackend>(bname, opts, telemetry);
+            },
+            true);
+    }
+    stop.store(true, std::memory_order_release);
+    reader.join();
 }
 
 }  // namespace
@@ -438,6 +535,7 @@ int main()
     try {
         test_backend_registry_and_aot_assets();
         test_sessions_without_disk_io();
+        test_execution_preference_and_concurrent_registry();
         std::cout << "Runtime decoupling tests passed\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

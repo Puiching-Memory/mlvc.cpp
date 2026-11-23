@@ -1,3 +1,5 @@
+#include "test_support.hpp"
+
 #include "core/bitstream.hpp"
 #include "core/entropy.hpp"
 #include "core/half.hpp"
@@ -48,8 +50,7 @@ std::vector<std::byte> read_bytes(const std::filesystem::path& path)
 
 void require(bool condition, const char* message)
 {
-    if (!condition)
-        throw std::runtime_error(message);
+    MLVC_REQUIRE(condition, message);
 }
 
 bool fp16_numerically_equal(const mlvc::Tensor& lhs, const mlvc::Tensor& rhs)

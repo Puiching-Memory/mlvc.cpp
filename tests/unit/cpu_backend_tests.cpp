@@ -1,78 +1,36 @@
+#include "test_support.hpp"
+
+#include "backends/cpu/execution_plan.hpp"
+#include "backends/cpu/thread_pool.hpp"
 #include "core/assets.hpp"
 #include "core/half.hpp"
+#include "core/sha256.hpp"
 #include "core/tensor.hpp"
 #include "runtime/backend.hpp"
 #include "mlvc_model.pb.h"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
-#include <map>
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
 namespace {
 
 using namespace mlvc;
-
-void require(bool cond, const char* msg)
-{
-    if (!cond)
-        throw std::runtime_error(msg);
-}
-
-template <typename Fn>
-void expect_throw(Fn&& fn, const char* msg)
-{
-    try {
-        fn();
-    } catch (const std::exception&) {
-        return;
-    }
-    throw std::runtime_error(msg);
-}
-
-class MemoryAssetReader final : public ModelAssetReader {
-public:
-    void add(const std::filesystem::path& rel, std::vector<std::byte> data)
-    {
-        files_[rel.generic_string()] = std::move(data);
-    }
-
-    std::string location_label() const override { return "in-memory-test"; }
-
-    bool exists(const std::filesystem::path& rel) const override
-    {
-        return files_.find(rel.generic_string()) != files_.end();
-    }
-
-    std::vector<std::byte> read_binary(const std::filesystem::path& rel) const override
-    {
-        const auto it = files_.find(rel.generic_string());
-        if (it == files_.end())
-            throw std::runtime_error("missing in-memory asset: " + rel.generic_string());
-        return it->second;
-    }
-
-private:
-    std::map<std::string, std::vector<std::byte>> files_;
-};
-
-std::vector<std::byte> to_bytes(const std::string& s)
-{
-    std::vector<std::byte> out(s.size());
-    std::memcpy(out.data(), s.data(), s.size());
-    return out;
-}
+using mlvc::test::InMemoryAssetReader;
+using mlvc::test::ScopedEnvVar;
+using mlvc::test::to_bytes;
 
 class WireGraphBuilder {
 public:
@@ -299,6 +257,9 @@ public:
         if (weights_.empty())
             weights_.resize(256, std::byte{0});
         graph_.set_weights_bytes(weights_.size());
+        const Sha256Digest wdigest = sha256_digest(weights_);
+        graph_.set_weights_sha256(
+            std::string(reinterpret_cast<const char*>(wdigest.data()), wdigest.size()));
 
         wire::ModelMetadata meta;
         meta.set_schema_version(3);
@@ -318,11 +279,11 @@ public:
         meta.set_downsample_feature(2);
         meta.set_downsample_hyperprior(4);
 
-        auto reader = std::make_shared<MemoryAssetReader>();
-        reader->add("metadata.pb", to_bytes(meta.SerializeAsString()));
+        auto reader = std::make_shared<InMemoryAssetReader>();
+        reader->put("metadata.pb", to_bytes(meta.SerializeAsString()));
         const std::filesystem::path dir = std::filesystem::path("aot") / model_name_;
-        reader->add(dir / "graph.pb", to_bytes(graph_.SerializeAsString()));
-        reader->add(dir / "weights.bin", weights_);
+        reader->put(dir / "graph.pb", to_bytes(graph_.SerializeAsString()));
+        reader->put(dir / "weights.bin", weights_);
         return reader;
     }
 
@@ -398,9 +359,9 @@ std::vector<float> to_floats(const Tensor& t)
 
 void check_close(const Tensor& got, const std::vector<float>& expected, float tol, const char* msg)
 {
-    require(got.data_type() == TensorDataType::kFloat16, "expected fp16 output");
+    MLVC_REQUIRE(got.data_type() == TensorDataType::kFloat16, "expected fp16 output");
     const auto vals = to_floats(got);
-    require(vals.size() == expected.size(), msg);
+    MLVC_REQUIRE(vals.size() == expected.size(), msg);
     for (std::size_t i = 0; i < vals.size(); ++i) {
         if (std::fabs(vals[i] - expected[i]) > tol || std::isnan(vals[i])) {
             throw std::runtime_error(std::string(msg) + " at index " + std::to_string(i) +
@@ -413,25 +374,25 @@ void check_close(const Tensor& got, const std::vector<float>& expected, float to
 void test_backend_lifecycle()
 {
     const auto backends = available_backends();
-    require(std::find(backends.begin(), backends.end(), "cpu") != backends.end(),
+    MLVC_REQUIRE(std::find(backends.begin(), backends.end(), "cpu") != backends.end(),
             "cpu backend must be registered");
 
     BackendOptions strict_gpu;
     strict_gpu.backend_name = "cpu";
-    strict_gpu.asset_reader = std::make_shared<MemoryAssetReader>();
+    strict_gpu.asset_reader = std::make_shared<InMemoryAssetReader>();
     strict_gpu.execution_preference = ExecutionPreference::kGpu;
     strict_gpu.allow_cpu_fallback = false;
-    expect_throw([&] { create_backend(strict_gpu); },
-                 "strict GPU non-fallback should reject cpu backend");
+    MLVC_REQUIRE_THROWS(create_backend(strict_gpu),
+                        "strict GPU non-fallback should reject cpu backend");
 
     BackendOptions opts;
     opts.backend_name = "cpu";
-    opts.asset_reader = std::make_shared<MemoryAssetReader>();
+    opts.asset_reader = std::make_shared<InMemoryAssetReader>();
     opts.num_threads = 2;
     auto b = create_backend(opts);
-    require(b->name() == "cpu", "backend name must be cpu");
-    expect_throw([&] { b->run({}); }, "run before load must throw");
-    expect_throw([&] { b->reset_state(); }, "reset_state before load must throw");
+    MLVC_REQUIRE(b->name() == "cpu", "backend name must be cpu");
+    MLVC_REQUIRE_THROWS(b->run({}), "run before load must throw");
+    MLVC_REQUIRE_THROWS(b->reset_state(), "reset_state before load must throw");
 }
 
 void test_conv_and_epilogues()
@@ -531,7 +492,7 @@ void test_conv_and_epilogues()
     const auto x_tensor = make_fp16_tensor("x", {1, IC, H, W}, x_vals);
     const auto rw_tensor = make_fp16_tensor("res_wide", {1, WOC, H, W}, rw_vals);
     const auto outs = backend->run({x_tensor, rw_tensor});
-    require(outs.size() == 4U, "expected 4 outputs");
+    MLVC_REQUIRE(outs.size() == 4U, "expected 4 outputs");
 
     // Compute scalar ground truth.
     std::vector<float> exp_reglu(16 * H * W, 0.0F);
@@ -599,7 +560,7 @@ void test_conv_and_epilogues()
     auto b1_single = create_backend(opts1);
     b1_single->load("ConvNet", {});
     const auto outs1 = b1_single->run({x_tensor, rw_tensor});
-    require(outs[0].data == outs1[0].data && outs[1].data == outs1[1].data &&
+    MLVC_REQUIRE(outs[0].data == outs1[0].data && outs[1].data == outs1[1].data &&
             outs[2].data == outs1[2].data && outs[3].data == outs1[3].data,
             "1-thread and 4-thread execution must be bit-identical");
 }
@@ -646,18 +607,18 @@ void test_feature_update_and_state()
         in_vals[i] = (i % 7 == 0) ? 1.0F : 0.5F;
     const auto chunk_tensor = make_fp16_tensor("chunk", {1, C * 3, H, W}, in_vals);
 
-    expect_throw([&] { backend->run({chunk_tensor}); },
-                 "run before reset_state must throw when state bindings exist");
+    MLVC_REQUIRE_THROWS(backend->run({chunk_tensor}),
+                        "run before reset_state must throw when state bindings exist");
     backend->reset_state();
 
     const auto f1 = backend->run({chunk_tensor});
     const auto f2 = backend->run({chunk_tensor});
-    require(f1.size() == 1U && f2.size() == 1U, "state output should be excluded");
-    require(f1[0].data != f2[0].data, "frame 2 should differ from frame 1 due to persisted history");
+    MLVC_REQUIRE(f1.size() == 1U && f2.size() == 1U, "state output should be excluded");
+    MLVC_REQUIRE(f1[0].data != f2[0].data, "frame 2 should differ from frame 1 due to persisted history");
 
     backend->reset_state();
     const auto f3 = backend->run({chunk_tensor});
-    require(f1[0].data == f3[0].data, "reset_state must restore exact initial zero state");
+    MLVC_REQUIRE(f1[0].data == f3[0].data, "reset_state must restore exact initial zero state");
 }
 
 void test_pixel_shuffle_and_quant_pipeline()
@@ -753,7 +714,7 @@ void test_pixel_shuffle_and_quant_pipeline()
         make_fp16_tensor("pri1", {1, 2 * Q, H, W}, pri1_v),
         make_int32_tensor("qidx", {1}, {2}),
     });
-    require(outs.size() == 5U, "expected 5 outputs");
+    MLVC_REQUIRE(outs.size() == 5U, "expected 5 outputs");
 
     // norm = 3.0 / 0.5 = 6.0; diff = 6.0 - 0.25 = 5.75; s0 + s1 = 11.5 -> nearbyintf(11.5) = 12.0!
     check_close(outs[0], std::vector<float>(Q * H * W, 12.0F), 1e-3F, "y0_raw mismatch");
@@ -770,25 +731,19 @@ void test_pixel_shuffle_and_quant_pipeline()
     // qidx=2 -> lut scale = 1.5; d2s == lat (3.0) -> gnorm = 4.5
     check_close(outs[4], std::vector<float>(2 * Q * H * W, 4.5F), 1e-3F, "SpaceToDepth/DepthToSpace/Gather mismatch");
 
-#if defined(_WIN32)
-    _putenv_s("MLVC_CPU_DISABLE_FUSION", "1");
-#else
-    setenv("MLVC_CPU_DISABLE_FUSION", "1", 1);
-#endif
-    auto unfused_backend = create_backend(opts);
-    unfused_backend->load("PixelQuantNet", {});
-    const auto unfused_outs = unfused_backend->run({
-        make_fp16_tensor("lat", {1, 2 * Q, H, W}, lat_v),
-        make_fp16_tensor("pri0", {1, 4 * Q, H, W}, pri0_v),
-        make_fp16_tensor("pri1", {1, 2 * Q, H, W}, pri1_v),
-        make_int32_tensor("qidx", {1}, {2}),
-    });
-#if defined(_WIN32)
-    _putenv_s("MLVC_CPU_DISABLE_FUSION", "");
-#else
-    unsetenv("MLVC_CPU_DISABLE_FUSION");
-#endif
-    require(outs.size() == unfused_outs.size(), "fused vs unfused output count mismatch");
+    std::vector<Tensor> unfused_outs;
+    {
+        ScopedEnvVar disable_fusion("MLVC_CPU_DISABLE_FUSION", "1");
+        auto unfused_backend = create_backend(opts);
+        unfused_backend->load("PixelQuantNet", {});
+        unfused_outs = unfused_backend->run({
+            make_fp16_tensor("lat", {1, 2 * Q, H, W}, lat_v),
+            make_fp16_tensor("pri0", {1, 4 * Q, H, W}, pri0_v),
+            make_fp16_tensor("pri1", {1, 2 * Q, H, W}, pri1_v),
+            make_int32_tensor("qidx", {1}, {2}),
+        });
+    }
+    MLVC_REQUIRE(outs.size() == unfused_outs.size(), "fused vs unfused output count mismatch");
     for (std::size_t k = 0; k < outs.size(); ++k)
         check_close(outs[k], to_floats(unfused_outs[k]), 1e-3F, "fused vs unfused mismatch");
 }
@@ -858,49 +813,10 @@ void test_small_channel_layout_roundtrip()
         make_fp16_tensor("x3", {1, c3, h3, w3}, x3_vals),
         make_fp16_tensor("x11", {1, c11, h11, w11}, x11_vals),
     });
-    require(outs.size() == 2U, "expected 2 layout roundtrip outputs");
+    MLVC_REQUIRE(outs.size() == 2U, "expected 2 layout roundtrip outputs");
     check_close(outs[0], exp3_vals, 5e-3F, "C=3 layout roundtrip mismatch");
     check_close(outs[1], exp11_vals, 5e-3F, "C=11 layout roundtrip mismatch");
 }
-
-struct ScopedCpuIsaEnv {
-    std::string prev;
-    bool had_prev = false;
-    explicit ScopedCpuIsaEnv(const char* mode)
-    {
-        if (const char* cur = std::getenv("MLVC_CPU_ISA")) {
-            had_prev = true;
-            prev = cur;
-        }
-        set(mode);
-    }
-    ~ScopedCpuIsaEnv()
-    {
-        if (had_prev)
-            set(prev.c_str());
-        else
-            clear();
-    }
-    static void set(const char* mode)
-    {
-#if defined(_WIN32)
-        _putenv_s("MLVC_CPU_ISA", mode ? mode : "");
-#else
-        if (mode && mode[0] != '\0')
-            setenv("MLVC_CPU_ISA", mode, 1);
-        else
-            unsetenv("MLVC_CPU_ISA");
-#endif
-    }
-    static void clear()
-    {
-#if defined(_WIN32)
-        _putenv_s("MLVC_CPU_ISA", "");
-#else
-        unsetenv("MLVC_CPU_ISA");
-#endif
-    }
-};
 
 void test_gemm_tail_shapes()
 {
@@ -990,7 +906,7 @@ void test_gemm_tail_shapes()
 
     std::vector<Tensor> ref_outs;
     {
-        ScopedCpuIsaEnv guard("scalar");
+        ScopedEnvVar guard("MLVC_CPU_ISA", "scalar");
         auto sb = create_backend(opts);
         sb->load("TailShapesNet", {});
         ref_outs = sb->run({xt, rt});
@@ -1003,14 +919,72 @@ void test_gemm_tail_shapes()
 #endif
     };
     for (const char* mode : isa_modes) {
-        ScopedCpuIsaEnv guard(mode);
+        ScopedEnvVar guard("MLVC_CPU_ISA", mode);
         auto b = create_backend(opts);
         b->load("TailShapesNet", {});
         const auto outs = b->run({xt, rt});
-        require(outs.size() == ref_outs.size(), "tail shape output count mismatch");
+        MLVC_REQUIRE(outs.size() == ref_outs.size(), "tail shape output count mismatch");
         for (std::size_t idx = 0; idx < ref_outs.size(); ++idx)
             check_close(outs[idx], to_floats(ref_outs[idx]), 5e-3F, "tail shape ISA mismatch");
     }
+}
+
+void test_alignment_weight_sharing_and_concurrent_pool()
+{
+    WireGraphBuilder gb("SharedNet");
+    const auto x_id = gb.add_input("x", wire::FP16, {1, 16, 4, 4});
+    std::vector<float> w(16 * 16, 0.0F);
+    for (int i = 0; i < 16; ++i)
+        w[static_cast<std::size_t>(i * 16 + i)] = 1.0F;
+    const auto w_id = gb.add_weight_fp16("w", {16, 16, 1, 1}, w);
+    const auto out_id = gb.add_conv("y", x_id, w_id, 0, {1, 1}, {0, 0, 0, 0}, 1, {1, 16, 4, 4});
+    gb.mark_output(out_id);
+    const auto assets = gb.build();
+
+    mlvc::cpu_backend::CpuExecutionPlan plan_a(*assets, "SharedNet", {}, 2, true);
+    mlvc::cpu_backend::CpuExecutionPlan plan_b(*assets, "SharedNet", {}, 2, true);
+
+    {
+        ScopedEnvVar scalar_override("MLVC_CPU_ISA", "scalar");
+        mlvc::cpu_backend::CpuExecutionPlan plan_scalar(*assets, "SharedNet", {}, 1, false);
+        MLVC_REQUIRE(plan_scalar.gemm_mode() == mlvc::cpu_backend::GemmMode::kScalarFp32,
+                     "MLVC_CPU_ISA=scalar must override runtime GEMM selection");
+    }
+
+    MLVC_REQUIRE(reinterpret_cast<std::uintptr_t>(plan_a.arena_data()) % 64U == 0U,
+            "CPU arena base pointer must be 64-byte aligned");
+    MLVC_REQUIRE(plan_a.weight_bank_identity() != nullptr &&
+                plan_a.weight_bank_identity() == plan_b.weight_bank_identity(),
+            "identical models must share packed weights in memory");
+
+    // Concurrent execution across two plans sharing one thread pool must be race-free.
+    std::vector<float> in_a(16 * 4 * 4, 1.5F);
+    std::vector<float> in_b(16 * 4 * 4, -0.75F);
+    const Tensor ta = make_fp16_tensor("x", {1, 16, 4, 4}, in_a);
+    const Tensor tb = make_fp16_tensor("x", {1, 16, 4, 4}, in_b);
+
+    std::atomic<bool> failed{false};
+    auto worker = [&](mlvc::cpu_backend::CpuExecutionPlan& plan, const Tensor& input, float expected) {
+        try {
+            for (int iter = 0; iter < 16; ++iter) {
+                const auto outs = plan.run({input});
+                const auto vals = to_floats(outs.at(0));
+                for (float v : vals) {
+                    if (std::abs(v - expected) > 1e-2F) {
+                        failed.store(true);
+                        return;
+                    }
+                }
+            }
+        } catch (...) {
+            failed.store(true);
+        }
+    };
+    std::thread t1(worker, std::ref(plan_a), std::cref(ta), 1.5F);
+    std::thread t2(worker, std::ref(plan_b), std::cref(tb), -0.75F);
+    t1.join();
+    t2.join();
+    MLVC_REQUIRE(!failed.load(), "concurrent shared-pool CPU execution failed");
 }
 
 }  // namespace
@@ -1024,15 +998,16 @@ int main()
         test_pixel_shuffle_and_quant_pipeline();
         test_small_channel_layout_roundtrip();
         test_gemm_tail_shapes();
+        test_alignment_weight_sharing_and_concurrent_pool();
 #if defined(__aarch64__)
         {
-            ScopedCpuIsaEnv fp32_guard("fp32");
+            ScopedEnvVar fp32_guard("MLVC_CPU_ISA", "fp32");
             test_conv_and_epilogues();
             test_small_channel_layout_roundtrip();
         }
 #endif
         {
-            ScopedCpuIsaEnv scalar_guard("scalar");
+            ScopedEnvVar scalar_guard("MLVC_CPU_ISA", "scalar");
             test_conv_and_epilogues();
             test_small_channel_layout_roundtrip();
         }

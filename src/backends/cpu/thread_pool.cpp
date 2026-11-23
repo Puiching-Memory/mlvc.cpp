@@ -1,5 +1,7 @@
 #include "thread_pool.hpp"
 
+#include "core/env.hpp"
+
 #include <array>
 #include <cstdint>
 #include <cstdio>
@@ -11,6 +13,7 @@
 #include <algorithm>
 #include <fstream>
 #include <string>
+#include <unordered_map>
 
 #if defined(__x86_64__) || defined(_M_X64)
 #include <immintrin.h>
@@ -28,6 +31,14 @@ inline void cpu_relax() noexcept
 #else
     std::this_thread::yield();
 #endif
+}
+
+int configured_worker_spin_iters() noexcept
+{
+    constexpr int kDefaultSpinIters = 4096;
+    constexpr int kMaxSpinIters = 65536;
+    return detail::parse_env_int(
+        "MLVC_CPU_SPIN_ITERS", kDefaultSpinIters, 0, kMaxSpinIters);
 }
 
 }  // namespace
@@ -70,7 +81,8 @@ int detect_optimal_thread_count(int requested) noexcept
 
 CpuThreadPool::CpuThreadPool(int num_threads)
     : total_threads_(static_cast<std::size_t>(
-          std::max(1, detect_optimal_thread_count(num_threads))))
+          std::max(1, detect_optimal_thread_count(num_threads)))),
+      worker_spin_iters_(configured_worker_spin_iters())
 {
     if (total_threads_ <= 1)
         return;
@@ -261,6 +273,7 @@ void CpuThreadPool::run_task_chunks(TaskContext* task)
 
 void CpuThreadPool::dispatch_task(TaskContext* task)
 {
+    std::lock_guard<std::mutex> dispatch_lock(dispatch_mutex_);
     active_task_.store(task, std::memory_order_release);
     generation_.fetch_add(1, std::memory_order_seq_cst);
     // Skip mutex+condvar wakeup syscall when all workers are spinning in user space.
@@ -275,8 +288,8 @@ void CpuThreadPool::dispatch_task(TaskContext* task)
     run_task_chunks(task);
 
     // Wait for all worker threads to finish this task.
-    constexpr int kCallerSpinIters = 1024;
-    for (int iter = 0; iter < kCallerSpinIters; ++iter) {
+    const int caller_spin_iters = std::min(worker_spin_iters_, 1024);
+    for (int iter = 0; iter < caller_spin_iters; ++iter) {
         if (task->remaining_workers.load(std::memory_order_acquire) == 0)
             break;
         cpu_relax();
@@ -304,8 +317,7 @@ void CpuThreadPool::worker_loop(std::size_t /*worker_index*/)
     for (;;) {
         TaskContext* task = nullptr;
         // Brief user-space spin catches back-to-back layers inside one frame without futex wakeup cost.
-        constexpr int kWorkerSpinIters = 16000;
-        for (int iter = 0; iter < kWorkerSpinIters; ++iter) {
+        for (int iter = 0; iter < worker_spin_iters_; ++iter) {
             const std::uint64_t cur_gen = generation_.load(std::memory_order_acquire);
             if (cur_gen != seen_generation) {
                 task = active_task_.load(std::memory_order_acquire);
@@ -346,6 +358,21 @@ void CpuThreadPool::worker_loop(std::size_t /*worker_index*/)
             done_cv_.notify_one();
         }
     }
+}
+
+std::shared_ptr<CpuThreadPool> acquire_shared_thread_pool(int requested_threads)
+{
+    const int resolved = std::max(1, detect_optimal_thread_count(requested_threads));
+    static std::mutex cache_mutex;
+    static std::unordered_map<int, std::weak_ptr<CpuThreadPool>> cache;
+
+    std::lock_guard<std::mutex> lock(cache_mutex);
+    auto& entry = cache[resolved];
+    if (auto existing = entry.lock())
+        return existing;
+    auto created = std::make_shared<CpuThreadPool>(resolved);
+    entry = created;
+    return created;
 }
 
 }  // namespace mlvc::cpu_backend

@@ -60,7 +60,7 @@ bool detect_msvc_x86_avx2_fma_f16c() noexcept
 }
 #endif
 
-CpuFeatures probe_features() noexcept
+CpuFeatures probe_hardware_features() noexcept
 {
     CpuFeatures features;
 
@@ -94,6 +94,16 @@ CpuFeatures probe_features() noexcept
         : GemmMode::kScalarFp32;
 #endif
 
+    return features;
+}
+
+}  // namespace
+
+CpuFeatures detect_cpu_features() noexcept
+{
+    static const CpuFeatures hardware = probe_hardware_features();
+    CpuFeatures features = hardware;
+
     // Optional runtime ISA selection override for A/B conformance & benchmarking.
     const std::string override_mode = lowercase_env(std::getenv("MLVC_CPU_ISA"));
     if (override_mode == "scalar") {
@@ -110,14 +120,6 @@ CpuFeatures probe_features() noexcept
         features.preferred_gemm = GemmMode::kX86Avx2Fp32;
     }
 
-    return features;
-}
-
-}  // namespace
-
-const CpuFeatures& detect_cpu_features() noexcept
-{
-    static const CpuFeatures features = probe_features();
     return features;
 }
 

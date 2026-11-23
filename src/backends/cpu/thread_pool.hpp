@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <exception>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -67,7 +68,9 @@ private:
     static void run_task_chunks(TaskContext* task);
 
     std::size_t total_threads_ = 1;
+    int worker_spin_iters_ = 4096;
     std::vector<std::thread> workers_;
+    std::mutex dispatch_mutex_;
     std::mutex mutex_;
     std::condition_variable worker_cv_;
     std::condition_variable done_cv_;
@@ -77,5 +80,9 @@ private:
     std::atomic<bool> caller_waiting_{false};
     std::atomic<bool> shutdown_{false};
 };
+
+// Returns a process-shared thread pool for the resolved thread count. The
+// pool is automatically destroyed once all referencing sessions release it.
+std::shared_ptr<CpuThreadPool> acquire_shared_thread_pool(int requested_threads);
 
 }  // namespace mlvc::cpu_backend

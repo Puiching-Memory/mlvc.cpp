@@ -31,11 +31,6 @@ target_link_libraries(mlvc_c_api_tests PRIVATE mlvc_codec)
 if(UNIX AND NOT APPLE)
     target_link_options(mlvc_c_api_tests PRIVATE "LINKER:--disable-new-dtags")
 endif()
-# Resolve the codec's transitive driver dependency on driverless build hosts.
-if(MLVC_BACKEND MATCHES "^(driver_cubin|all)$" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    target_link_options(mlvc_c_api_tests PRIVATE
-        "LINKER:-rpath-link,${CUDAToolkit_LIBRARY_DIR}/stubs")
-endif()
 mlvc_configure_target(mlvc_c_api_tests)
 mlvc_enable_ipo(mlvc_c_api_tests)
 
@@ -90,6 +85,28 @@ if(MLVC_BACKEND MATCHES "^(cpu|all)$")
     add_test(NAME mlvc_cpu_backend COMMAND mlvc_cpu_backend_tests)
 endif()
 
+if(MLVC_ENABLE_FUZZERS)
+    if(NOT CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+        message(FATAL_ERROR "MLVC_ENABLE_FUZZERS requires Clang with libFuzzer")
+    endif()
+
+    foreach(_mlvc_fuzz_name bitstream aot_graph entropy)
+        set(_mlvc_fuzz_target "mlvc_fuzz_${_mlvc_fuzz_name}")
+        add_executable("${_mlvc_fuzz_target}" "fuzz/fuzz_${_mlvc_fuzz_name}.cpp")
+        target_include_directories("${_mlvc_fuzz_target}" PRIVATE
+            "${PROJECT_SOURCE_DIR}/src")
+        target_link_libraries("${_mlvc_fuzz_target}" PRIVATE
+            mlvc_core
+            mlvc_runtime
+            mlvc_model_proto)
+        target_compile_options("${_mlvc_fuzz_target}" PRIVATE
+            -fsanitize=fuzzer,address,undefined -fno-omit-frame-pointer)
+        target_link_options("${_mlvc_fuzz_target}" PRIVATE
+            -fsanitize=fuzzer,address,undefined)
+        mlvc_configure_target("${_mlvc_fuzz_target}")
+    endforeach()
+endif()
+
 if(_mlvc_python_protobuf_ok)
     add_test(NAME mlvc_model_package
         COMMAND "${Python3_EXECUTABLE}"
@@ -100,10 +117,10 @@ set(_mlvc_conformance_script
     "${PROJECT_SOURCE_DIR}/tests/conformance/run_codec_conformance.py")
 if(EXISTS "${MLVC_TEST_ASSETS_DIR}/references/mlvc-psnr-v1/gray-q21-2f/reference.json"
    AND EXISTS "${MLVC_TEST_ASSETS_DIR}/references/mlvc-s-psnr-v1/gray-q21-2f/reference.json")
-    find_package(Python3 COMPONENTS Interpreter REQUIRED)
     add_test(NAME mlvc_codec_reference
         COMMAND mlvc_codec_tests "${MLVC_TEST_ASSETS_DIR}" "${MLVC_MODEL_ROOT}")
-    if(NOT MLVC_BACKEND STREQUAL "none")
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(NOT MLVC_BACKEND STREQUAL "none" AND Python3_FOUND)
         foreach(_mlvc_profile mlvc-psnr-v1 mlvc-s-psnr-v1)
             set(_mlvc_model_dir
                 "${MLVC_MODEL_ROOT}/${_mlvc_profile}/640x368")
@@ -155,6 +172,16 @@ if(EXISTS "${MLVC_TEST_ASSETS_DIR}/references/mlvc-psnr-v1/gray-q21-2f/reference
             DEPENDS mlvc_tool_demo
             USES_TERMINAL
             COMMENT "Checking both MLVC profiles against official Python codec references")
+    elseif(NOT Python3_FOUND)
+        message(STATUS
+            "Python3 interpreter not found; skipping Python codec conformance wrappers "
+            "(C++ reference test mlvc_codec_reference remains enabled)")
+        add_custom_target(mlvc_codec_compatibility
+            COMMAND "${CMAKE_COMMAND}" -E echo
+                "Python3 interpreter is required to run Python codec conformance wrappers"
+            COMMAND "${CMAKE_COMMAND}" -E false
+            USES_TERMINAL
+            COMMENT "Python3 is required for mlvc_codec_compatibility")
     else()
         add_custom_target(mlvc_codec_compatibility
             COMMAND "${CMAKE_COMMAND}" -E echo

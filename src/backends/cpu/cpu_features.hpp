@@ -18,7 +18,7 @@ struct CpuFeatures {
     GemmMode preferred_gemm = GemmMode::kScalarFp32;
 };
 
-const CpuFeatures& detect_cpu_features() noexcept;
+CpuFeatures detect_cpu_features() noexcept;
 std::string_view gemm_mode_name(GemmMode mode) noexcept;
 
 }  // namespace mlvc::cpu_backend

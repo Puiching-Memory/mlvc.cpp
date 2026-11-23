@@ -1,10 +1,12 @@
 set(MLVC_CPU_SOURCES
+    codec_io.cpp
     cpu_backend.cpp
     cpu_features.cpp
     execution_plan.cpp
     fusion_matcher.cpp
     kernels_scalar.cpp
     thread_pool.cpp
+    weight_cache.cpp
 )
 
 string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _mlvc_cpu_arch)

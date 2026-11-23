@@ -2,12 +2,26 @@ set(MLVC_CORE_SOURCES
     bit_io.cpp
     bitstream.cpp
     entropy.cpp
+    logging.cpp
     model.cpp
     model_assets.cpp
     scales.cpp
+    sha256.cpp
     yuv.cpp)
 
+string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _mlvc_core_arch)
+set(_mlvc_core_msvc_x64 FALSE)
+if(MSVC AND _mlvc_core_arch MATCHES "^(x86_64|amd64)$")
+    set(_mlvc_core_msvc_x64 TRUE)
+    set_source_files_properties(entropy_x86_avx2.cpp PROPERTIES
+        COMPILE_OPTIONS "/arch:AVX2")
+    list(APPEND MLVC_CORE_SOURCES entropy_x86_avx2.cpp)
+endif()
+
 add_library(mlvc_core STATIC ${MLVC_CORE_SOURCES})
+if(_mlvc_core_msvc_x64)
+    target_compile_definitions(mlvc_core PRIVATE MLVC_CORE_HAS_MSVC_X86_AVX2=1)
+endif()
 set_target_properties(mlvc_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_include_directories(mlvc_core
     PUBLIC

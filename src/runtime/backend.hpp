@@ -27,6 +27,7 @@ struct BackendOptions {
     int num_threads = 0;  // 0 = auto (physical/big cores on CPU)
     ExecutionPreference execution_preference = ExecutionPreference::kAuto;
     bool allow_cpu_fallback = true;
+    bool share_thread_pool = false;
     std::string backend_name;
     std::shared_ptr<const ModelAssetReader> asset_reader;
 };
@@ -101,6 +102,8 @@ using BackendFactory =
 void register_backend(std::string name, BackendFactory factory,
                       bool make_default = false);
 std::vector<std::string> available_backends();
+std::size_t copy_available_backend_c_strs(const char** out_names,
+                                          std::size_t capacity);
 std::string_view default_backend_name() noexcept;
 const char* compiled_backend_name_c_str() noexcept;
 inline std::string_view compiled_backend_name() noexcept

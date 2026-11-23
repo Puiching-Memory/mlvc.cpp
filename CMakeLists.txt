@@ -44,10 +44,19 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
+set(CMAKE_C_VISIBILITY_PRESET hidden)
+set(CMAKE_CXX_VISIBILITY_PRESET hidden)
+set(CMAKE_VISIBILITY_INLINES_HIDDEN ON)
 
-if(NOT CMAKE_BUILD_TYPE)
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
+
+set(_mlvc_default_shared ON)
+if(DEFINED BUILD_SHARED_LIBS AND NOT BUILD_SHARED_LIBS)
+    set(_mlvc_default_shared OFF)
+endif()
+option(MLVC_BUILD_SHARED "Build mlvc_codec as a shared library" ${_mlvc_default_shared})
 
 set(_mlvc_default_embed_models OFF)
 if(MLVC_BACKEND MATCHES "^(driver_cubin|all)$")
@@ -60,6 +69,10 @@ option(MLVC_EMBED_MODELS
 option(MLVC_WARNINGS_AS_ERRORS "Treat project warnings as errors" OFF)
 option(MLVC_ENABLE_SANITIZERS
     "Enable AddressSanitizer and UndefinedBehaviorSanitizer" OFF)
+option(MLVC_ENABLE_TSAN
+    "Enable ThreadSanitizer (mutually exclusive with MLVC_ENABLE_SANITIZERS)" OFF)
+option(MLVC_ENABLE_FUZZERS
+    "Build libFuzzer harnesses (requires Clang)" OFF)
 set(MLVC_TEST_ASSETS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/models/fixtures" CACHE PATH
     "Local MLVC model/reference fixtures used by tests")
 set(MLVC_MODEL_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/models/canonical" CACHE PATH
@@ -77,12 +90,6 @@ endif()
 
 function(mlvc_enable_ipo target)
     if(MLVC_ENABLE_IPO AND MLVC_IPO_SUPPORTED AND TARGET "${target}")
-        get_target_property(_mlvc_target_type "${target}" TYPE)
-        # CMake's WINDOWS_EXPORT_ALL_SYMBOLS scanner cannot read MSVC /GL LTCG objects.
-        if(MSVC AND (_mlvc_target_type STREQUAL "SHARED_LIBRARY"
-                     OR _mlvc_target_type STREQUAL "OBJECT_LIBRARY"))
-            return()
-        endif()
         set_property(TARGET "${target}"
             PROPERTY INTERPROCEDURAL_OPTIMIZATION_RELEASE TRUE)
     endif()
@@ -91,7 +98,7 @@ endfunction()
 add_library(mlvc_project_options INTERFACE)
 target_compile_options(mlvc_project_options INTERFACE
     "$<$<COMPILE_LANG_AND_ID:C,GNU,Clang,AppleClang>:-Wall;-Wextra;-Wpedantic;-Wformat=2;-Wshadow;-Wundef>"
-    "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-Wall;-Wextra;-Wpedantic;-Wformat=2;-Wshadow;-Wundef>"
+    "$<$<COMPILE_LANG_AND_ID:CXX,GNU,Clang,AppleClang>:-Wall;-Wextra;-Wpedantic;-Wformat=2;-Wshadow;-Wundef;-Wnon-virtual-dtor;-Woverloaded-virtual>"
     "$<$<COMPILE_LANG_AND_ID:C,MSVC>:/W4;/utf-8>"
     "$<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/W4;/utf-8>")
 target_compile_definitions(mlvc_project_options INTERFACE
@@ -104,6 +111,10 @@ if(MLVC_WARNINGS_AS_ERRORS)
         "$<$<COMPILE_LANG_AND_ID:C,MSVC>:/WX>"
         "$<$<COMPILE_LANG_AND_ID:CXX,MSVC>:/WX>")
 endif()
+if(MLVC_ENABLE_SANITIZERS AND MLVC_ENABLE_TSAN)
+    message(FATAL_ERROR
+        "MLVC_ENABLE_SANITIZERS and MLVC_ENABLE_TSAN cannot be enabled together")
+endif()
 if(MLVC_ENABLE_SANITIZERS)
     if(NOT CMAKE_C_COMPILER_ID MATCHES "GNU|Clang" OR
        NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
@@ -114,6 +125,16 @@ if(MLVC_ENABLE_SANITIZERS)
         -fsanitize=address,undefined)
     target_link_options(mlvc_project_options INTERFACE
         -fno-sanitize-recover=all -fsanitize=address,undefined)
+endif()
+if(MLVC_ENABLE_TSAN)
+    if(NOT CMAKE_C_COMPILER_ID MATCHES "GNU|Clang" OR
+       NOT CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        message(FATAL_ERROR "MLVC ThreadSanitizer requires GCC or Clang")
+    endif()
+    target_compile_options(mlvc_project_options INTERFACE
+        -fno-omit-frame-pointer -fsanitize=thread)
+    target_link_options(mlvc_project_options INTERFACE
+        -fsanitize=thread)
 endif()
 
 function(mlvc_configure_target target)
@@ -147,19 +168,21 @@ install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include/"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
     FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp")
 
-configure_package_config_file(
-    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/mlvc_codecConfig.cmake.in"
-    "${CMAKE_CURRENT_BINARY_DIR}/mlvc_codecConfig.cmake"
-    INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/mlvc_codec")
-write_basic_package_version_file(
-    "${CMAKE_CURRENT_BINARY_DIR}/mlvc_codecConfigVersion.cmake"
-    VERSION ${PROJECT_VERSION}
-    COMPATIBILITY SameMajorVersion)
-install(EXPORT mlvc_codecTargets
-    FILE mlvc_codecTargets.cmake
-    NAMESPACE mlvc::
-    DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/mlvc_codec")
-install(FILES
-    "${CMAKE_CURRENT_BINARY_DIR}/mlvc_codecConfig.cmake"
-    "${CMAKE_CURRENT_BINARY_DIR}/mlvc_codecConfigVersion.cmake"
-    DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/mlvc_codec")
+if(MLVC_BUILD_SHARED)
+    configure_package_config_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/mlvc_codecConfig.cmake.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/mlvc_codecConfig.cmake"
+        INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/mlvc_codec")
+    write_basic_package_version_file(
+        "${CMAKE_CURRENT_BINARY_DIR}/mlvc_codecConfigVersion.cmake"
+        VERSION ${PROJECT_VERSION}
+        COMPATIBILITY SameMajorVersion)
+    install(EXPORT mlvc_codecTargets
+        FILE mlvc_codecTargets.cmake
+        NAMESPACE mlvc::
+        DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/mlvc_codec")
+    install(FILES
+        "${CMAKE_CURRENT_BINARY_DIR}/mlvc_codecConfig.cmake"
+        "${CMAKE_CURRENT_BINARY_DIR}/mlvc_codecConfigVersion.cmake"
+        DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/mlvc_codec")
+endif()

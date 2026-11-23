@@ -12,7 +12,7 @@ template <typename Message>
 Message read_model_proto(const ModelAssetReader& assets,
                          const std::filesystem::path& filename)
 {
-    const auto bytes = assets.read_binary(filename);
+    const AssetView bytes = assets.read_view(filename);
     constexpr std::size_t limit = 64U * 1024U * 1024U;
     if (bytes.empty() || bytes.size() > limit)
         throw std::runtime_error("invalid Protobuf model message size: " + filename.string());

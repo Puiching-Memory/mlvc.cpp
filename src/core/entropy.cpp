@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <system_error>
@@ -24,6 +25,14 @@
 #  define MLVC_HAS_X86_F16C_AVX2 0
 #endif
 
+#if defined(MLVC_CORE_HAS_MSVC_X86_AVX2) && defined(_MSC_VER) && \
+    (defined(_M_X64) || defined(_M_AMD64))
+#  define MLVC_HAS_MSVC_X86_AVX2 1
+#  include <intrin.h>
+#else
+#  define MLVC_HAS_MSVC_X86_AVX2 0
+#endif
+
 #if defined(__aarch64__)
 #  define MLVC_HAS_ARM64_NEON 1
 #  include <arm_neon.h>
@@ -32,7 +41,42 @@
 #endif
 
 namespace mlvc {
+#if MLVC_HAS_MSVC_X86_AVX2
+namespace detail {
+bool integer_values_x86_avx2(const Float16Storage* source, std::int32_t* result,
+                             std::size_t count) noexcept;
+void fp16_values_x86_avx2(const std::int32_t* values, Float16Storage* storage,
+                          std::size_t count) noexcept;
+}  // namespace detail
+#endif
+
 namespace {
+
+#if MLVC_HAS_MSVC_X86_AVX2
+bool msvc_supports_avx2_f16c() noexcept
+{
+    static const bool supported = []() noexcept {
+        int info[4] = {};
+        __cpuid(info, 0);
+        if (info[0] < 7)
+            return false;
+        int leaf1[4] = {};
+        __cpuid(leaf1, 1);
+        const bool has_osxsave = (leaf1[2] & (1 << 27)) != 0;
+        const bool has_avx = (leaf1[2] & (1 << 28)) != 0;
+        const bool has_f16c = (leaf1[2] & (1 << 29)) != 0;
+        if (!has_osxsave || !has_avx || !has_f16c)
+            return false;
+        const unsigned long long xcr0 = _xgetbv(0);
+        if ((xcr0 & 0x6ULL) != 0x6ULL)
+            return false;
+        int leaf7[4] = {};
+        __cpuidex(leaf7, 7, 0);
+        return (leaf7[1] & (1 << 5)) != 0;
+    }();
+    return supported;
+}
+#endif
 
 struct PmfTable {
     std::vector<std::int32_t> lengths;
@@ -209,6 +253,14 @@ void integer_values(TensorView tensor, std::vector<std::int32_t>& result)
         integer_values_f16c(source.data(), result.data(), source.size());
         return;
     }
+#elif MLVC_HAS_MSVC_X86_AVX2
+    if (msvc_supports_avx2_f16c()) {
+        if (!detail::integer_values_x86_avx2(source.data(), result.data(), source.size())) {
+            throw std::runtime_error(
+                "entropy symbol is outside signed 16-bit range");
+        }
+        return;
+    }
 #endif
 #if MLVC_HAS_ARM64_NEON
     integer_values_neon(source.data(), result.data(), source.size());
@@ -235,7 +287,7 @@ void fp16_values_f16c(const std::int32_t* values, Float16Storage* storage,
             reinterpret_cast<const __m256i*>(values + i));
         const __m128i packed = _mm256_cvtps_ph(
             _mm256_cvtepi32_ps(integers),
-            _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC);
+            _MM_FROUND_TO_NEAREST_INT);
         _mm_storeu_si128(reinterpret_cast<__m128i*>(storage + i), packed);
     }
     for (; i < count; ++i)
@@ -254,6 +306,11 @@ void fp16_values(const std::vector<std::int32_t>& values,
 #if MLVC_HAS_X86_F16C_AVX2
     if (__builtin_cpu_supports("f16c") && __builtin_cpu_supports("avx2")) {
         fp16_values_f16c(values.data(), storage.data(), values.size());
+        return;
+    }
+#elif MLVC_HAS_MSVC_X86_AVX2
+    if (msvc_supports_avx2_f16c()) {
+        detail::fp16_values_x86_avx2(values.data(), storage.data(), values.size());
         return;
     }
 #endif
@@ -344,6 +401,7 @@ public:
     CoderPair gaussian;
     CoderPair bit_estimator;
     std::vector<std::vector<std::int32_t>> z_indices_by_q;
+    mutable std::mutex mutex;
     mutable std::vector<std::int32_t> scales_0;
     mutable std::vector<std::int32_t> scales_1;
     mutable std::vector<std::int32_t> y0_values;
@@ -386,6 +444,7 @@ std::vector<std::byte> EntropyCodec::encode(
     TensorView y_raw_1, TensorView y_raw_0, TensorView z_raw,
     int q_index) const
 {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
     extract_scales(z_raw, impl_->config,
                    impl_->gaussian_pmf.scale_levels - 1,
                    impl_->scales_0, impl_->scales_1);
@@ -399,6 +458,20 @@ std::vector<std::byte> EntropyCodec::encode(
         throw std::runtime_error("entropy tensor shape mismatch");
     }
 
+    struct EncodeResetGuard {
+        msrtc_rans::RansEncoderStream* stream = nullptr;
+        bool flushed = false;
+        ~EncodeResetGuard()
+        {
+            if (stream && !flushed) {
+                try {
+                    static_cast<void>(stream->Flush());
+                } catch (...) {
+                }
+            }
+        }
+    } guard{&impl_->encode_stream, false};
+
     check_error(impl_->gaussian.encoder.Encode(
         impl_->encode_stream, const_span(impl_->scales_1),
         const_span(impl_->y1_values)),
@@ -411,6 +484,7 @@ std::vector<std::byte> EntropyCodec::encode(
         impl_->encode_stream, const_span(z_indices),
         const_span(impl_->z_values)), "z_raw encode");
     const auto encoded = impl_->encode_stream.Flush();
+    guard.flushed = true;
     return {encoded.data(), encoded.data() + encoded.size()};
 }
 
@@ -443,6 +517,7 @@ void EntropyCodec::decode_into(
     MutableTensorView z_raw, MutableTensorView y_raw_0,
     MutableTensorView y_raw_1) const
 {
+    std::lock_guard<std::mutex> lock(impl_->mutex);
     const std::vector<std::int64_t> expected_z{
         1, impl_->config.hyperprior_channels,
         impl_->config.hyperprior_height(), impl_->config.hyperprior_width()};
@@ -457,6 +532,19 @@ void EntropyCodec::decode_into(
 
     check_error(impl_->decode_stream.Open({payload.data(), payload.size()}),
                 "stream open");
+    struct DecodeCloseGuard {
+        msrtc_rans::RansDecoderStream* stream = nullptr;
+        ~DecodeCloseGuard()
+        {
+            if (stream) {
+                try {
+                    stream->Close();
+                } catch (...) {
+                }
+            }
+        }
+    } guard{&impl_->decode_stream};
+
     const auto& z_indices = impl_->z_indices(q_index);
     impl_->z_values.resize(z_indices.size());
     check_error(impl_->bit_estimator.decoder.Decode(
@@ -477,7 +565,6 @@ void EntropyCodec::decode_into(
         impl_->decode_stream), "y_raw_1 decode");
     if (!impl_->decode_stream.CheckEOF())
         throw std::runtime_error("rANS payload has trailing or invalid data");
-    impl_->decode_stream.Close();
     fp16_values(impl_->y0_values, y_raw_0);
     fp16_values(impl_->y1_values, y_raw_1);
 }

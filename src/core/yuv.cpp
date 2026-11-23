@@ -31,9 +31,30 @@ struct PlaneSizes {
 PlaneSizes plane_sizes(int width, int height)
 {
     validate_dimensions(width, height);
-    const std::size_t y =
-        static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    const std::size_t w = static_cast<std::size_t>(width);
+    const std::size_t h = static_cast<std::size_t>(height);
+    if (w > std::numeric_limits<std::size_t>::max() / h)
+        throw std::runtime_error("YUV420 dimensions overflow size_t");
+    const std::size_t y = w * h;
     return {y, y / 4U};
+}
+
+void validate_strided_plane(std::size_t plane_bytes, std::size_t row_width,
+                            std::size_t rows, std::size_t stride,
+                            const char* name)
+{
+    if (stride < row_width)
+        throw std::runtime_error(std::string("YUV420 ") + name + " stride is smaller than plane width");
+    if (rows == 0)
+        return;
+    const std::size_t tail_rows = rows - 1U;
+    if (tail_rows > 0 &&
+        stride > (std::numeric_limits<std::size_t>::max() - row_width) / tail_rows) {
+        throw std::runtime_error(std::string("YUV420 ") + name + " stride overflows size_t");
+    }
+    const std::size_t required = tail_rows * stride + row_width;
+    if (plane_bytes < required)
+        throw std::runtime_error(std::string("YUV420 ") + name + " plane buffer is smaller than strided dimensions");
 }
 
 void validate_pixel_range(float pixel_range)
@@ -62,10 +83,31 @@ std::pair<int, int> padded_dimensions(int width, int height,
     return {static_cast<int>(padded_height), static_cast<int>(padded_width)};
 }
 
-std::uint8_t quantize_byte(float value)
+void validate_packed_yuv(int width, int height, std::size_t y_size,
+                         std::size_t u_size, std::size_t v_size,
+                         std::size_t& y_stride, std::size_t& u_stride,
+                         std::size_t& v_stride)
 {
-    const float clipped = std::clamp(value, 0.0F, 1.0F);
-    return static_cast<std::uint8_t>(std::nearbyint(clipped * 255.0F));
+    const PlaneSizes expected = plane_sizes(width, height);
+    if (y_size != expected.y || u_size != expected.uv || v_size != expected.uv)
+        throw std::runtime_error("YUV420 plane sizes do not match dimensions");
+    y_stride = static_cast<std::size_t>(width);
+    u_stride = static_cast<std::size_t>(width / 2);
+    v_stride = static_cast<std::size_t>(width / 2);
+}
+
+void validate_strided_yuv(int width, int height, std::size_t y_size,
+                          std::size_t y_stride, std::size_t u_size,
+                          std::size_t u_stride, std::size_t v_size,
+                          std::size_t v_stride)
+{
+    validate_dimensions(width, height);
+    validate_strided_plane(y_size, static_cast<std::size_t>(width),
+                           static_cast<std::size_t>(height), y_stride, "Y");
+    validate_strided_plane(u_size, static_cast<std::size_t>(width / 2),
+                           static_cast<std::size_t>(height / 2), u_stride, "U");
+    validate_strided_plane(v_size, static_cast<std::size_t>(width / 2),
+                           static_cast<std::size_t>(height / 2), v_stride, "V");
 }
 
 #if defined(__aarch64__)
@@ -92,15 +134,15 @@ void write_y_row_neon(const Float16Storage* src, std::uint8_t* dst, int width,
             v0 = vdivq_f32(v0, v_range);
             v1 = vdivq_f32(v1, v_range);
         }
-        v0 = vmaxq_f32(vminq_f32(v0, one), zero);
-        v1 = vmaxq_f32(vminq_f32(v1, one), zero);
+        v0 = vminnmq_f32(vmaxnmq_f32(v0, zero), one);
+        v1 = vminnmq_f32(vmaxnmq_f32(v1, zero), one);
         const uint32x4_t q0 = vcvtq_u32_f32(vrndiq_f32(vmulq_n_f32(v0, 255.0F)));
         const uint32x4_t q1 = vcvtq_u32_f32(vrndiq_f32(vmulq_n_f32(v1, 255.0F)));
         const uint16x8_t q16 = vcombine_u16(vqmovn_u32(q0), vqmovn_u32(q1));
         vst1_u8(dst + x, vqmovn_u16(q16));
     }
     for (; x < width; ++x)
-        dst[x] = quantize_byte(half_to_float(src[x]) / pixel_range);
+        dst[x] = quantize_unit_float(half_to_float(src[x]) / pixel_range);
 }
 
 void write_uv_row_neon(const Float16Storage* r0, const Float16Storage* r1,
@@ -131,7 +173,7 @@ void write_uv_row_neon(const Float16Storage* r0, const Float16Storage* r1,
         const float32x4_t row1_odd = vuzp2q_f32(b0, b1);
         const float32x4_t sum = vaddq_f32(vaddq_f32(row0_pair, row1_even), row1_odd);
         const float32x4_t avg = vmulq_n_f32(sum, 0.25F);
-        const float32x4_t clipped = vmaxq_f32(vminq_f32(avg, one), zero);
+        const float32x4_t clipped = vminnmq_f32(vmaxnmq_f32(avg, zero), one);
         const uint32x4_t q = vcvtq_u32_f32(vrndiq_f32(vmulq_n_f32(clipped, 255.0F)));
         const uint16x4_t q16 = vqmovn_u32(q);
         const uint8x8_t q8 = vqmovn_u16(vcombine_u16(q16, q16));
@@ -145,7 +187,7 @@ void write_uv_row_neon(const Float16Storage* r0, const Float16Storage* r1,
             half_to_float(r0[col + 1]) / pixel_range +
             half_to_float(r1[col]) / pixel_range +
             half_to_float(r1[col + 1]) / pixel_range;
-        dst[ux] = quantize_byte(sum * 0.25F);
+        dst[ux] = quantize_unit_float(sum * 0.25F);
     }
 }
 #endif
@@ -163,6 +205,7 @@ void replicate_trailing_rows(Float16Storage* dst, int height,
 }
 
 void convert_luma_plane_input(std::span<const std::uint8_t> src,
+                              std::size_t src_stride,
                               Float16Storage* dst,
                               int width, int height,
                               int model_width, int model_height,
@@ -170,8 +213,7 @@ void convert_luma_plane_input(std::span<const std::uint8_t> src,
 {
     const std::uint8_t* src_ptr = src.data();
     for (int y = 0; y < height; ++y) {
-        const std::uint8_t* srow =
-            src_ptr + static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
+        const std::uint8_t* srow = src_ptr + static_cast<std::size_t>(y) * src_stride;
         Float16Storage* drow =
             dst + static_cast<std::size_t>(y) * static_cast<std::size_t>(model_width);
         int x = 0;
@@ -192,6 +234,7 @@ void convert_luma_plane_input(std::span<const std::uint8_t> src,
 }
 
 void convert_chroma_plane_input(std::span<const std::uint8_t> src,
+                                std::size_t src_stride,
                                 Float16Storage* dst,
                                 int width, int height,
                                 int model_width, int model_height,
@@ -203,8 +246,7 @@ void convert_chroma_plane_input(std::span<const std::uint8_t> src,
         static_cast<std::size_t>(model_width) * sizeof(Float16Storage);
     const std::uint8_t* src_ptr = src.data();
     for (int uy = 0; uy < uv_height; ++uy) {
-        const std::uint8_t* srow =
-            src_ptr + static_cast<std::size_t>(uy) * static_cast<std::size_t>(uv_width);
+        const std::uint8_t* srow = src_ptr + static_cast<std::size_t>(uy) * src_stride;
         Float16Storage* drow0 =
             dst + static_cast<std::size_t>(uy * 2) * static_cast<std::size_t>(model_width);
         for (int ux = 0; ux < uv_width; ++ux) {
@@ -221,40 +263,103 @@ void convert_chroma_plane_input(std::span<const std::uint8_t> src,
     replicate_trailing_rows(dst, height, model_height, model_width);
 }
 
+bool read_plane_rows(std::istream& input, std::uint8_t* dst,
+                     std::size_t row_width, std::size_t rows,
+                     std::size_t stride, bool allow_clean_eof,
+                     const char* plane_name)
+{
+    if (stride == row_width) {
+        const std::size_t total = row_width * rows;
+        input.read(reinterpret_cast<char*>(dst), static_cast<std::streamsize>(total));
+        if (allow_clean_eof && input.gcount() == 0)
+            return false;
+        if (input.gcount() != static_cast<std::streamsize>(total))
+            throw std::runtime_error(std::string("truncated ") + plane_name + " plane in input YUV file");
+        return true;
+    }
+
+    for (std::size_t row = 0; row < rows; ++row) {
+        input.read(reinterpret_cast<char*>(dst + row * stride),
+                   static_cast<std::streamsize>(row_width));
+        if (allow_clean_eof && row == 0 && input.gcount() == 0)
+            return false;
+        if (input.gcount() != static_cast<std::streamsize>(row_width))
+            throw std::runtime_error(std::string("truncated ") + plane_name + " plane in input YUV file");
+    }
+    return true;
+}
+
+void write_plane_rows(std::ostream& output, const std::uint8_t* src,
+                      std::size_t row_width, std::size_t rows,
+                      std::size_t stride)
+{
+    if (stride == row_width) {
+        output.write(reinterpret_cast<const char*>(src),
+                     static_cast<std::streamsize>(row_width * rows));
+        return;
+    }
+    for (std::size_t row = 0; row < rows; ++row) {
+        output.write(reinterpret_cast<const char*>(src + row * stride),
+                     static_cast<std::streamsize>(row_width));
+    }
+}
+
 }  // namespace
 
 Yuv420FrameView::Yuv420FrameView(
     int width, int height, std::span<const std::uint8_t> y,
     std::span<const std::uint8_t> u, std::span<const std::uint8_t> v)
-    : width_(width), height_(height), y_(y), u_(u), v_(v)
+    : width_(width), height_(height), y_(y), u_(u), v_(v),
+      y_stride_(0), u_stride_(0), v_stride_(0)
 {
-    const PlaneSizes expected = plane_sizes(width, height);
-    if (y_.size() != expected.y || u_.size() != expected.uv ||
-        v_.size() != expected.uv) {
-        throw std::runtime_error("YUV420 plane sizes do not match dimensions");
-    }
+    validate_packed_yuv(width, height, y_.size(), u_.size(), v_.size(),
+                        y_stride_, u_stride_, v_stride_);
+}
+
+Yuv420FrameView::Yuv420FrameView(
+    int width, int height,
+    std::span<const std::uint8_t> y, std::size_t y_stride,
+    std::span<const std::uint8_t> u, std::size_t u_stride,
+    std::span<const std::uint8_t> v, std::size_t v_stride)
+    : width_(width), height_(height), y_(y), u_(u), v_(v),
+      y_stride_(y_stride), u_stride_(u_stride), v_stride_(v_stride)
+{
+    validate_strided_yuv(width, height, y_.size(), y_stride_, u_.size(),
+                         u_stride_, v_.size(), v_stride_);
 }
 
 MutableYuv420FrameView::MutableYuv420FrameView(
     int width, int height, std::span<std::uint8_t> y,
     std::span<std::uint8_t> u, std::span<std::uint8_t> v)
-    : width_(width), height_(height), y_(y), u_(u), v_(v)
+    : width_(width), height_(height), y_(y), u_(u), v_(v),
+      y_stride_(0), u_stride_(0), v_stride_(0)
 {
-    const PlaneSizes expected = plane_sizes(width, height);
-    if (y_.size() != expected.y || u_.size() != expected.uv ||
-        v_.size() != expected.uv) {
-        throw std::runtime_error("YUV420 plane sizes do not match dimensions");
-    }
+    validate_packed_yuv(width, height, y_.size(), u_.size(), v_.size(),
+                        y_stride_, u_stride_, v_stride_);
+}
+
+MutableYuv420FrameView::MutableYuv420FrameView(
+    int width, int height,
+    std::span<std::uint8_t> y, std::size_t y_stride,
+    std::span<std::uint8_t> u, std::size_t u_stride,
+    std::span<std::uint8_t> v, std::size_t v_stride)
+    : width_(width), height_(height), y_(y), u_(u), v_(v),
+      y_stride_(y_stride), u_stride_(u_stride), v_stride_(v_stride)
+{
+    validate_strided_yuv(width, height, y_.size(), y_stride_, u_.size(),
+                         u_stride_, v_.size(), v_stride_);
 }
 
 MutableYuv420FrameView::operator Yuv420FrameView() const
 {
-    return Yuv420FrameView(width_, height_, y_, u_, v_);
+    return Yuv420FrameView(width_, height_, y_, y_stride_, u_, u_stride_, v_, v_stride_);
 }
 
 std::size_t yuv420_frame_bytes(int width, int height)
 {
     const PlaneSizes sizes = plane_sizes(width, height);
+    if (sizes.y > std::numeric_limits<std::size_t>::max() - sizes.uv * 2U)
+        throw std::runtime_error("YUV420 frame byte size overflows size_t");
     return sizes.y + sizes.uv * 2U;
 }
 
@@ -275,21 +380,12 @@ bool read_yuv420_frame(std::istream& input, int width, int height,
 
 bool read_yuv420_frame(std::istream& input, MutableYuv420FrameView frame)
 {
-    input.read(reinterpret_cast<char*>(frame.y().data()),
-               static_cast<std::streamsize>(frame.y().size()));
-    if (input.gcount() == 0) {
+    const std::size_t w = static_cast<std::size_t>(frame.width());
+    const std::size_t h = static_cast<std::size_t>(frame.height());
+    if (!read_plane_rows(input, frame.y().data(), w, h, frame.y_stride(), true, "Y"))
         return false;
-    }
-    if (input.gcount() != static_cast<std::streamsize>(frame.y().size()))
-        throw std::runtime_error("truncated Y plane in input YUV file");
-    input.read(reinterpret_cast<char*>(frame.u().data()),
-               static_cast<std::streamsize>(frame.u().size()));
-    if (input.gcount() != static_cast<std::streamsize>(frame.u().size()))
-        throw std::runtime_error("truncated U plane in input YUV file");
-    input.read(reinterpret_cast<char*>(frame.v().data()),
-               static_cast<std::streamsize>(frame.v().size()));
-    if (input.gcount() != static_cast<std::streamsize>(frame.v().size()))
-        throw std::runtime_error("truncated V plane in input YUV file");
+    read_plane_rows(input, frame.u().data(), w / 2U, h / 2U, frame.u_stride(), false, "U");
+    read_plane_rows(input, frame.v().data(), w / 2U, h / 2U, frame.v_stride(), false, "V");
     return true;
 }
 
@@ -300,12 +396,11 @@ void write_yuv420_frame(std::ostream& output, const Yuv420Frame& frame)
 
 void write_yuv420_frame(std::ostream& output, Yuv420FrameView frame)
 {
-    output.write(reinterpret_cast<const char*>(frame.y().data()),
-                 static_cast<std::streamsize>(frame.y().size()));
-    output.write(reinterpret_cast<const char*>(frame.u().data()),
-                 static_cast<std::streamsize>(frame.u().size()));
-    output.write(reinterpret_cast<const char*>(frame.v().data()),
-                 static_cast<std::streamsize>(frame.v().size()));
+    const std::size_t w = static_cast<std::size_t>(frame.width());
+    const std::size_t h = static_cast<std::size_t>(frame.height());
+    write_plane_rows(output, frame.y().data(), w, h, frame.y_stride());
+    write_plane_rows(output, frame.u().data(), w / 2U, h / 2U, frame.u_stride());
+    write_plane_rows(output, frame.v().data(), w / 2U, h / 2U, frame.v_stride());
     if (!output)
         throw std::runtime_error("failed to write YUV output frame");
 }
@@ -357,18 +452,20 @@ Tensor prepare_model_input(Yuv420FrameView source,
     const std::size_t plane_elems =
         static_cast<std::size_t>(model_height) * static_cast<std::size_t>(model_width);
     if (!padding.rotated) {
-        convert_luma_plane_input(source.y(), values.data(), width, height,
+        convert_luma_plane_input(source.y(), source.y_stride(), values.data(), width, height,
                                  model_width, model_height, lut);
-        convert_chroma_plane_input(source.u(), values.data() + plane_elems,
+        convert_chroma_plane_input(source.u(), source.u_stride(), values.data() + plane_elems,
                                    width, height, model_width, model_height, lut);
-        convert_chroma_plane_input(source.v(), values.data() + plane_elems * 2U,
+        convert_chroma_plane_input(source.v(), source.v_stride(), values.data() + plane_elems * 2U,
                                    width, height, model_width, model_height, lut);
         return Tensor{"x", std::move(shape), std::move(values)};
     }
 
     const int active_width = height;
     const int active_height = width;
-    const int uv_width = width / 2;
+    const std::size_t y_stride = source.y_stride();
+    const std::size_t u_stride = source.u_stride();
+    const std::size_t v_stride = source.v_stride();
     for (int channel = 0; channel < 3; ++channel) {
         Float16Storage* dst_plane =
             values.data() + static_cast<std::size_t>(channel) * plane_elems;
@@ -381,15 +478,14 @@ Tensor prepare_model_input(Yuv420FrameView source,
                 std::uint8_t sample = 0;
                 if (channel == 0) {
                     sample = source.y()[
-                        static_cast<std::size_t>(source_y) *
-                            static_cast<std::size_t>(width) +
+                        static_cast<std::size_t>(source_y) * y_stride +
                         static_cast<std::size_t>(source_x)];
                 } else {
                     const std::span<const std::uint8_t> plane =
                         channel == 1 ? source.u() : source.v();
+                    const std::size_t c_stride = channel == 1 ? u_stride : v_stride;
                     sample = plane[
-                        static_cast<std::size_t>(source_y / 2) *
-                            static_cast<std::size_t>(uv_width) +
+                        static_cast<std::size_t>(source_y / 2) * c_stride +
                         static_cast<std::size_t>(source_x / 2)];
                 }
                 dst_row[x] = lut[sample];
@@ -433,6 +529,9 @@ void prepare_model_output_into(const Tensor& tensor,
     const std::span<std::uint8_t> y_plane = output.y();
     const std::span<std::uint8_t> u_plane = output.u();
     const std::span<std::uint8_t> v_plane = output.v();
+    const std::size_t y_stride = output.y_stride();
+    const std::size_t u_stride = output.u_stride();
+    const std::size_t v_stride = output.v_stride();
 
     if (!padding.rotated) {
         const std::size_t plane_elems =
@@ -449,25 +548,27 @@ void prepare_model_output_into(const Tensor& tensor,
             const Float16Storage* src_row =
                 y_base + active_offset + static_cast<std::size_t>(y) * model_row_stride;
             std::uint8_t* dst_row =
-                y_plane.data() + static_cast<std::size_t>(y) * static_cast<std::size_t>(width);
+                y_plane.data() + static_cast<std::size_t>(y) * y_stride;
 #if defined(__aarch64__)
             write_y_row_neon(src_row, dst_row, width, pixel_range);
 #else
             for (int x = 0; x < width; ++x)
-                dst_row[x] = quantize_byte(half_to_float(src_row[x]) / pixel_range);
+                dst_row[x] = quantize_unit_float(half_to_float(src_row[x]) / pixel_range);
 #endif
         }
 
         const int uv_width = width / 2;
         const int uv_height = height / 2;
-        auto convert_uv_plane = [&](const Float16Storage* src_base, std::uint8_t* dst_base) {
+        auto convert_uv_plane = [&](const Float16Storage* src_base,
+                                    std::uint8_t* dst_base,
+                                    std::size_t dst_stride) {
             for (int uy = 0; uy < uv_height; ++uy) {
                 const Float16Storage* r0 =
                     src_base + active_offset +
                     static_cast<std::size_t>(uy * 2) * model_row_stride;
                 const Float16Storage* r1 = r0 + model_row_stride;
                 std::uint8_t* dst_row =
-                    dst_base + static_cast<std::size_t>(uy) * static_cast<std::size_t>(uv_width);
+                    dst_base + static_cast<std::size_t>(uy) * dst_stride;
 #if defined(__aarch64__)
                 write_uv_row_neon(r0, r1, dst_row, uv_width, pixel_range);
 #else
@@ -478,13 +579,13 @@ void prepare_model_output_into(const Tensor& tensor,
                         half_to_float(r0[col + 1]) / pixel_range +
                         half_to_float(r1[col]) / pixel_range +
                         half_to_float(r1[col + 1]) / pixel_range;
-                    dst_row[ux] = quantize_byte(sum * 0.25F);
+                    dst_row[ux] = quantize_unit_float(sum * 0.25F);
                 }
 #endif
             }
         };
-        convert_uv_plane(u_base, u_plane.data());
-        convert_uv_plane(v_base, v_plane.data());
+        convert_uv_plane(u_base, u_plane.data(), u_stride);
+        convert_uv_plane(v_base, v_plane.data(), v_stride);
         return;
     }
 
@@ -502,10 +603,9 @@ void prepare_model_output_into(const Tensor& tensor,
 
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x)
-            y_plane[static_cast<std::size_t>(y) *
-                        static_cast<std::size_t>(width) +
+            y_plane[static_cast<std::size_t>(y) * y_stride +
                     static_cast<std::size_t>(x)] =
-                quantize_byte(sample(0, y, x));
+                quantize_unit_float(sample(0, y, x));
     }
     for (int y = 0; y < height / 2; ++y) {
         for (int x = 0; x < width / 2; ++x) {
@@ -517,12 +617,10 @@ void prepare_model_output_into(const Tensor& tensor,
                     v += sample(2, y * 2 + dy, x * 2 + dx);
                 }
             }
-            const std::size_t index =
-                static_cast<std::size_t>(y) *
-                    static_cast<std::size_t>(width / 2) +
-                static_cast<std::size_t>(x);
-            u_plane[index] = quantize_byte(u * 0.25F);
-            v_plane[index] = quantize_byte(v * 0.25F);
+            u_plane[static_cast<std::size_t>(y) * u_stride +
+                    static_cast<std::size_t>(x)] = quantize_unit_float(u * 0.25F);
+            v_plane[static_cast<std::size_t>(y) * v_stride +
+                    static_cast<std::size_t>(x)] = quantize_unit_float(v * 0.25F);
         }
     }
 }
@@ -531,14 +629,11 @@ Yuv420Frame prepare_model_output(const Tensor& tensor, int width, int height,
                                  float pixel_range,
                                  const FramePadding& padding)
 {
-    validate_dimensions(width, height);
+    const PlaneSizes sizes = plane_sizes(width, height);
     Yuv420Frame result{width, height,
-        std::vector<std::uint8_t>(static_cast<std::size_t>(width) *
-                                  static_cast<std::size_t>(height)),
-        std::vector<std::uint8_t>(static_cast<std::size_t>(width / 2) *
-                                  static_cast<std::size_t>(height / 2)),
-        std::vector<std::uint8_t>(static_cast<std::size_t>(width / 2) *
-                                  static_cast<std::size_t>(height / 2))};
+        std::vector<std::uint8_t>(sizes.y),
+        std::vector<std::uint8_t>(sizes.uv),
+        std::vector<std::uint8_t>(sizes.uv)};
     prepare_model_output_into(
         tensor, mutable_yuv420_view(result), pixel_range, padding);
     return result;

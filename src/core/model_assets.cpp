@@ -3,11 +3,27 @@
 #include <algorithm>
 #include <cstdint>
 #include <fstream>
+#include <limits>
 #include <optional>
 #include <span>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
+
+#if defined(_WIN32)
+#  ifndef WIN32_LEAN_AND_MEAN
+#    define WIN32_LEAN_AND_MEAN
+#  endif
+#  ifndef NOMINMAX
+#    define NOMINMAX
+#  endif
+#  include <windows.h>
+#elif defined(__unix__) || defined(__APPLE__)
+#  include <fcntl.h>
+#  include <sys/mman.h>
+#  include <sys/stat.h>
+#  include <unistd.h>
+#endif
 
 #ifdef MLVC_HAS_EMBEDDED_MODELS
 extern "C" const unsigned char mlvc_embedded_models_start[];
@@ -18,6 +34,8 @@ namespace mlvc {
 namespace {
 
 constexpr std::string_view kEmbeddedPrefix = "embedded:";
+constexpr std::uint64_t kMaxModelAssetBytes = std::uint64_t{2} << 30;  // 2 GiB
+constexpr std::size_t kMmapThresholdBytes = 64U * 1024U;
 
 #ifdef MLVC_HAS_EMBEDDED_MODELS
 struct EmbeddedIndexEntry {
@@ -31,6 +49,23 @@ constexpr EmbeddedIndexEntry kEmbeddedIndex[] = {
 #include "mlvc_embedded_models_index.inc"
 };
 #endif
+
+void validate_relative_asset_path(const std::filesystem::path& relative_path)
+{
+    if (relative_path.empty() || relative_path.is_absolute() ||
+        relative_path.has_root_name() || relative_path.has_root_directory()) {
+        throw std::runtime_error(
+            "invalid model asset path (must be relative): " +
+            relative_path.generic_string());
+    }
+    for (const auto& part : relative_path) {
+        if (part == "..") {
+            throw std::runtime_error(
+                "model asset path must not traverse parent directories: " +
+                relative_path.generic_string());
+        }
+    }
+}
 
 std::optional<std::string> embedded_profile(
     const std::filesystem::path& model_dir)
@@ -83,13 +118,99 @@ std::vector<std::byte> read_file(const std::filesystem::path& path)
     const auto end = input.tellg();
     if (end < 0)
         throw std::runtime_error("cannot size model asset: " + path.string());
-    std::vector<std::byte> result(static_cast<std::size_t>(end));
+    const auto file_size = static_cast<std::uint64_t>(end);
+    if (file_size > kMaxModelAssetBytes ||
+        file_size > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        throw std::runtime_error("model asset exceeds size limit: " + path.string());
+    }
+    std::vector<std::byte> result(static_cast<std::size_t>(file_size));
     input.seekg(0);
-    input.read(reinterpret_cast<char*>(result.data()),
-               static_cast<std::streamsize>(result.size()));
-    if (!input)
-        throw std::runtime_error("cannot read model asset: " + path.string());
+    if (!result.empty()) {
+        input.read(reinterpret_cast<char*>(result.data()),
+                   static_cast<std::streamsize>(result.size()));
+        if (!input)
+            throw std::runtime_error("cannot read model asset: " + path.string());
+    }
     return result;
+}
+
+AssetView map_or_read_file(const std::filesystem::path& path)
+{
+#if defined(_WIN32)
+    HANDLE file = ::CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+                                nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE)
+        throw std::runtime_error("cannot open model asset: " + path.string());
+    LARGE_INTEGER size_li{};
+    if (!::GetFileSizeEx(file, &size_li) || size_li.QuadPart < 0) {
+        ::CloseHandle(file);
+        throw std::runtime_error("cannot size model asset: " + path.string());
+    }
+    const auto file_size = static_cast<std::uint64_t>(size_li.QuadPart);
+    if (file_size > kMaxModelAssetBytes ||
+        file_size > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        ::CloseHandle(file);
+        throw std::runtime_error("model asset exceeds size limit: " + path.string());
+    }
+    if (file_size == 0) {
+        ::CloseHandle(file);
+        return AssetView{};
+    }
+    if (file_size < kMmapThresholdBytes) {
+        ::CloseHandle(file);
+        return AssetView::owned(read_file(path));
+    }
+    HANDLE mapping = ::CreateFileMappingW(file, nullptr, PAGE_READONLY, 0, 0, nullptr);
+    ::CloseHandle(file);
+    if (!mapping)
+        return AssetView::owned(read_file(path));
+    void* view = ::MapViewOfFile(mapping, FILE_MAP_READ, 0, 0, 0);
+    ::CloseHandle(mapping);
+    if (!view)
+        return AssetView::owned(read_file(path));
+    std::shared_ptr<const void> owner(view, [](const void* ptr) noexcept {
+        if (ptr)
+            ::UnmapViewOfFile(ptr);
+    });
+    return AssetView::mapped(static_cast<const std::byte*>(view),
+                             static_cast<std::size_t>(file_size), std::move(owner));
+#elif defined(__unix__) || defined(__APPLE__)
+    const int fd = ::open(path.c_str(), O_RDONLY);
+    if (fd < 0)
+        throw std::runtime_error("cannot open model asset: " + path.string());
+    struct stat st{};
+    if (::fstat(fd, &st) != 0 || st.st_size < 0) {
+        ::close(fd);
+        throw std::runtime_error("cannot size model asset: " + path.string());
+    }
+    const auto file_size = static_cast<std::uint64_t>(st.st_size);
+    if (file_size > kMaxModelAssetBytes ||
+        file_size > static_cast<std::uint64_t>(std::numeric_limits<std::size_t>::max())) {
+        ::close(fd);
+        throw std::runtime_error("model asset exceeds size limit: " + path.string());
+    }
+    if (file_size == 0) {
+        ::close(fd);
+        return AssetView{};
+    }
+    if (file_size < kMmapThresholdBytes) {
+        ::close(fd);
+        return AssetView::owned(read_file(path));
+    }
+    const std::size_t map_size = static_cast<std::size_t>(file_size);
+    void* mapped = ::mmap(nullptr, map_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    ::close(fd);
+    if (mapped == MAP_FAILED)
+        return AssetView::owned(read_file(path));
+    std::shared_ptr<const void> owner(mapped, [map_size](const void* ptr) noexcept {
+        if (ptr)
+            ::munmap(const_cast<void*>(ptr), map_size);
+    });
+    return AssetView::mapped(static_cast<const std::byte*>(mapped),
+                             map_size, std::move(owner));
+#else
+    return AssetView::owned(read_file(path));
+#endif
 }
 
 class DirectoryAssetReader final : public ModelAssetReader {
@@ -103,13 +224,23 @@ public:
 
     bool exists(const std::filesystem::path& relative_path) const override
     {
-        return std::filesystem::is_regular_file(directory_ / relative_path);
+        validate_relative_asset_path(relative_path);
+        std::error_code error;
+        return std::filesystem::is_regular_file(directory_ / relative_path, error) && !error;
     }
 
     std::vector<std::byte> read_binary(
         const std::filesystem::path& relative_path) const override
     {
+        validate_relative_asset_path(relative_path);
         return read_file(directory_ / relative_path);
+    }
+
+    AssetView read_view(
+        const std::filesystem::path& relative_path) const override
+    {
+        validate_relative_asset_path(relative_path);
+        return map_or_read_file(directory_ / relative_path);
     }
 
 private:
@@ -134,6 +265,7 @@ public:
 
     bool exists(const std::filesystem::path& relative_path) const override
     {
+        validate_relative_asset_path(relative_path);
 #ifdef MLVC_HAS_EMBEDDED_MODELS
         return find_embedded_asset(profile_, relative_path.generic_string()).has_value();
 #else
@@ -145,11 +277,19 @@ public:
     std::vector<std::byte> read_binary(
         const std::filesystem::path& relative_path) const override
     {
+        const AssetView view = read_view(relative_path);
+        return {view.data(), view.data() + view.size()};
+    }
+
+    AssetView read_view(
+        const std::filesystem::path& relative_path) const override
+    {
+        validate_relative_asset_path(relative_path);
 #ifdef MLVC_HAS_EMBEDDED_MODELS
         const auto asset = find_embedded_asset(
             profile_, relative_path.generic_string());
         if (asset)
-            return {asset->begin(), asset->end()};
+            return AssetView::borrowed(*asset);
         throw std::runtime_error(
             "embedded model asset not found: " + profile_ + "/" +
             relative_path.generic_string());

@@ -58,6 +58,12 @@ if(MLVC_ENABLE_SANITIZERS)
             -fno-omit-frame-pointer -fsanitize=address)
         target_link_options(libprotobuf-lite PRIVATE -fsanitize=address)
     endif()
+elseif(MLVC_ENABLE_TSAN)
+    if(TARGET libprotobuf-lite)
+        target_compile_options(libprotobuf-lite PRIVATE
+            -fno-omit-frame-pointer -fsanitize=thread)
+        target_link_options(libprotobuf-lite PRIVATE -fsanitize=thread)
+    endif()
 endif()
 if(_mlvc_previous_visibility STREQUAL "")
     unset(CMAKE_CXX_VISIBILITY_PRESET)
@@ -105,6 +111,10 @@ if(MLVC_ENABLE_SANITIZERS)
     target_compile_options(mlvc_model_proto PRIVATE
         -fno-omit-frame-pointer -fsanitize=address)
     target_link_options(mlvc_model_proto PRIVATE -fsanitize=address)
+elseif(MLVC_ENABLE_TSAN)
+    target_compile_options(mlvc_model_proto PRIVATE
+        -fno-omit-frame-pointer -fsanitize=thread)
+    target_link_options(mlvc_model_proto PRIVATE -fsanitize=thread)
 endif()
 
 # Python bindings are checked in for standalone model tooling; regenerate from

@@ -1,12 +1,15 @@
 #pragma once
 
 #include "core/assets.hpp"
+#include "core/tensor.hpp"
 
 #include <array>
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <limits>
 #include <span>
+#include <stdexcept>
 #include <string>
 #include <variant>
 #include <vector>
@@ -113,7 +116,8 @@ struct GraphDescriptor {
 
 struct LoadedGraph {
     GraphDescriptor descriptor;
-    std::vector<std::byte> weights;
+    AssetView weights;
+    std::array<std::byte, 32> weights_sha256{};
 };
 
 GraphDescriptor decode_graph_binary(std::span<const std::byte> bytes);
@@ -121,5 +125,72 @@ LoadedGraph load_aot_graph(const ModelAssetReader& assets,
                            const std::string& model_name);
 LoadedGraph load_aot_graph(const std::filesystem::path& model_dir,
                            const std::string& model_name);
+
+inline std::size_t dtype_byte_size(DataType dtype)
+{
+    switch (dtype) {
+    case DataType::FP16:
+        return sizeof(Float16Storage);
+    case DataType::INT32:
+        return sizeof(std::int32_t);
+    case DataType::INT64:
+        return sizeof(std::int64_t);
+    default:
+        throw std::runtime_error(
+            "unsupported AOT tensor data type " +
+            std::to_string(static_cast<int>(dtype)));
+    }
+}
+
+inline TensorDataType to_public_dtype(DataType dtype)
+{
+    switch (dtype) {
+    case DataType::FP16:
+        return TensorDataType::kFloat16;
+    case DataType::INT32:
+        return TensorDataType::kInt32;
+    default:
+        throw std::runtime_error(
+            "unsupported AOT graph I/O data type " +
+            std::to_string(static_cast<int>(dtype)));
+    }
+}
+
+inline std::size_t checked_element_count(std::span<const std::int64_t> shape)
+{
+    return checked_tensor_element_count(shape);
+}
+
+inline std::array<int, 4> dims_to_4d(std::span<const std::int64_t> shape)
+{
+    if (shape.size() != 4U)
+        throw std::runtime_error("expected 4D NCHW tensor");
+    std::array<int, 4> dims{};
+    for (std::size_t i = 0; i < 4U; ++i) {
+        if (shape[i] <= 0 || shape[i] > std::numeric_limits<int>::max())
+            throw std::runtime_error("tensor dimension out of int range");
+        dims[i] = static_cast<int>(shape[i]);
+    }
+    return dims;
+}
+
+inline std::array<int, 4> pad_dims_to_4d(std::span<const std::int64_t> shape)
+{
+    if (shape.size() > 4U)
+        throw std::runtime_error("tensors with rank > 4 are unsupported");
+    std::array<int, 4> dims{1, 1, 1, 1};
+    const std::size_t offset = 4U - shape.size();
+    for (std::size_t i = 0; i < shape.size(); ++i) {
+        if (shape[i] <= 0 || shape[i] > std::numeric_limits<int>::max())
+            throw std::runtime_error("tensor dimension out of int range");
+        dims[offset + i] = static_cast<int>(shape[i]);
+    }
+    return dims;
+}
+
+inline unsigned int divide_up(std::size_t value, unsigned int divisor) noexcept
+{
+    return static_cast<unsigned int>((value + divisor - 1U) / divisor);
+}
 
 }  // namespace mlvc::aot

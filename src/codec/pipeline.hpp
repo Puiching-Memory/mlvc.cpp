@@ -22,6 +22,7 @@ struct CodecOptions {
     int num_threads = 0;
     ExecutionPreference execution_preference = ExecutionPreference::kAuto;
     bool allow_cpu_fallback = true;
+    bool share_thread_pool = false;
     // A path of "-" selects stdin/stdout.  POSIX named FIFOs are also
     // supported for live frame-by-frame operation.
     std::string input_path;
@@ -48,6 +49,7 @@ struct SessionOptions {
     int num_threads = 0;
     ExecutionPreference execution_preference = ExecutionPreference::kAuto;
     bool allow_cpu_fallback = true;
+    bool share_thread_pool = false;
     std::string model_dir;
     std::string debug_dir;
     std::string backend_name;
@@ -66,10 +68,11 @@ public:
 
     void reset();
     int frame_index() const noexcept;
-    const ModelConfig& model_config() const noexcept;
+    const ModelConfig& model_config() const;
 
     EncodedFrame encode_frame(Yuv420FrameView frame);
     EncodedFrame encode_frame(Yuv420FrameView frame, int q_index);
+    EncodedFrame encode_frame(Yuv420FrameView frame, int q_index, bool force_idr);
 
 private:
     friend CodecStats encode_video(const CodecOptions& options);
@@ -90,10 +93,12 @@ public:
 
     void reset();
     int frame_index() const noexcept;
-    const ModelConfig& model_config() const noexcept;
+    const ModelConfig& model_config() const;
 
     Yuv420Frame decode_frame(const EncodedFrame& encoded);
     void decode_frame_into(const EncodedFrame& encoded,
+                           MutableYuv420FrameView output);
+    void decode_frame_into(std::span<const std::byte> access_unit,
                            MutableYuv420FrameView output);
 
 private:

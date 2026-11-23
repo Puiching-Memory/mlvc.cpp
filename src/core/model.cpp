@@ -1,5 +1,7 @@
 #include "core/model.hpp"
 
+#include "core/logging.hpp"
+#include "core/sha256.hpp"
 #include "model_assets.hpp"
 
 #include "model_proto.hpp"
@@ -43,6 +45,46 @@ void validate_bundle_manifest(const ModelAssetReader& assets,
         bundle.contract().container() != "mlvc-nalu-v0" ||
         bundle.contract().entropy() != "canonical-pmf-v1")
         throw std::runtime_error("model bundle does not match Protobuf metadata");
+
+    if (bundle.artifacts_size() > 0) {
+        for (const auto& artifact : bundle.artifacts()) {
+            if (artifact.path().empty() || artifact.sha256().size() != 32) {
+                throw std::runtime_error(
+                    "invalid artifact manifest record in model_bundle.pb");
+            }
+            const AssetView bytes = assets.read_view(artifact.path());
+            if (bytes.size() != artifact.size_bytes()) {
+                throw std::runtime_error(
+                    "model bundle artifact size mismatch: " + artifact.path());
+            }
+            const Sha256Digest digest = sha256_digest(bytes.span());
+            if (!sha256_equals(digest, artifact.sha256())) {
+                throw std::runtime_error(
+                    "model bundle artifact SHA-256 verification failed: " +
+                    artifact.path());
+            }
+        }
+    }
+
+    if (assets.exists("gaussian_pmf.pb") && assets.exists("bit_estimator_pmf.pb")) {
+        const Sha256Digest gaussian_hash =
+            sha256_digest(assets.read_view("gaussian_pmf.pb").span());
+        const Sha256Digest bit_est_hash =
+            sha256_digest(assets.read_view("bit_estimator_pmf.pb").span());
+        Sha256 combined;
+        combined.update(gaussian_hash);
+        combined.update(bit_est_hash);
+        if (!sha256_equals(combined.finalize(), bundle.entropy_model_sha256())) {
+            throw std::runtime_error(
+                "model bundle entropy_model_sha256 verification failed");
+        }
+    }
+
+    if (log_enabled(LogLevel::kDebug)) {
+        log_message(LogLevel::kDebug, "model",
+                    "verified model bundle " + bundle.profile() + " from " +
+                        assets.location_label());
+    }
 }
 
 }  // namespace

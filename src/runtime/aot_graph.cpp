@@ -1,7 +1,11 @@
 #include "runtime/aot_graph_proto.hpp"
 
+#include "core/logging.hpp"
+#include "core/sha256.hpp"
+
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <filesystem>
 #include <limits>
 #include <stdexcept>
@@ -137,8 +141,7 @@ GraphDescriptor decode_graph(const wire::Graph& source)
         tensor.dtype = convert_dtype(input.dtype());
         tensor.shape.assign(input.shape().begin(), input.shape().end());
         require(tensor.shape.size() <= 4, "tensor rank");
-        std::size_t bytes =
-            tensor.dtype == DataType::FP16 ? 2 : tensor.dtype == DataType::INT32 ? 4 : 8;
+        std::size_t bytes = dtype_byte_size(tensor.dtype);
         for (const auto dimension : tensor.shape) {
             require(dimension > 0 &&
                         static_cast<std::uint64_t>(dimension) <=
@@ -293,12 +296,12 @@ LoadedGraph load_aot_graph(const ModelAssetReader& assets,
 {
     const std::filesystem::path graph_dir =
         std::filesystem::path("aot") / model_name;
-    const auto graph_bytes = assets.read_binary(graph_dir / "graph.pb");
+    const AssetView graph_bytes = assets.read_view(graph_dir / "graph.pb");
     const auto graph_message =
-        parse_proto_bytes<wire::Graph>(graph_bytes, (graph_dir / "graph.pb").string());
-    const auto metadata_bytes = assets.read_binary("metadata.pb");
+        parse_proto_bytes<wire::Graph>(graph_bytes.span(), (graph_dir / "graph.pb").string());
+    const AssetView metadata_bytes = assets.read_view("metadata.pb");
     const auto metadata =
-        parse_proto_bytes<wire::ModelMetadata>(metadata_bytes, "metadata.pb");
+        parse_proto_bytes<wire::ModelMetadata>(metadata_bytes.span(), "metadata.pb");
     if (graph_message.checkpoint_sha256() != metadata.checkpoint_sha256()) {
         throw std::runtime_error(
             "AOT graph checkpoint differs from metadata (" +
@@ -307,11 +310,23 @@ LoadedGraph load_aot_graph(const ModelAssetReader& assets,
 
     LoadedGraph loaded;
     loaded.descriptor = decode_graph(graph_message);
-    loaded.weights = assets.read_binary(graph_dir / "weights.bin");
+    loaded.weights = assets.read_view(graph_dir / "weights.bin");
     if (loaded.weights.size() != loaded.descriptor.weights_bytes) {
         throw std::runtime_error(
             "AOT weights size does not match graph (" +
             assets.location_label() + ")");
+    }
+    const Sha256Digest actual_weights_sha = sha256_digest(loaded.weights.span());
+    if (!sha256_equals(actual_weights_sha, graph_message.weights_sha256())) {
+        throw std::runtime_error(
+            "AOT weights SHA-256 verification failed (" +
+            assets.location_label() + "/aot/" + model_name + "/weights.bin)");
+    }
+    loaded.weights_sha256 = actual_weights_sha;
+    if (log_enabled(LogLevel::kDebug)) {
+        log_message(LogLevel::kDebug, "aot",
+                    "verified AOT graph & weights for " + model_name +
+                        " (" + std::to_string(loaded.weights.size()) + " bytes)");
     }
     return loaded;
 }

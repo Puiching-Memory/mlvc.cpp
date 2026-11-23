@@ -520,22 +520,35 @@ std::span<const std::byte> BitstreamEncoder::encode(const FrameData& data)
 }
 
 struct BitstreamDecoder::Impl {
-    SpsNalu sps{};
-    PpsNalu pps{};
+    struct ParameterState {
+        std::array<std::optional<SpsNalu>, kMaxSpsId> sps_table{};
+        std::array<std::optional<PpsNalu>, kMaxPpsId> pps_table{};
+        SpsNalu active_sps{};
+        PpsNalu active_pps{};
+
+        void reset()
+        {
+            sps_table.fill(std::nullopt);
+            pps_table.fill(std::nullopt);
+            active_sps = SpsNalu{};
+            active_sps.sps_id = -1;
+            active_pps = PpsNalu{};
+            active_pps.pps_id = -1;
+            active_pps.sps_id = -2;
+        }
+    };
+
+    ParameterState state{};
     NaluParser parser;
 
     void reset()
     {
-        sps = SpsNalu{};
-        sps.sps_id = -1;
-        pps = PpsNalu{};
-        pps.pps_id = -1;
-        pps.sps_id = -2;
+        state.reset();
     }
 
     Impl() { reset(); }
 
-    std::optional<FrameData> decode_next_nalu()
+    std::optional<FrameData> decode_next_nalu(ParameterState& working)
     {
         const NaluHeader header = parser.peek_nalu_header();
         const NaluType type = header.nalu_type;
@@ -546,36 +559,66 @@ struct BitstreamDecoder::Impl {
                 throw BitstreamError(BitstreamErrorCode::kUnsupportedVersion,
                                      "unsupported MLVC bitstream major version");
             }
-            sps = parsed_sps;
+            if (parsed_sps.sps_id < 0 || parsed_sps.sps_id >= kMaxSpsId) {
+                throw BitstreamError(BitstreamErrorCode::kUnexpected,
+                                     "SPS id is outside supported range");
+            }
+            working.sps_table[static_cast<std::size_t>(parsed_sps.sps_id)] = parsed_sps;
+            working.active_sps = parsed_sps;
             return std::nullopt;
         }
         if (type == NaluType::kPps) {
             const PpsNalu parsed_pps = parser.read_pps();
-            pps = parsed_pps;
-            if (pps.sps_id != sps.sps_id) {
+            if (parsed_pps.pps_id < 0 || parsed_pps.pps_id >= kMaxPpsId) {
+                throw BitstreamError(BitstreamErrorCode::kUnexpected,
+                                     "PPS id is outside supported range");
+            }
+            if (parsed_pps.sps_id < 0 || parsed_pps.sps_id >= kMaxSpsId ||
+                !working.sps_table[static_cast<std::size_t>(parsed_pps.sps_id)].has_value()) {
                 throw BitstreamError(BitstreamErrorCode::kMissingSps,
                                      "PPS references unknown or inactive SPS");
             }
+            working.pps_table[static_cast<std::size_t>(parsed_pps.pps_id)] = parsed_pps;
+            working.active_pps = parsed_pps;
+            working.active_sps = *working.sps_table[static_cast<std::size_t>(parsed_pps.sps_id)];
             return std::nullopt;
         }
         if (type == NaluType::kIdrNLp || type == NaluType::kTrailR ||
             type == NaluType::kTsaR || type == NaluType::kTrailN ||
             type == NaluType::kTsaN) {
-            const FrameNalu frame = parser.read_frame(sps);
-            if (frame.frame_header.pps_id != pps.pps_id) {
+            if (working.active_sps.sps_id < 0 && working.active_pps.pps_id < 0) {
+                // Parse frame header with default sps_id=-1 so frame_header.pps_id check
+                // reports kMissingPps consistently with libmlvc v0 error vectors.
+                const FrameNalu frame = parser.read_frame(working.active_sps);
+                (void)frame;
                 throw BitstreamError(BitstreamErrorCode::kMissingPps,
                                      "frame header references unknown or inactive PPS");
             }
-            if (pps.sps_id != sps.sps_id || sps.sps_id < 0) {
+            // Use the currently active SPS to determine frame_idx_bits before looking up pps_id.
+            const FrameNalu frame = parser.read_frame(working.active_sps);
+            if (frame.frame_header.pps_id < 0 || frame.frame_header.pps_id >= kMaxPpsId ||
+                !working.pps_table[static_cast<std::size_t>(frame.frame_header.pps_id)].has_value()) {
+                throw BitstreamError(BitstreamErrorCode::kMissingPps,
+                                     "frame header references unknown or inactive PPS");
+            }
+            const PpsNalu& matched_pps =
+                *working.pps_table[static_cast<std::size_t>(frame.frame_header.pps_id)];
+            if (matched_pps.sps_id < 0 || matched_pps.sps_id >= kMaxSpsId ||
+                !working.sps_table[static_cast<std::size_t>(matched_pps.sps_id)].has_value()) {
                 throw BitstreamError(BitstreamErrorCode::kMissingSps,
                                      "frame header has no active matching SPS");
             }
+            const SpsNalu& matched_sps =
+                *working.sps_table[static_cast<std::size_t>(matched_pps.sps_id)];
+            working.active_pps = matched_pps;
+            working.active_sps = matched_sps;
+
             if (header.temporal_id_plus1 == 0) {
                 throw BitstreamError(BitstreamErrorCode::kUnexpected,
                                      "temporal_id_plus1 must be positive");
             }
             const int temporal_id = header.temporal_id_plus1 - 1;
-            const int max_temporal_layers = sps.max_temporal_layers_minus1 + 1;
+            const int max_temporal_layers = matched_sps.max_temporal_layers_minus1 + 1;
             if (temporal_id >= max_temporal_layers) {
                 throw BitstreamError(BitstreamErrorCode::kUnexpected,
                                      "frame temporal_id exceeds SPS max_temporal_layers");
@@ -591,24 +634,24 @@ struct BitstreamDecoder::Impl {
 
             const std::int64_t qp =
                 static_cast<std::int64_t>(frame.frame_header.qp_delta) +
-                pps.init_qp_minus26 + kDefaultInitQp;
+                matched_pps.init_qp_minus26 + kDefaultInitQp;
             if (qp < kMinBitstreamQp || qp > kMaxBitstreamQp) {
                 throw BitstreamError(BitstreamErrorCode::kUnexpected,
                                      "decoded frame QP is outside [0, 51]");
             }
 
             FrameData result{};
-            result.mlvc_version = {sps.mlvc_version_major, sps.mlvc_version_minor};
-            result.model_width = 2 * sps.model_width_div2;
-            result.model_height = 2 * sps.model_height_div2;
+            result.mlvc_version = {matched_sps.mlvc_version_major, matched_sps.mlvc_version_minor};
+            result.model_width = 2 * matched_sps.model_width_div2;
+            result.model_height = 2 * matched_sps.model_height_div2;
             result.crop_offsets = {
-                2 * sps.crop_left_div2,
-                2 * sps.crop_right_div2,
-                2 * sps.crop_top_div2,
-                2 * sps.crop_bottom_div2,
+                2 * matched_sps.crop_left_div2,
+                2 * matched_sps.crop_right_div2,
+                2 * matched_sps.crop_top_div2,
+                2 * matched_sps.crop_bottom_div2,
             };
-            result.transpose_flag = sps.transpose_flag;
-            result.frame_idx_bits = sps.frame_idx_bits_minus8 + kMinFrameIdxBits;
+            result.transpose_flag = matched_sps.transpose_flag;
+            result.frame_idx_bits = matched_sps.frame_idx_bits_minus8 + kMinFrameIdxBits;
             result.temporal_id = temporal_id;
             result.max_temporal_layers = max_temporal_layers;
             result.frame_type = frame_type;
@@ -638,15 +681,18 @@ void BitstreamDecoder::reset()
 
 FrameData BitstreamDecoder::decode(std::span<const std::byte> access_unit)
 {
+    Impl::ParameterState working = impl_->state;
     impl_->parser.open(access_unit);
     while (impl_->parser.has_next()) {
-        std::optional<FrameData> frame = impl_->decode_next_nalu();
+        std::optional<FrameData> frame = impl_->decode_next_nalu(working);
         if (frame.has_value() && impl_->parser.has_next()) {
             throw BitstreamError(BitstreamErrorCode::kUnexpected,
                                  "extra NALUs after frame NALU are not supported");
         }
-        if (frame.has_value())
+        if (frame.has_value()) {
+            impl_->state = working;
             return *frame;
+        }
     }
     throw BitstreamError(BitstreamErrorCode::kPartialAccessUnit,
                          "incomplete MLVC access unit without frame NALU");
@@ -654,12 +700,12 @@ FrameData BitstreamDecoder::decode(std::span<const std::byte> access_unit)
 
 const SpsNalu& BitstreamDecoder::sps() const noexcept
 {
-    return impl_->sps;
+    return impl_->state.active_sps;
 }
 
 const PpsNalu& BitstreamDecoder::pps() const noexcept
 {
-    return impl_->pps;
+    return impl_->state.active_pps;
 }
 
 AccessUnitReader::AccessUnitReader(std::istream& input,

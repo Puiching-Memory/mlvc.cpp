@@ -72,9 +72,9 @@ struct Tensor {
         return std::visit([](const auto& values) { return values.size(); }, data);
     }
 
-    std::size_t byte_size() const
+    std::size_t byte_size() const noexcept
     {
-        return std::visit([](const auto& values) {
+        return std::visit([](const auto& values) noexcept {
             using Value = typename std::decay_t<decltype(values)>::value_type;
             return values.size() * sizeof(Value);
         }, data);
@@ -137,7 +137,10 @@ public:
     std::size_t element_count() const noexcept { return element_count_; }
     std::size_t byte_size() const noexcept
     {
-        return element_count_ * tensor_data_type_size(data_type_);
+        return element_count_ *
+            (data_type_ == TensorDataType::kFloat16
+                 ? sizeof(Float16Storage)
+                 : sizeof(std::int32_t));
     }
 
     std::span<const Float16Storage> fp16_data() const
@@ -210,9 +213,12 @@ public:
     TensorDataType data_type() const noexcept { return data_type_; }
     void* raw_data() const noexcept { return data_; }
     std::size_t element_count() const noexcept { return element_count_; }
-    std::size_t byte_size() const
+    std::size_t byte_size() const noexcept
     {
-        return element_count_ * tensor_data_type_size(data_type_);
+        return element_count_ *
+            (data_type_ == TensorDataType::kFloat16
+                 ? sizeof(Float16Storage)
+                 : sizeof(std::int32_t));
     }
 
     std::span<Float16Storage> fp16_data() const

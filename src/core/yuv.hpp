@@ -2,6 +2,7 @@
 
 #include "core/tensor.hpp"
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <istream>
@@ -25,11 +26,25 @@ public:
                     std::span<const std::uint8_t> u,
                     std::span<const std::uint8_t> v);
 
+    Yuv420FrameView(int width, int height,
+                    std::span<const std::uint8_t> y, std::size_t y_stride,
+                    std::span<const std::uint8_t> u, std::size_t u_stride,
+                    std::span<const std::uint8_t> v, std::size_t v_stride);
+
     int width() const noexcept { return width_; }
     int height() const noexcept { return height_; }
     std::span<const std::uint8_t> y() const noexcept { return y_; }
     std::span<const std::uint8_t> u() const noexcept { return u_; }
     std::span<const std::uint8_t> v() const noexcept { return v_; }
+    std::size_t y_stride() const noexcept { return y_stride_; }
+    std::size_t u_stride() const noexcept { return u_stride_; }
+    std::size_t v_stride() const noexcept { return v_stride_; }
+    bool is_tightly_packed() const noexcept
+    {
+        return y_stride_ == static_cast<std::size_t>(width_) &&
+               u_stride_ == static_cast<std::size_t>(width_ / 2) &&
+               v_stride_ == static_cast<std::size_t>(width_ / 2);
+    }
 
 private:
     int width_;
@@ -37,6 +52,9 @@ private:
     std::span<const std::uint8_t> y_;
     std::span<const std::uint8_t> u_;
     std::span<const std::uint8_t> v_;
+    std::size_t y_stride_;
+    std::size_t u_stride_;
+    std::size_t v_stride_;
 };
 
 class MutableYuv420FrameView {
@@ -45,11 +63,25 @@ public:
                            std::span<std::uint8_t> u,
                            std::span<std::uint8_t> v);
 
+    MutableYuv420FrameView(int width, int height,
+                           std::span<std::uint8_t> y, std::size_t y_stride,
+                           std::span<std::uint8_t> u, std::size_t u_stride,
+                           std::span<std::uint8_t> v, std::size_t v_stride);
+
     int width() const noexcept { return width_; }
     int height() const noexcept { return height_; }
     std::span<std::uint8_t> y() const noexcept { return y_; }
     std::span<std::uint8_t> u() const noexcept { return u_; }
     std::span<std::uint8_t> v() const noexcept { return v_; }
+    std::size_t y_stride() const noexcept { return y_stride_; }
+    std::size_t u_stride() const noexcept { return u_stride_; }
+    std::size_t v_stride() const noexcept { return v_stride_; }
+    bool is_tightly_packed() const noexcept
+    {
+        return y_stride_ == static_cast<std::size_t>(width_) &&
+               u_stride_ == static_cast<std::size_t>(width_ / 2) &&
+               v_stride_ == static_cast<std::size_t>(width_ / 2);
+    }
 
     operator Yuv420FrameView() const;
 
@@ -59,6 +91,9 @@ private:
     std::span<std::uint8_t> y_;
     std::span<std::uint8_t> u_;
     std::span<std::uint8_t> v_;
+    std::size_t y_stride_;
+    std::size_t u_stride_;
+    std::size_t v_stride_;
 };
 
 struct FramePadding {
@@ -95,5 +130,14 @@ Yuv420Frame prepare_model_output(const Tensor& tensor, int width, int height,
                                  const FramePadding& padding);
 
 std::size_t yuv420_frame_bytes(int width, int height);
+
+inline std::uint8_t quantize_unit_float(float value) noexcept
+{
+    if (std::isnan(value) || value <= 0.0F)
+        return 0;
+    if (value >= 1.0F)
+        return 255;
+    return static_cast<std::uint8_t>(std::nearbyint(value * 255.0F));
+}
 
 }  // namespace mlvc

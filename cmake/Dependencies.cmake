@@ -3,7 +3,7 @@
 # they do not perform global dependency discovery themselves.
 
 set(MLVC_UPSTREAM_DIR "${PROJECT_SOURCE_DIR}/third_party/mlvc")
-set(MLVC_PROFILE_FILE "${PROJECT_SOURCE_DIR}/models/profiles/profiles.json")
+set(MLVC_PROFILE_FILE "${PROJECT_SOURCE_DIR}/tools/python/mlvc_tools/profiles.json")
 
 if(NOT EXISTS "${MLVC_UPSTREAM_DIR}/packages/msrtc_rans/CMakeLists.txt")
     message(FATAL_ERROR

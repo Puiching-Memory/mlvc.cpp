@@ -1,1 +1,1 @@
-"""Bindings generated from proto/mlvc_model.proto with protoc 33.5."""
+"""Bindings generated from src/proto/mlvc_model.proto with protoc 33.5."""

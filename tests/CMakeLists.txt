@@ -1,6 +1,6 @@
 add_executable(mlvc_core_safety_tests unit/core_safety_tests.cpp)
 target_include_directories(mlvc_core_safety_tests PRIVATE
-    "${PROJECT_SOURCE_DIR}/core/include")
+    "${PROJECT_SOURCE_DIR}/src")
 target_link_libraries(mlvc_core_safety_tests PRIVATE mlvc_core)
 mlvc_configure_target(mlvc_core_safety_tests)
 mlvc_enable_ipo(mlvc_core_safety_tests)
@@ -8,7 +8,7 @@ add_test(NAME mlvc_core_safety COMMAND mlvc_core_safety_tests)
 
 add_executable(mlvc_bitstream_tests unit/bitstream_tests.cpp)
 target_include_directories(mlvc_bitstream_tests PRIVATE
-    "${PROJECT_SOURCE_DIR}/core/include")
+    "${PROJECT_SOURCE_DIR}/src")
 target_link_libraries(mlvc_bitstream_tests PRIVATE mlvc_core)
 mlvc_configure_target(mlvc_bitstream_tests)
 mlvc_enable_ipo(mlvc_bitstream_tests)
@@ -16,7 +16,7 @@ add_test(NAME mlvc_bitstream COMMAND mlvc_bitstream_tests)
 
 add_executable(mlvc_codec_tests unit/codec_tests.cpp)
 target_include_directories(mlvc_codec_tests PRIVATE
-    "${PROJECT_SOURCE_DIR}/core/include")
+    "${PROJECT_SOURCE_DIR}/src")
 target_link_libraries(mlvc_codec_tests PRIVATE mlvc_core)
 if(UNIX AND NOT APPLE)
     target_link_options(mlvc_codec_tests PRIVATE "LINKER:--disable-new-dtags")
@@ -26,7 +26,7 @@ mlvc_enable_ipo(mlvc_codec_tests)
 
 add_executable(mlvc_c_api_tests unit/c_api_tests.cpp)
 target_include_directories(mlvc_c_api_tests PRIVATE
-    "${PROJECT_SOURCE_DIR}/public/include")
+    "${PROJECT_SOURCE_DIR}/include")
 target_link_libraries(mlvc_c_api_tests PRIVATE mlvc_codec)
 if(UNIX AND NOT APPLE)
     target_link_options(mlvc_c_api_tests PRIVATE "LINKER:--disable-new-dtags")
@@ -43,14 +43,13 @@ add_test(NAME mlvc_c_api COMMAND mlvc_c_api_tests)
 
 add_executable(mlvc_public_header_tests unit/public_header_tests.c)
 target_include_directories(mlvc_public_header_tests PRIVATE
-    "${PROJECT_SOURCE_DIR}/public/include")
+    "${PROJECT_SOURCE_DIR}/include")
 mlvc_configure_target(mlvc_public_header_tests)
 add_test(NAME mlvc_public_header COMMAND mlvc_public_header_tests)
 
 add_executable(mlvc_model_proto_tests unit/model_proto_tests.cpp)
 target_include_directories(mlvc_model_proto_tests PRIVATE
-    "${PROJECT_SOURCE_DIR}/core/include"
-    "${PROJECT_SOURCE_DIR}/runtime/include")
+    "${PROJECT_SOURCE_DIR}/src")
 target_link_libraries(mlvc_model_proto_tests PRIVATE
     mlvc_core
     mlvc_runtime
@@ -63,9 +62,7 @@ add_executable(mlvc_runtime_decoupling_tests
     unit/runtime_decoupling_tests.cpp
     $<TARGET_OBJECTS:mlvc_codec_objects>)
 target_include_directories(mlvc_runtime_decoupling_tests PRIVATE
-    "${PROJECT_SOURCE_DIR}/core/include"
-    "${PROJECT_SOURCE_DIR}/runtime/include"
-    "${PROJECT_SOURCE_DIR}/codec/include")
+    "${PROJECT_SOURCE_DIR}/src")
 target_link_libraries(mlvc_runtime_decoupling_tests PRIVATE
     mlvc_core
     mlvc_runtime
@@ -79,9 +76,7 @@ add_test(NAME mlvc_runtime_decoupling COMMAND mlvc_runtime_decoupling_tests)
 if(MLVC_BACKEND MATCHES "^(cpu|all)$")
     add_executable(mlvc_cpu_backend_tests unit/cpu_backend_tests.cpp)
     target_include_directories(mlvc_cpu_backend_tests PRIVATE
-        "${PROJECT_SOURCE_DIR}/core/include"
-        "${PROJECT_SOURCE_DIR}/runtime/include"
-        "${PROJECT_SOURCE_DIR}/codec/include")
+        "${PROJECT_SOURCE_DIR}/src")
     target_link_libraries(mlvc_cpu_backend_tests PRIVATE
         mlvc_core
         mlvc_runtime

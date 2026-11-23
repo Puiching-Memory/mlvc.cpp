@@ -1,6 +1,6 @@
 # Derived from microsoft/libmlvc (https://github.com/microsoft/libmlvc)
 # Copyright (c) 2026 Microsoft Corporation
-# Licensed under the MIT License. See licenses/libmlvc/LICENSE.
+# Licensed under the MIT License. See third_party/libmlvc/LICENSE.
 
 """MLVC v0.x NALU Annex-B bitstream builder and parser."""
 

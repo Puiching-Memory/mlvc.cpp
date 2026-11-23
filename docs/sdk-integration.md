@@ -4,9 +4,9 @@
 
 ---
 
-## 1. Public C ABI v2 (`public/include/mlvc/codec.h`)
+## 1. Public C ABI v2 (`include/mlvc/codec.h`)
 
-Only [`public/include/mlvc/codec.h`](../public/include/mlvc/codec.h) is installed as part of the public SDK. All internal C++, runtime, CUDA, CUTLASS, Protobuf, and Abseil headers remain private.
+Only [`include/mlvc/codec.h`](../include/mlvc/codec.h) is installed as part of the public SDK. All internal C++, runtime, CUDA, CUTLASS, Protobuf, and Abseil headers remain private.
 
 ### ABI Contract
 
@@ -82,12 +82,12 @@ On Linux/Android/OpenHarmony ELF targets, [`cmake/codec.exports.map`](../cmake/c
 
 ## 2. Internal C++ Session & Asset APIs (In-Tree / Mobile Integration)
 
-The public C ABI currently operates on file/pipe/FIFO streams (`mlvc_encode` / `mlvc_decode`). Applications building `mlvc.cpp` from source (for example, Android JNI, OpenHarmony NAPI, or in-process RTC media engines) can use the internal file-I/O-free C++ session API in [`codec/include/mlvc/codec/pipeline.hpp`](../codec/include/mlvc/codec/pipeline.hpp) directly:
+The public C ABI currently operates on file/pipe/FIFO streams (`mlvc_encode` / `mlvc_decode`). Applications building `mlvc.cpp` from source (for example, Android JNI, OpenHarmony NAPI, or in-process RTC media engines) can use the internal file-I/O-free C++ session API in [`src/codec/pipeline.hpp`](../src/codec/pipeline.hpp) directly:
 
 ### Per-Frame `EncoderSession` & `DecoderSession`
 
 ```cpp
-#include "mlvc/codec/pipeline.hpp"
+#include "codec/pipeline.hpp"
 
 mlvc::SessionOptions opts;
 opts.width = 640;
@@ -114,7 +114,7 @@ mlvc::Yuv420Frame decoded = decoder.decode_frame(pkt);
 
 ### Custom `ModelAssetReader` (e.g. Android `AAssetManager` / In-Memory)
 
-Instead of unpacking model bundles to temporary files on mobile devices, subclass `mlvc::ModelAssetReader` (`core/include/mlvc/core/assets.hpp`) and attach it to `SessionOptions::asset_reader`:
+Instead of unpacking model bundles to temporary files on mobile devices, subclass `mlvc::ModelAssetReader` (`src/core/assets.hpp`) and attach it to `SessionOptions::asset_reader`:
 
 ```cpp
 class MemoryAssetReader final : public mlvc::ModelAssetReader {

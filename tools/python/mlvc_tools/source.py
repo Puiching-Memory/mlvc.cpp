@@ -3,12 +3,15 @@
 import hashlib
 import json
 from dataclasses import replace
+from pathlib import Path
 
-from .upstream import REPO_ROOT, ensure_upstream_conversion
+from .upstream import ensure_upstream_conversion
+
+PROFILE_PATH = Path(__file__).resolve().with_name("profiles.json")
 
 
 def load_profiles():
-    return json.loads((REPO_ROOT / "models/profiles/profiles.json").read_text())["profiles"]
+    return json.loads(PROFILE_PATH.read_text(encoding="utf-8"))["profiles"]
 
 
 def load_model(profile_name, checkpoint, width, height):

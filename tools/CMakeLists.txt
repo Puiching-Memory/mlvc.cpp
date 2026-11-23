@@ -4,10 +4,8 @@ set_target_properties(mlvc_tool_demo PROPERTIES
     BUILD_RPATH "\$ORIGIN"
     INSTALL_RPATH "\$ORIGIN/../lib")
 target_include_directories(mlvc_tool_demo PRIVATE
-    "${PROJECT_SOURCE_DIR}/public/include"
-    "${PROJECT_SOURCE_DIR}/codec/include"
-    "${PROJECT_SOURCE_DIR}/core/include"
-    "${PROJECT_SOURCE_DIR}/runtime/include")
+    "${PROJECT_SOURCE_DIR}/include"
+    "${PROJECT_SOURCE_DIR}/src")
 target_link_libraries(mlvc_tool_demo PRIVATE mlvc_codec)
 if(UNIX AND NOT APPLE)
     target_link_options(mlvc_tool_demo PRIVATE "LINKER:--disable-new-dtags")

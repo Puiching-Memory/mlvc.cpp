@@ -72,7 +72,7 @@ endif()
 
 set(MLVC_PROTO_DIR "${PROJECT_BINARY_DIR}/generated/proto")
 file(MAKE_DIRECTORY "${MLVC_PROTO_DIR}")
-set(MLVC_PROTO_SCHEMA "${PROJECT_SOURCE_DIR}/proto/mlvc_model.proto")
+set(MLVC_PROTO_SCHEMA "${PROJECT_SOURCE_DIR}/src/proto/mlvc_model.proto")
 if(_mlvc_use_external_protoc)
     set(_mlvc_protoc_command "${MLVC_PROTOC_EXECUTABLE}")
     set(_mlvc_protoc_depends "${MLVC_PROTOC_EXECUTABLE}")
@@ -83,7 +83,7 @@ endif()
 add_custom_command(
     OUTPUT "${MLVC_PROTO_DIR}/mlvc_model.pb.cc" "${MLVC_PROTO_DIR}/mlvc_model.pb.h"
     COMMAND "${_mlvc_protoc_command}"
-        "--proto_path=${PROJECT_SOURCE_DIR}/proto" "--cpp_out=${MLVC_PROTO_DIR}"
+        "--proto_path=${PROJECT_SOURCE_DIR}/src/proto" "--cpp_out=${MLVC_PROTO_DIR}"
         "${MLVC_PROTO_SCHEMA}"
     DEPENDS ${_mlvc_protoc_depends} "${MLVC_PROTO_SCHEMA}"
     VERBATIM)
@@ -111,7 +111,7 @@ endif()
 # this target when the schema changes, using the exact same compiler.
 add_custom_target(mlvc_generate_python_proto
     COMMAND "${_mlvc_protoc_command}"
-        "--proto_path=${PROJECT_SOURCE_DIR}/proto"
+        "--proto_path=${PROJECT_SOURCE_DIR}/src/proto"
         "--python_out=${PROJECT_SOURCE_DIR}/tools/python/mlvc_tools/proto"
         "${MLVC_PROTO_SCHEMA}"
     DEPENDS ${_mlvc_protoc_depends} "${MLVC_PROTO_SCHEMA}"

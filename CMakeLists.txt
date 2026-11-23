@@ -132,10 +132,7 @@ if(WIN32)
     set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 endif()
 
-add_subdirectory(core)
-add_subdirectory(runtime)
-add_subdirectory(backends)
-add_subdirectory(codec)
+add_subdirectory(src)
 add_subdirectory(tools)
 if(BUILD_TESTING)
     add_subdirectory(tests)
@@ -146,7 +143,7 @@ install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/LICENSE"
 
 # Export only the stable C ABI. Core, runtime, backend, driver, CUTLASS, and
 # AOT headers are implementation details and are intentionally not installed.
-install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/public/include/"
+install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/include/"
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
     FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp")
 

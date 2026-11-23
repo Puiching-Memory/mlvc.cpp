@@ -1,7 +1,7 @@
-#include "mlvc/core/assets.hpp"
-#include "mlvc/core/half.hpp"
-#include "mlvc/core/tensor.hpp"
-#include "mlvc/runtime/backend.hpp"
+#include "core/assets.hpp"
+#include "core/half.hpp"
+#include "core/tensor.hpp"
+#include "runtime/backend.hpp"
 #include "mlvc_model.pb.h"
 
 #include <algorithm>

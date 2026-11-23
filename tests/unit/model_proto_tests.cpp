@@ -1,6 +1,6 @@
-#include "mlvc/core/assets.hpp"
-#include "mlvc/core/model.hpp"
-#include "mlvc/runtime/aot_graph_proto.hpp"
+#include "core/assets.hpp"
+#include "core/model.hpp"
+#include "runtime/aot_graph_proto.hpp"
 
 #include <chrono>
 #include <filesystem>

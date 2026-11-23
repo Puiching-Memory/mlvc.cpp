@@ -15,10 +15,8 @@ packages/
 *.tar.gz
 
 # Model & media artifacts
-/models/canonical/
-/models/fixtures/
-/models/generated/
-/backends/driver_cubin/generated/
+/models/
+/src/backends/driver_cubin/generated/
 *.pt
 *.pth
 *.ckpt

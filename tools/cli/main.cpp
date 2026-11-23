@@ -1,6 +1,6 @@
-#include "mlvc/runtime/backend.hpp"
-#include "mlvc/core/model.hpp"
-#include "mlvc/codec/pipeline.hpp"
+#include "runtime/backend.hpp"
+#include "core/model.hpp"
+#include "codec/pipeline.hpp"
 
 #include <cstdio>
 #include <cstring>

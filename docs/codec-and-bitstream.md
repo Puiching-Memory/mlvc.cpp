@@ -1,6 +1,6 @@
 # Codec Pipeline & Bitstream Specification
 
-`mlvc.cpp` re-implements the `microsoft/mlvc` `video/conversion` split-model deployment pipeline (`dmc61sbr_e1d1`) for both `mlvc-psnr-v1` (`dmc61sbr_reglu`) and `mlvc-s-psnr-v1` (`dmc61sbr_mini_reglu`). The inference backend runs fixed-shape FP16 neural graphs while `core/` and `codec/` own frame preprocessing, DPB/GOP scheduling, scale extraction, rANS entropy coding, and the `mlvc-nalu-v0` bitstream container.
+`mlvc.cpp` re-implements the `microsoft/mlvc` `video/conversion` split-model deployment pipeline (`dmc61sbr_e1d1`) for both `mlvc-psnr-v1` (`dmc61sbr_reglu`) and `mlvc-s-psnr-v1` (`dmc61sbr_mini_reglu`). The inference backend runs fixed-shape FP16 neural graphs while `src/core/` and `src/codec/` own frame preprocessing, DPB/GOP scheduling, scale extraction, rANS entropy coding, and the `mlvc-nalu-v0` bitstream container.
 
 ---
 
@@ -58,7 +58,7 @@ Outputs:
 
 ---
 
-## 2. Pre- and Post-Processing (`core/src/yuv.cpp`)
+## 2. Pre- and Post-Processing (`src/core/yuv.cpp`)
 
 Input and output frames are 8-bit planar YUV420 / I420 (full `Y` plane followed by quarter-resolution `U` and `V` planes; `width` and `height` must be positive even integers; frame byte size = `width * height * 3 / 2`).
 
@@ -76,7 +76,7 @@ On both `driver-cubin` and `cpu`, the `BufferedCodecBackend` fast path performs 
 
 ---
 
-## 3. GOP, DPB & QP Scheduling (`codec/src/pipeline.cpp`)
+## 3. GOP, DPB & QP Scheduling (`src/codec/pipeline.cpp`)
 
 Matches upstream `FrameLoop` (`video/conversion/_frame_loop.py`) under the registered profile defaults:
 
@@ -96,7 +96,7 @@ Matches upstream `FrameLoop` (`video/conversion/_frame_loop.py`) under the regis
 
 ---
 
-## 4. Dual-Prior Scale Extraction (`core/src/scales.cpp`)
+## 4. Dual-Prior Scale Extraction (`src/core/scales.cpp`)
 
 `scales_0` and `scales_1` (Gaussian PMF indices for coding `y_raw_0` / `y_raw_1`) are derived deterministically from `z_raw` symmetrically on both encoder and decoder — they are never emitted by the neural graph.
 
@@ -124,7 +124,7 @@ All repeat factors are computed from `metadata.pb`, handling both `mlvc-psnr-v1`
 
 ---
 
-## 5. Entropy Coding (`core/src/entropy.cpp`)
+## 5. Entropy Coding (`src/core/entropy.cpp`)
 
 - **Identifier**: `canonical-pmf-v1`
 - **Coder**: `msrtc_rans` (`RansByte`, `symbolBits = 16`, `bypassBits = 2`)
@@ -141,7 +141,7 @@ Decode (pop):  z_raw   (q_index)  -> y_raw_0 (scales_0) -> y_raw_1 (scales_1) ->
 
 ## 6. Bitstream Container Format (`mlvc-nalu-v0`)
 
-Implemented in [`core/include/mlvc/core/bitstream.hpp`](../core/include/mlvc/core/bitstream.hpp), [`core/src/bitstream.cpp`](../core/src/bitstream.cpp), and [`core/src/bit_io.cpp`](../core/src/bit_io.cpp), derived from [`microsoft/libmlvc`](https://github.com/microsoft/libmlvc) (MIT License; see [`licenses/libmlvc/LICENSE`](../licenses/libmlvc/LICENSE)).
+Implemented in [`src/core/bitstream.hpp`](../src/core/bitstream.hpp), [`src/core/bitstream.cpp`](../src/core/bitstream.cpp), and [`src/core/bit_io.cpp`](../src/core/bit_io.cpp), derived from [`microsoft/libmlvc`](https://github.com/microsoft/libmlvc) (MIT License; see [`third_party/libmlvc/LICENSE`](../third_party/libmlvc/LICENSE)).
 
 ### Framing & EBSP
 

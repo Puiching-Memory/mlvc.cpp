@@ -8,11 +8,11 @@ Both official model profiles — **`mlvc-psnr-v1`** (`dmc61sbr_reglu`) and **`ml
 
 ## Highlights
 
-- **Zero inference-framework runtime dependency**: Offline PyTorch dispatch compiles official checkpoints directly into fixed-shape AOT graphs (`proto/mlvc_model.proto`) and aligned FP16 weight blobs. Deployed binaries link no PyTorch, ONNX Runtime, TensorRT, or CUDA Runtime.
+- **Zero inference-framework runtime dependency**: Offline PyTorch dispatch compiles official checkpoints directly into fixed-shape AOT graphs (`src/proto/mlvc_model.proto`) and aligned FP16 weight blobs. Deployed binaries link no PyTorch, ONNX Runtime, TensorRT, or CUDA Runtime.
 - **Multi-backend, cross-platform execution**:
   - **`driver-cubin`** (Linux `x86_64` NVIDIA GPUs): Links only the NVIDIA Driver API (`libcuda.so.1`) with an embedded multi-architecture fatbin (`sm_75`/`sm_80`/`sm_86`/`sm_89` + `compute_89` PTX), CUTLASS Tensor Core kernels, CUDA Graphs, and fused recurrent/quantization-tail kernels.
   - **`cpu`** (Linux, Windows, macOS, Android, OpenHarmony): Portable FP16-storage / FP32-accumulation CPU runtime with runtime ISA dispatch — hand-written AArch64 NEON and ARMv8.2 `+fp16fml` 4×16 double-buffered assembly microkernels (BTI/PAC compatible, in-register ReGLU fusion), `x86_64` AVX2/FMA/F16C kernels, heterogeneous big.LITTLE-aware thread pool, and graph fusion.
-- **Clean 4-layer architecture**: Decoupled `core` (bitstream, rANS, YUV, assets), `runtime` (AOT IR, backend registry, buffered codec I/O), `backends` (`driver-cubin`, `cpu`), and `codec` (`EncoderSession`/`DecoderSession` + stable C ABI v2 in `public/include/mlvc/codec.h`).
+- **Clean 4-layer architecture**: Decoupled `src/core` (bitstream, rANS, YUV, assets), `src/runtime` (AOT IR, backend registry, buffered codec I/O), `src/backends` (`driver-cubin`, `cpu`), and `src/codec` (`EncoderSession`/`DecoderSession` + stable C ABI v2 in `include/mlvc/codec.h`).
 - **Standardized bitstream container**: Implements the MLVC v0.x NALU Annex-B container (`mlvc-nalu-v0`) derived from `microsoft/libmlvc` (`SPS`, `PPS`, `IDR_N_LP`, `TRAIL_R`, `TSA_R`, EBSP emulation prevention, `QP` in `[0, 51]`).
 - **Streamable CLI & C SDK**: Supports file I/O, stdin/stdout (`-`), POSIX named FIFOs, dual-GPU encode/decode pipelines, and a self-contained CMake package (`mlvc::mlvc_codec`).
 
@@ -92,7 +92,7 @@ All technical documentation lives in [`docs/`](docs/README.md) (written in Engli
 | [docs/architecture.md](docs/architecture.md)               | 4-layer system architecture, decoupling boundaries, `ModelAssetReader`, `EncoderSession`/`DecoderSession`, and source map                                         |
 | [docs/backends.md](docs/backends.md)                       | `driver-cubin` (NVIDIA Driver API, fatbin, CUTLASS, CUDA Graphs, fusion lessons) and `cpu` (ARM64 NEON/FP16FML assembly, AVX2, heterogeneous thread pool, fusion) |
 | [docs/codec-and-bitstream.md](docs/codec-and-bitstream.md) | Split-model I/O, YUV420 padding/cropping, GOP/DPB/QP schedule, scale extraction, rANS order, and `mlvc-nalu-v0` Annex-B specification                             |
-| [docs/model-pipeline.md](docs/model-pipeline.md)           | Offline checkpoint AOT compilation, `proto/mlvc_model.proto` (bundle v2 / AOT v3), arena planner, `profiles.json`, and ELF model embedding                        |
+| [docs/model-pipeline.md](docs/model-pipeline.md)           | Offline checkpoint AOT compilation, `src/proto/mlvc_model.proto` (bundle v2 / AOT v3), arena planner, `profiles.json`, and ELF model embedding                    |
 | [docs/build-and-usage.md](docs/build-and-usage.md)         | CMake options/presets, cross-compilation (Linux, Windows, Android, OpenHarmony), release packaging, and `mlvc_demo` CLI / streaming / FIFO                        |
 | [docs/sdk-integration.md](docs/sdk-integration.md)         | Public C ABI v2 (`include/mlvc/codec.h`), CMake `find_package`, symbol boundaries, internal C++ session/asset APIs, and service/mobile deployment                 |
 | [docs/verification.md](docs/verification.md)               | Unit test matrix, CI & sanitizers, AOT host conformance, `mlvc_codec_compatibility` tolerances, and acceptance limits                                             |
@@ -100,6 +100,6 @@ All technical documentation lives in [`docs/`](docs/README.md) (written in Engli
 ## Acknowledgements
 
 - [Microsoft MLVC](https://github.com/microsoft/mlvc) supplies the neural video codec architecture and `msrtc_rans` entropy coder (MIT License).
-- [Microsoft libmlvc](https://github.com/microsoft/libmlvc) supplies the v0.x NALU Annex-B bitstream specification, bit I/O and NALU parser/builder design, and frozen conformance vectors incorporated into `core/` and `tests/` (MIT License; see [licenses/libmlvc/LICENSE](licenses/libmlvc/LICENSE)).
+- [Microsoft libmlvc](https://github.com/microsoft/libmlvc) supplies the v0.x NALU Annex-B bitstream specification, bit I/O and NALU parser/builder design, and frozen conformance vectors incorporated into `src/core/` and `tests/` (MIT License; see [third_party/libmlvc/LICENSE](third_party/libmlvc/LICENSE)).
 - [NVIDIA CUTLASS](https://github.com/NVIDIA/cutlass) supplies CUDA Tensor Core kernel building blocks under its upstream license.
 - [Protobuf](https://github.com/protocolbuffers/protobuf) and [Abseil](https://github.com/abseil/abseil-cpp) provide statically linked Lite binary model serialization.

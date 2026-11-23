@@ -1,6 +1,6 @@
-#include "mlvc/core/half.hpp"
-#include "mlvc/driver_cubin/cutlass.hpp"
-#include "mlvc/driver_cubin/driver.hpp"
+#include "core/half.hpp"
+#include "backends/driver_cubin/cutlass.hpp"
+#include "backends/driver_cubin/driver.hpp"
 
 #include <algorithm>
 #include <array>

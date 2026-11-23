@@ -32,8 +32,7 @@ from mlvc_tools.wire import (
 )
 
 
-ROOT = Path(__file__).resolve().parents[3]
-PROFILE_PATH = ROOT / "models" / "profiles" / "profiles.json"
+PROFILE_PATH = Path(__file__).resolve().with_name("profiles.json")
 COMMON_ARTIFACTS = (
     "metadata.pb",
     "gaussian_pmf.pb",

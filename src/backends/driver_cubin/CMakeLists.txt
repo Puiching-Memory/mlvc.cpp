@@ -1,0 +1,143 @@
+set(MLVC_DRIVER_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+set(MLVC_DRIVER_KERNEL_DIR "${MLVC_DRIVER_SOURCE_DIR}/kernels")
+set(MLVC_DRIVER_TOOL_DIR "${MLVC_DRIVER_SOURCE_DIR}/tools")
+set(MLVC_DRIVER_GENERATED_DIR
+    "${PROJECT_BINARY_DIR}/generated/driver_cubin")
+set(MLVC_DRIVER_FATBIN_DIR
+    "${MLVC_DRIVER_GENERATED_DIR}/fatbin")
+set(MLVC_DRIVER_FATBIN
+    "${MLVC_DRIVER_FATBIN_DIR}/mlvc_driver_kernels.fatbin")
+set(MLVC_DRIVER_FATBIN_EMBED_DIR
+    "${MLVC_DRIVER_GENERATED_DIR}/embed")
+set(MLVC_DRIVER_FATBIN_SOURCE
+    "${MLVC_DRIVER_FATBIN_EMBED_DIR}/mlvc_driver_kernels_fatbin.cpp")
+
+set(MLVC_DRIVER_KERNEL_SOURCES
+    "${MLVC_DRIVER_KERNEL_DIR}/module.cu"
+    "${MLVC_DRIVER_KERNEL_DIR}/activation.cu"
+    "${MLVC_DRIVER_KERNEL_DIR}/common.cuh"
+    "${MLVC_DRIVER_KERNEL_DIR}/codec_io.cu"
+    "${MLVC_DRIVER_KERNEL_DIR}/cutlass.cu"
+    "${MLVC_DRIVER_KERNEL_DIR}/depthwise_conv.cu"
+    "${MLVC_DRIVER_KERNEL_DIR}/elementwise.cu"
+    "${MLVC_DRIVER_KERNEL_DIR}/generic_conv.cu"
+    "${MLVC_DRIVER_KERNEL_DIR}/layout.cu"
+    "${MLVC_DRIVER_KERNEL_DIR}/mma_common.cuh"
+    "${MLVC_DRIVER_KERNEL_DIR}/pointwise_conv.cu"
+    "${MLVC_DRIVER_KERNEL_DIR}/probe.cu"
+    "${MLVC_DRIVER_KERNEL_DIR}/quantization_tail.cu"
+    "${MLVC_DRIVER_KERNEL_DIR}/recurrent_feature.cu"
+    "${MLVC_DRIVER_KERNEL_DIR}/spatial_conv.cu"
+    "${MLVC_DRIVER_KERNEL_DIR}/tensor_ops.cu"
+    "${MLVC_DRIVER_SOURCE_DIR}/cutlass.hpp")
+# Track vendored headers so submodule updates invalidate the generated fatbin.
+file(GLOB_RECURSE MLVC_CUTLASS_HEADERS CONFIGURE_DEPENDS
+    "${MLVC_CUTLASS_DIR}/include/*.h"
+    "${MLVC_CUTLASS_DIR}/include/*.hpp"
+    "${MLVC_CUTLASS_DIR}/include/*.cuh")
+file(MAKE_DIRECTORY "${MLVC_DRIVER_FATBIN_DIR}")
+add_custom_command(
+    OUTPUT "${MLVC_DRIVER_FATBIN}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "${MLVC_DRIVER_FATBIN_DIR}"
+    COMMAND "${CMAKE_COMMAND}" -E env
+        "NVCC=${CUDAToolkit_NVCC_EXECUTABLE}"
+        "${MLVC_DRIVER_TOOL_DIR}/build_fatbin.sh"
+        --output "${MLVC_DRIVER_FATBIN}"
+    DEPENDS
+        ${MLVC_DRIVER_KERNEL_SOURCES}
+        ${MLVC_CUTLASS_HEADERS}
+        "${MLVC_DRIVER_TOOL_DIR}/build_fatbin.sh"
+    COMMENT "Building driver-cubin CUDA fatbin"
+    VERBATIM)
+add_custom_target(mlvc_driver_fatbin DEPENDS "${MLVC_DRIVER_FATBIN}")
+
+file(MAKE_DIRECTORY "${MLVC_DRIVER_FATBIN_EMBED_DIR}")
+add_custom_command(
+    OUTPUT "${MLVC_DRIVER_FATBIN_SOURCE}"
+    COMMAND "${CMAKE_COMMAND}"
+        "-DINPUT=${MLVC_DRIVER_FATBIN}"
+        "-DOUTPUT=${MLVC_DRIVER_FATBIN_SOURCE}"
+        -DSYMBOL=mlvc_driver_kernels_fatbin
+        -P "${PROJECT_SOURCE_DIR}/cmake/EmbedBinary.cmake"
+    DEPENDS
+        mlvc_driver_fatbin
+        "${MLVC_DRIVER_FATBIN}"
+        "${PROJECT_SOURCE_DIR}/cmake/EmbedBinary.cmake"
+    COMMENT "Embedding driver-cubin fatbin"
+    VERBATIM)
+
+add_library(mlvc_driver_kernels STATIC "${MLVC_DRIVER_FATBIN_SOURCE}")
+set_target_properties(mlvc_driver_kernels PROPERTIES
+    POSITION_INDEPENDENT_CODE ON)
+add_dependencies(mlvc_driver_kernels mlvc_driver_fatbin)
+mlvc_configure_target(mlvc_driver_kernels)
+mlvc_enable_ipo(mlvc_driver_kernels)
+
+add_library(mlvc_driver STATIC driver.cpp)
+set_target_properties(mlvc_driver PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_include_directories(mlvc_driver PUBLIC
+    "${PROJECT_SOURCE_DIR}/src"
+    "${CUDAToolkit_INCLUDE_DIRS}")
+target_link_libraries(mlvc_driver PUBLIC CUDA::cuda_driver)
+mlvc_configure_target(mlvc_driver)
+mlvc_enable_ipo(mlvc_driver)
+
+add_executable(mlvc_driver_probe tools/probe_main.cpp)
+target_link_libraries(mlvc_driver_probe PRIVATE
+    mlvc_driver mlvc_driver_kernels)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    target_link_options(mlvc_driver_probe PRIVATE "LINKER:--disable-new-dtags")
+    # The codec library links the CUDA driver API through CUDA::cuda_driver; on
+    # driverless CI hosts the probe needs the toolkit stub to resolve the
+    # transitive libcuda.so.1 dependency at link time.
+    target_link_options(mlvc_driver_probe PRIVATE
+        "LINKER:-rpath-link,${CUDAToolkit_LIBRARY_DIR}/stubs")
+endif()
+mlvc_configure_target(mlvc_driver_probe)
+mlvc_enable_ipo(mlvc_driver_probe)
+
+add_library(mlvc_backend_driver_cubin STATIC
+    backend.cpp
+    cuda_graph_executor.cpp
+    execution_plan.cpp
+    fusion_registry.cpp
+    graph_ir.cpp
+    graph_validator.cpp
+    kernel_registry.cpp
+    memory_planner.cpp
+    model_loader.cpp)
+set_target_properties(mlvc_backend_driver_cubin PROPERTIES
+    POSITION_INDEPENDENT_CODE ON)
+target_include_directories(mlvc_backend_driver_cubin PRIVATE
+    "${MLVC_DRIVER_SOURCE_DIR}")
+target_link_libraries(mlvc_backend_driver_cubin PRIVATE
+    mlvc_runtime
+    mlvc_driver
+    mlvc_driver_kernels)
+mlvc_configure_target(mlvc_backend_driver_cubin)
+mlvc_enable_ipo(mlvc_backend_driver_cubin)
+
+if(BUILD_TESTING)
+    add_test(NAME mlvc_driver_cubin_probe
+        COMMAND mlvc_driver_probe --iterations 100)
+    set_tests_properties(mlvc_driver_cubin_probe PROPERTIES LABELS "gpu")
+
+    add_executable(mlvc_cutlass_kernel_tests
+        "${PROJECT_SOURCE_DIR}/tests/unit/cutlass_kernel_tests.cpp")
+    target_include_directories(mlvc_cutlass_kernel_tests PRIVATE
+        "${PROJECT_SOURCE_DIR}/src")
+    target_link_libraries(mlvc_cutlass_kernel_tests PRIVATE
+        mlvc_driver mlvc_driver_kernels)
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_link_options(mlvc_cutlass_kernel_tests PRIVATE
+            "LINKER:--disable-new-dtags")
+    endif()
+    mlvc_configure_target(mlvc_cutlass_kernel_tests)
+    mlvc_enable_ipo(mlvc_cutlass_kernel_tests)
+    add_test(NAME mlvc_cutlass_kernels COMMAND mlvc_cutlass_kernel_tests)
+    set_tests_properties(mlvc_cutlass_kernels PROPERTIES LABELS "gpu")
+endif()
+
+install(TARGETS mlvc_driver_probe RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(FILES "${MLVC_CUTLASS_DIR}/LICENSE.txt"
+    DESTINATION "share/licenses/cutlass")

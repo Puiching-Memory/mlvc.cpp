@@ -16,7 +16,7 @@
 `driver-cubin` follows an ahead-of-time monolithic kernel-runtime boundary (the same deployment pattern used by standalone GPU inference libraries such as NGX/DLSS):
 
 1. **Build-host-only CUDA toolchain**: CUDA Toolkit (`13.3`) and NVIDIA CUTLASS are used exclusively during the build to compile fixed-shape kernels into a multi-architecture fatbin.
-2. **Precompiled fatbin embedded in `libmlvc_codec.so`**: [`backends/driver_cubin/tools/build_fatbin.sh`](../backends/driver_cubin/tools/build_fatbin.sh) compiles [`backends/driver_cubin/kernels/module.cu`](../backends/driver_cubin/kernels/module.cu) into cubins for `sm_75`, `sm_80`, `sm_86`, and `sm_89` plus a `compute_89` PTX forward-compatibility image, embedded as a read-only C array via `cmake/EmbedBinary.cmake`.
+2. **Precompiled fatbin embedded in `libmlvc_codec.so`**: [`src/backends/driver_cubin/tools/build_fatbin.sh`](../src/backends/driver_cubin/tools/build_fatbin.sh) compiles [`src/backends/driver_cubin/kernels/module.cu`](../src/backends/driver_cubin/kernels/module.cu) into cubins for `sm_75`, `sm_80`, `sm_86`, and `sm_89` plus a `compute_89` PTX forward-compatibility image, embedded as a read-only C array via `cmake/EmbedBinary.cmake`.
 3. **Driver API only**: At runtime, the library links `CUDA::cuda_driver` (`libcuda.so.1`) — never `libcudart`, `libcudnn`, `libcublas`, `libnvinfer`, `libonnxruntime`, or `libtorch`. Modules are loaded with `cuModuleLoadData`, kernels resolved via `cuModuleGetFunction`, and launched via `cuLaunchKernel`.
 4. **Device-resident state & CUDA Graphs**: Weights, the static tensor arena, and bound recurrent DPB features stay permanently on the GPU. After loading and planning, the execution schedule is captured once into a CUDA Graph and replayed per frame.
 5. **Double-buffered GPU codec I/O**: Through `BufferedCodecBackend`, `driver-cubin` allocates two pinned host slots and runs YUV420↔FP16-YUV444 conversion, edge padding, cropping, and optional rotation directly on the GPU (`kernels/codec_io.cu`), overlapping CPU rANS coding with GPU inference.
@@ -25,7 +25,7 @@
 
 ### Internal Module Boundaries
 
-All implementation details under `backends/driver_cubin/` stay private behind `aot_graph.hpp` and `backend.cpp`:
+All implementation details under `src/backends/driver_cubin/` stay private behind `aot_graph.hpp` and `backend.cpp`:
 
 | Module                    | Responsibility                                                                                 |
 | ------------------------- | ---------------------------------------------------------------------------------------------- |
@@ -42,7 +42,7 @@ All implementation details under `backends/driver_cubin/` stay private behind `a
 
 The lifecycle is strictly `load -> validate/plan -> capture -> replay`; no graph loading, validation, or memory planning occurs during steady-state frame execution.
 
-### Kernel Suite (`backends/driver_cubin/kernels/`)
+### Kernel Suite (`src/backends/driver_cubin/kernels/`)
 
 `module.cu` aggregates focused compilation units tracked as CMake dependencies:
 
@@ -90,7 +90,7 @@ The `cpu` backend executes the same Protobuf AOT graphs across Linux, Windows, m
 
 ### Runtime ISA Dispatch & Microkernels
 
-`backends/cpu/src/cpu_features.cpp` probes hardware capabilities once at startup (via `getauxval(AT_HWCAP)` on Linux/Android/OHOS ARM64, `__builtin_cpu_supports` or `__cpuid`/`_xgetbv` on `x86_64`, and compile-time guarantees on Apple Silicon):
+`src/backends/cpu/cpu_features.cpp` probes hardware capabilities once at startup (via `getauxval(AT_HWCAP)` on Linux/Android/OHOS ARM64, `__builtin_cpu_supports` or `__cpuid`/`_xgetbv` on `x86_64`, and compile-time guarantees on Apple Silicon):
 
 | Mode (`gemm_mode_name`) | Hardware Requirement                                                                             | Source Units                                                                         | Key Characteristics                                                                                                                                                                               |
 | ----------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

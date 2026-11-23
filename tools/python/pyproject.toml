@@ -42,3 +42,6 @@ mlvc-reference = "mlvc_tools.reference:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["mlvc_tools*"]
+
+[tool.setuptools.package-data]
+mlvc_tools = ["profiles.json"]

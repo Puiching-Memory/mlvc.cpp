@@ -1,8 +1,8 @@
-#include "mlvc/core/bitstream.hpp"
-#include "mlvc/core/entropy.hpp"
-#include "mlvc/core/half.hpp"
-#include "mlvc/core/model.hpp"
-#include "mlvc/core/yuv.hpp"
+#include "core/bitstream.hpp"
+#include "core/entropy.hpp"
+#include "core/half.hpp"
+#include "core/model.hpp"
+#include "core/yuv.hpp"
 
 #include <algorithm>
 #include <array>

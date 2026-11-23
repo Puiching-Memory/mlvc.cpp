@@ -1,10 +1,10 @@
-#include "mlvc/codec/pipeline.hpp"
-#include "mlvc/core/assets.hpp"
-#include "mlvc/core/half.hpp"
-#include "mlvc/core/model.hpp"
-#include "mlvc/core/yuv.hpp"
-#include "mlvc/runtime/aot_graph.hpp"
-#include "mlvc/runtime/backend.hpp"
+#include "codec/pipeline.hpp"
+#include "core/assets.hpp"
+#include "core/half.hpp"
+#include "core/model.hpp"
+#include "core/yuv.hpp"
+#include "runtime/aot_graph.hpp"
+#include "runtime/backend.hpp"
 #include "mlvc_model.pb.h"
 
 #include <algorithm>

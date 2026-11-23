@@ -1,7 +1,7 @@
-#include "mlvc/core/bitstream.hpp"
-#include "mlvc/core/model.hpp"
-#include "mlvc/core/tensor.hpp"
-#include "mlvc/core/yuv.hpp"
+#include "core/bitstream.hpp"
+#include "core/model.hpp"
+#include "core/tensor.hpp"
+#include "core/yuv.hpp"
 
 #include <array>
 #include <cstddef>

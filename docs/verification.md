@@ -15,7 +15,7 @@ Passing a model microbenchmark alone does not establish codec compatibility. Thi
 | `mlvc_model_proto`         | *(portable)*                          | Protobuf Lite serialization/deserialization, schema validation, corrupt/oversized message rejection                                              |
 | `mlvc_runtime_decoupling`  | *(portable)*                          | `ModelAssetReader`, `EncoderSession`/`DecoderSession`, backend registry, `ExecutionPreference`, mock backend isolation                           |
 | `mlvc_c_api`               | *(portable)*                          | Public C ABI v2 struct sizing, version rejection, error buffer handling, null guards                                                             |
-| `mlvc_public_header`       | *(portable)*                          | Pure C11 compilation check of `public/include/mlvc/codec.h`                                                                                      |
+| `mlvc_public_header`       | *(portable)*                          | Pure C11 compilation check of `include/mlvc/codec.h`                                                                                             |
 | `mlvc_cpu_backend`         | *(when `cpu`/`all`)*                  | CPU execution plan, ISA microkernels, fusion vs. unfused equivalence, `CpuThreadPool`                                                            |
 | `mlvc_driver_cubin_probe`  | `gpu`                                 | CUDA Driver API init, fatbin load, probe kernel launch (`--iterations 100`)                                                                      |
 | `mlvc_cutlass_kernels`     | `gpu`                                 | CUTLASS Tensor Core convolution correctness on GPU                                                                                               |
@@ -55,7 +55,7 @@ Both `driver-cubin` and `cpu` runtimes must pass `mlvc_codec_compatibility` for 
 
 ### Identity & Integrity Rules
 
-- Canonical bundles must be assembled by `python -m mlvc_tools.package assemble` (bundle schema **2**, AOT graph schema **3**) from the original checkpoints registered in `models/profiles/profiles.json`.
+- Canonical bundles must be assembled by `python -m mlvc_tools.package assemble` (bundle schema **2**, AOT graph schema **3**) from the original checkpoints registered in `tools/python/mlvc_tools/profiles.json`.
 - `metadata.pb`, `gaussian_pmf.pb`, and `bit_estimator_pmf.pb` must originate from FP32 parameters of the same checkpoint.
 - `tests/conformance/run_codec_conformance.py` rejects any profile identity, checkpoint hash, or bundle artifact-hash mismatch before running inference.
 

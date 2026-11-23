@@ -7,21 +7,21 @@
 ```mermaid
 flowchart TD
     CLI["tools/cli/main.cpp (mlvc_demo)"] --> Codec
-    CApp["External C/C++ Consumer"] --> Public["public/include/mlvc/codec.h (C ABI v2)"]
+    CApp["External C/C++ Consumer"] --> Public["include/mlvc/codec.h (C ABI v2)"]
     Public --> Codec
 
-    subgraph CodecLayer["codec/ (libmlvc_codec)"]
+    subgraph CodecLayer["src/codec/ (libmlvc_codec)"]
         Codec["c_api.cpp & pipeline.cpp\nEncoderSession / DecoderSession\nencode_video / decode_video"]
     end
 
     Codec --> Core
     Codec --> Runtime
 
-    subgraph RuntimeLayer["runtime/ (mlvc_runtime)"]
+    subgraph RuntimeLayer["src/runtime/ (mlvc_runtime)"]
         Runtime["InferenceBackend & BufferedCodecBackend\nBackend Registry & ExecutionPreference\nAOT Graph IR (aot::LoadedGraph)"]
     end
 
-    subgraph BackendsLayer["backends/ (mlvc_backend)"]
+    subgraph BackendsLayer["src/backends/ (mlvc_backend)"]
         Reg["selected_backends.cpp"]
         GPU["driver_cubin\nCUDA Driver API + Fatbin + CUTLASS"]
         CPU["cpu\nARM64 ASM / AVX2 / Scalar + ThreadPool"]
@@ -33,7 +33,7 @@ flowchart TD
     GPU --> Runtime
     CPU --> Runtime
 
-    subgraph CoreLayer["core/ (mlvc_core)"]
+    subgraph CoreLayer["src/core/ (mlvc_core)"]
         Core["ModelAssetReader & ModelConfig\nYUV420/444 & Padding\nDual-Prior Scales & rANS\nNALU Annex-B Bitstream"]
     end
 
@@ -44,19 +44,19 @@ flowchart TD
 
 ### Design Invariants
 
-1. **Strict public ABI isolation**: Only [`public/include/mlvc/codec.h`](../public/include/mlvc/codec.h) is installed. Core, runtime, backend, CUDA, CUTLASS, Protobuf, and Abseil headers remain private. On ELF targets, [`cmake/codec.exports.map`](../cmake/codec.exports.map) hides all third-party and internal implementation symbols.
+1. **Strict public ABI isolation**: Only [`include/mlvc/codec.h`](../include/mlvc/codec.h) is installed. Core, runtime, backend, CUDA, CUTLASS, Protobuf, and Abseil headers remain private. On ELF targets, [`cmake/codec.exports.map`](../cmake/codec.exports.map) hides all third-party and internal implementation symbols.
 2. **One-way dependency graph**:
-   - `core` depends only on `msrtc_rans` and `mlvc_model_proto` (no backend, no GPU/CPU execution code).
-   - `runtime` depends on `core` and `mlvc_model_proto`, defining the AOT IR and backend contracts without knowing which backends are compiled.
-   - `backends/*` implement `runtime` interfaces and register factories via `backends/selected_backends.cpp`.
-   - `codec` composes `core` + `runtime` into frame-level sessions and streaming file/FIFO entry points, independent of any concrete backend header.
-3. **No runtime framework or JSON parser**: All model metadata, PMF tables, graph schedules, and manifests are binary Protobuf messages parsed through statically linked Protobuf Lite. `models/profiles/profiles.json` is consumed only by offline Python tooling.
+   - `src/core` depends only on `msrtc_rans` and `mlvc_model_proto` (no backend, no GPU/CPU execution code).
+   - `src/runtime` depends on `src/core` and `mlvc_model_proto`, defining the AOT IR and backend contracts without knowing which backends are compiled.
+   - `src/backends/*` implement `src/runtime` interfaces and register factories via `src/backends/selected_backends.cpp`.
+   - `src/codec` composes `src/core` + `src/runtime` into frame-level sessions and streaming file/FIFO entry points, independent of any concrete backend header.
+3. **No runtime framework or JSON parser**: All model metadata, PMF tables, graph schedules, and manifests are binary Protobuf messages parsed through statically linked Protobuf Lite. `tools/python/mlvc_tools/profiles.json` is consumed only by offline Python tooling.
 
 ---
 
 ## Core Abstractions
 
-### 1. Model Asset Loading (`core/include/mlvc/core/assets.hpp`)
+### 1. Model Asset Loading (`src/core/assets.hpp`)
 
 `ModelAssetReader` decouples model parsing from storage layout:
 
@@ -77,7 +77,7 @@ Built-in factories resolved by `resolve_model_asset_reader(model_dir, override_r
 - **Embedded reader (`embedded:<profile>`)**: Reads directly from the `.incbin` read-only section linked into `mlvc_core` when built with `MLVC_EMBED_MODELS=ON`. When `model_dir` is omitted in an embedded build, `default_model_location()` resolves to `embedded:mlvc-psnr-v1`.
 - **Directory reader**: Reads canonical bundle files (`metadata.pb`, `gaussian_pmf.pb`, `bit_estimator_pmf.pb`, `aot/MLVCEncoder/{graph.pb,weights.bin}`, `aot/MLVCDecoder/{graph.pb,weights.bin}`) from a filesystem directory.
 
-### 2. Backend Contract & Registry (`runtime/include/mlvc/runtime/backend.hpp`)
+### 2. Backend Contract & Registry (`src/runtime/backend.hpp`)
 
 Every inference backend implements `InferenceBackend`:
 
@@ -107,43 +107,40 @@ Both `driver-cubin` and `cpu` implement both `InferenceBackend` and `BufferedCod
 
 At runtime, `create_backend(BackendOptions)` resolves the requested `backend_name` (or the registered default when empty) and enforces `ExecutionPreference` (`kAuto`, `kCpu`, `kGpu`, `kNpu`) and `allow_cpu_fallback`.
 
-### 3. Sessions & Pipelines (`codec/include/mlvc/codec/pipeline.hpp`)
+### 3. Sessions & Pipelines (`src/codec/pipeline.hpp`)
 
-`codec/` splits frame-level codec state from file/stream I/O:
+`src/codec/` splits frame-level codec state from file/stream I/O:
 
 - **`EncoderSession` / `DecoderSession`**: File-I/O-free, move-only C++ classes holding the model config, entropy coder, bitstream encoder/decoder, inference backend, and GOP/DPB state. Callers push/pull `Yuv420FrameView` and `EncodedFrame` per frame without touching disk.
 - **`encode_video(CodecOptions)` / `decode_video(CodecOptions)`**: Streaming wrappers built on top of the sessions. They read/write YUV420 frames and `mlvc-nalu-v0` Access Units over files, stdin/stdout (`-`), or POSIX named FIFOs, using the double-buffered `BufferedCodecBackend` overlap path whenever `--debug-dir` is disabled.
-- **Public C ABI (`codec/src/c_api.cpp`)**: Wraps `encode_video` / `decode_video` with ABI-versioned structs (`MLVC_CODEC_ABI_VERSION == 2`), translating all C++ exceptions into `-1` return codes and NUL-terminated error strings.
+- **Public C ABI (`src/codec/c_api.cpp`)**: Wraps `encode_video` / `decode_video` with ABI-versioned structs (`MLVC_CODEC_ABI_VERSION == 2`), translating all C++ exceptions into `-1` return codes and NUL-terminated error strings.
 
 ---
 
 ## Source Tree Map
 
 ```text
-public/include/mlvc/codec.h     Installed public C ABI v2 header
-core/                           Model metadata, ModelAssetReader, Tensor/FP16, YUV, scales, rANS, NALU bitstream
-runtime/                        Shared AOT graph loader/IR (aot_graph.*), InferenceBackend & backend registry
-backends/
-  selected_backends.cpp         Static registration glue for compiled backends
-  driver_cubin/                 NVIDIA Driver API wrapper, fatbin kernels, CUTLASS, CUDA Graph executor
-  cpu/                          Cross-platform FP16 CPU executor, ARM64 ASM / AVX2 / scalar kernels, CpuThreadPool
-codec/                          EncoderSession, DecoderSession, file/FIFO pipeline, C ABI implementation
+include/mlvc/codec.h            Installed public C ABI v2 header
+src/
+  core/                         Model metadata, ModelAssetReader, Tensor/FP16, YUV, scales, rANS, NALU bitstream
+  runtime/                      Shared AOT graph loader/IR (aot_graph.*), InferenceBackend & backend registry
+  backends/
+    selected_backends.cpp       Static registration glue for compiled backends
+    driver_cubin/               NVIDIA Driver API wrapper, fatbin kernels, CUTLASS, CUDA Graph executor
+    cpu/                        Cross-platform FP16 CPU executor, ARM64 ASM / AVX2 / scalar kernels, CpuThreadPool
+  codec/                        EncoderSession, DecoderSession, file/FIFO pipeline, C ABI implementation
+  proto/mlvc_model.proto        Shared Python/C++ Protobuf Lite schema
 tools/
   cli/                          mlvc_demo command-line tool
-  python/mlvc_tools/            Offline checkpoint AOT compiler, Protobuf bundler, reference generator
+  python/mlvc_tools/            Offline checkpoint AOT compiler, Protobuf bundler, reference generator, profiles.json
   scripts/                      bootstrap.sh, dependencies.env, package.sh
-proto/mlvc_model.proto          Shared Python/C++ Protobuf Lite schema
 cmake/                          Dependencies, Protobuf build, binary/model embedding, symbol export map, CMake config
-models/
-  profiles/profiles.json        Registered official checkpoint hashes and model construction parameters
-  canonical/                    Generated (git-ignored) canonical model bundles
-  fixtures/                     Generated (git-ignored) reference test fixtures
 tests/
   unit/                         C++, C, and Python unit tests
   conformance/                  AOT eager conformance and end-to-end codec compatibility runners
   integration/cmake_consumer/   Installed package CMake/C consumer verification
-licenses/                       Third-party attribution (microsoft/libmlvc)
-third_party/                    Pinned submodules: mlvc (msrtc_rans), cutlass, protobuf, abseil
+third_party/                    Pinned submodules (mlvc, cutlass, protobuf, abseil) and libmlvc attribution
+models/                         Local git-ignored workspace for canonical bundles and reference test fixtures
 ```
 
 ## Related Documentation

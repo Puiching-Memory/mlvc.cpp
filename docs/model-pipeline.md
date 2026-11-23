@@ -4,9 +4,9 @@
 
 ---
 
-## 1. Profile Registry (`models/profiles/profiles.json`)
+## 1. Profile Registry (`tools/python/mlvc_tools/profiles.json`)
 
-[`models/profiles/profiles.json`](../models/profiles/profiles.json) is the single source of truth binding each profile name to its official checkpoint SHA-256 hash and upstream network construction parameters:
+[`tools/python/mlvc_tools/profiles.json`](../tools/python/mlvc_tools/profiles.json) is the single source of truth binding each profile name to its official checkpoint SHA-256 hash and upstream network construction parameters:
 
 | Profile          | `model_version`       | `split_type`    | Checkpoint SHA-256 Prefix |
 | ---------------- | --------------------- | --------------- | ------------------------- |
@@ -89,9 +89,9 @@ A verified canonical bundle directory contains `model_bundle.pb` plus 8 hashed p
 
 ---
 
-## 4. Protobuf Schema & Operator Contract (`proto/mlvc_model.proto`)
+## 4. Protobuf Schema & Operator Contract (`src/proto/mlvc_model.proto`)
 
-[`proto/mlvc_model.proto`](../proto/mlvc_model.proto) (`syntax = "proto3"`, `package mlvc.wire`, `option optimize_for = LITE_RUNTIME`) defines the shared wire contract:
+[`src/proto/mlvc_model.proto`](../src/proto/mlvc_model.proto) (`syntax = "proto3"`, `package mlvc.wire`, `option optimize_for = LITE_RUNTIME`) defines the shared wire contract:
 
 - **Schema versions**:
   - `ModelBundle.schema_version = 2`
@@ -103,13 +103,13 @@ A verified canonical bundle directory contains `model_bundle.pb` plus 8 hashed p
   - Activations: `LEAKY_RELU` (`ActivationAttributes.alpha`), `SIGMOID`
   - Convolutions: `CONV` (`ConvAttributes { strides, pads, dilations, groups }`)
   - Tensor / Layout: `CONCAT` (`AxisAttributes.axis`), `SLICE`, `GATHER` (`AxisAttributes.axis`), `DEPTH_TO_SPACE` (`PixelAttributes.block_size`), `SPACE_TO_DEPTH` (`PixelAttributes.block_size`)
-- **Zero Protobuf in hot path**: `runtime/src/aot_graph.cpp` parses `graph.pb` once during model load into native `mlvc::aot::LoadedGraph` structs and validates weight SHA-256 and message size limits (64 MiB max). No Protobuf objects remain during frame inference.
+- **Zero Protobuf in hot path**: `src/runtime/aot_graph.cpp` parses `graph.pb` once during model load into native `mlvc::aot::LoadedGraph` structs and validates weight SHA-256 and message size limits (64 MiB max). No Protobuf objects remain during frame inference.
 
 ### Protobuf Build & Python Binding Regeneration
 
 - CMake (`cmake/ModelProto.cmake`) compiles both build-host `protoc` and `libprotobuf-lite` + `Abseil` from the pinned submodules (`third_party/protobuf` v33.5, `third_party/abseil` 20250512.1) with hidden visibility and static linkage.
 - Installed SDK consumers need **no** system Protobuf library or headers.
-- Whenever `proto/mlvc_model.proto` is modified, regenerate checked-in Python bindings using the exact same compiler:
+- Whenever `src/proto/mlvc_model.proto` is modified, regenerate checked-in Python bindings using the exact same compiler:
 
 ```bash
 cmake --build build/<preset> --target mlvc_generate_python_proto
@@ -121,9 +121,9 @@ cmake --build build/<preset> --target mlvc_generate_python_proto
 
 When `MLVC_EMBED_MODELS=ON` (default for `driver_cubin` and `all`; optional on ELF `cpu` targets):
 
-1. `core/CMakeLists.txt` discovers every `${MLVC_MODEL_ROOT}/*/*/model_bundle.pb`.
+1. `src/core/CMakeLists.txt` discovers every `${MLVC_MODEL_ROOT}/*/*/model_bundle.pb`.
 2. `python tools/python/mlvc_tools/package.py embed` verifies both registered profiles and packs all assets (16-byte aligned) into `mlvc_driver_models.bin` plus a compile-time index table `mlvc_embedded_models_index.inc` and dependency file.
 3. `cmake/EmbedModelData.S.in` embeds the binary blob into `.rodata` via GNU/Clang `.incbin` (`mlvc_embedded_models_start`..`mlvc_embedded_models_end`).
-4. `core/src/model_assets.cpp` exposes embedded profiles through `embedded:<profile>` (default `embedded:mlvc-psnr-v1`) and `list_embedded_model_profiles()`.
+4. `src/core/model_assets.cpp` exposes embedded profiles through `embedded:<profile>` (default `embedded:mlvc-psnr-v1`) and `list_embedded_model_profiles()`.
 
 > **Platform requirement**: `MLVC_EMBED_MODELS=ON` requires an ELF target (`Linux`, `Android`, or `OHOS`) with GNU/Clang ASM `.incbin`. On Windows/macOS or when packaging lean mobile libraries, leave `MLVC_EMBED_MODELS=OFF` and load models from a directory bundle or custom `ModelAssetReader`.

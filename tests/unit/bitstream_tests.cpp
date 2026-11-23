@@ -1,8 +1,8 @@
 // Derived from microsoft/libmlvc (https://github.com/microsoft/libmlvc)
 // Copyright (c) 2026 Microsoft Corporation
-// Licensed under the MIT License. See licenses/libmlvc/LICENSE.
+// Licensed under the MIT License. See third_party/libmlvc/LICENSE.
 
-#include "mlvc/core/bitstream.hpp"
+#include "core/bitstream.hpp"
 
 #include <algorithm>
 #include <cstddef>

@@ -1,54 +1,37 @@
 # mlvc.cpp
 
-Linux x86_64 C++ implementation of Microsoft MLVC (DMC-6.1sb), using the
-NVIDIA Driver API and embedded CUDA kernels. **Driver+cubin is the only runtime.**
+> English | [简体中文](README.zh-CN.md)
 
-The codec implements 8-bit YUV420 input/output, padding/cropping, recurrent GOP
-and reference-feature state, canonical PMF tables, rANS entropy coding, and the
-MLVC v0.x NALU Annex-B bitstream container derived from
-`microsoft/libmlvc`. Both MLVC and MLVC-S are supported.
+A standalone C++20 implementation of **Microsoft MLVC (`DMC-6.1sb`)** neural video coding with a decoupled multi-backend runtime, Protobuf-serialized AOT model bundles, and the `mlvc-nalu-v0` Annex-B bitstream container.
 
-The deployed `libmlvc_codec.so` embeds model metadata, entropy tables, fixed-shape
-operator schedules, FP16 weights, and a multi-architecture fatbin. Its GPU
-dependency is the system NVIDIA driver (`libcuda.so.1`). CUDA Toolkit is a
-build-host dependency; Python/PyTorch are offline model-preparation dependencies.
+Both official model profiles — **`mlvc-psnr-v1`** (`dmc61sbr_reglu`) and **`mlvc-s-psnr-v1`** (`dmc61sbr_mini_reglu`) — are supported end-to-end with 8-bit YUV420 I/O, recurrent GOP/DPB state, canonical PMF tables, and `msrtc_rans` entropy coding.
 
-## Model format
+## Highlights
 
-`proto/mlvc_model.proto` is the shared Python/C++ schema. Runtime metadata,
-PMF tables, graph schedules, and bundle manifests use binary Protobuf messages;
-FP16 weights remain in aligned `weights.bin` files. Operators use enums and
-typed attributes, and graph edges use integer tensor IDs. The loader validates
-and converts messages to native execution structures before GPU allocation.
+- **Zero inference-framework runtime dependency**: Offline PyTorch dispatch compiles official checkpoints directly into fixed-shape AOT graphs (`proto/mlvc_model.proto`) and aligned FP16 weight blobs. Deployed binaries link no PyTorch, ONNX Runtime, TensorRT, or CUDA Runtime.
+- **Multi-backend, cross-platform execution**:
+  - **`driver-cubin`** (Linux `x86_64` NVIDIA GPUs): Links only the NVIDIA Driver API (`libcuda.so.1`) with an embedded multi-architecture fatbin (`sm_75`/`sm_80`/`sm_86`/`sm_89` + `compute_89` PTX), CUTLASS Tensor Core kernels, CUDA Graphs, and fused recurrent/quantization-tail kernels.
+  - **`cpu`** (Linux, Windows, macOS, Android, OpenHarmony): Portable FP16-storage / FP32-accumulation CPU runtime with runtime ISA dispatch — hand-written AArch64 NEON and ARMv8.2 `+fp16fml` 4×16 double-buffered assembly microkernels (BTI/PAC compatible, in-register ReGLU fusion), `x86_64` AVX2/FMA/F16C kernels, heterogeneous big.LITTLE-aware thread pool, and graph fusion.
+- **Clean 4-layer architecture**: Decoupled `core` (bitstream, rANS, YUV, assets), `runtime` (AOT IR, backend registry, buffered codec I/O), `backends` (`driver-cubin`, `cpu`), and `codec` (`EncoderSession`/`DecoderSession` + stable C ABI v2 in `public/include/mlvc/codec.h`).
+- **Standardized bitstream container**: Implements the MLVC v0.x NALU Annex-B container (`mlvc-nalu-v0`) derived from `microsoft/libmlvc` (`SPS`, `PPS`, `IDR_N_LP`, `TRAIL_R`, `TSA_R`, EBSP emulation prevention, `QP` in `[0, 51]`).
+- **Streamable CLI & C SDK**: Supports file I/O, stdin/stdout (`-`), POSIX named FIFOs, dual-GPU encode/decode pipelines, and a self-contained CMake package (`mlvc::mlvc_codec`).
 
-The codec privately links Protobuf Lite and Abseil statically. No Protobuf shared
-library or public Protobuf header is needed by installed applications. Build-host
-`protoc` and the Lite runtime use the same pinned source; Python tools require
-`protobuf==6.33.5`. Regenerate Python bindings after schema edits with the CMake
-target `mlvc_generate_python_proto`.
+## Platform & Backend Matrix
 
-The profile registry remains human-readable JSON; no C++ target links a JSON
-library. Binary model descriptions use AOT schema 3 and bundle schema 2.
-Previous JSON model bundles are unsupported.
+| Target Platform                       | `MLVC_BACKEND` Default (`AUTO`)                | Supported Backends                   | Model Storage                                                |
+| ------------------------------------- | ---------------------------------------------- | ------------------------------------ | ------------------------------------------------------------ |
+| Linux `x86_64` (NVIDIA GPU)           | `driver_cubin`                                 | `driver_cubin`, `cpu`, `all`, `none` | ELF-embedded (`.incbin`) or directory bundle                 |
+| Linux `aarch64` / `x86_64` (CPU-only) | `cpu` (`x86_64` requires `-DMLVC_BACKEND=cpu`) | `cpu`, `none`                        | Directory bundle or ELF-embedded (`MLVC_EMBED_MODELS=ON`)    |
+| Android / OpenHarmony (`arm64-v8a`)   | `cpu`                                          | `cpu`, `none`                        | Directory bundle, ELF-embedded, or custom `ModelAssetReader` |
+| Windows (`x86_64`) / macOS (`arm64`)  | `cpu`                                          | `cpu`, `none`                        | Directory bundle or custom `ModelAssetReader`                |
 
-## Requirements
+## Quick Start
 
-- Linux x86_64, CMake >= 3.23, a C++20 compiler.
-- CUDA Toolkit 13.3 on the build host.
-- Pinned source submodules: Microsoft MLVC (`msrtc_rans` and model source),
-  NVIDIA CUTLASS, Protobuf v33.5, and Abseil 20250512.1.
-- Original registered `mlvc-psnr-v1.ckpt` and `mlvc-s-psnr-v1.ckpt` checkpoints.
-- An NVIDIA driver compatible with the generated GPU code on the deployment host.
-
-The fatbin contains `sm_75`, `sm_80`, `sm_86`, and `sm_89` cubins, plus a
-`compute_89` PTX fallback. Driver+cubin executes FP16 neural tensors with FP32
-convolution accumulation; int32 is used for model control inputs.
-
-## Prepare source and models
+### 1. Initialize submodules and prepare models
 
 ```bash
 ./tools/scripts/bootstrap.sh
-# On Ubuntu 26.04, optionally install the pinned build toolkit:
+# Optional on Ubuntu 26.04 for NVIDIA Driver+cubin builds:
 ./tools/scripts/bootstrap.sh --with-cuda
 
 uv venv --python 3.12 build/model-venv
@@ -56,203 +39,67 @@ uv pip install --python build/model-venv/bin/python -r tools/python/requirements
 uv pip install --python build/model-venv/bin/python -e ./tools/python
 uv pip install --python build/model-venv/bin/python ./third_party/mlvc/packages/msrtc_rans
 source build/model-venv/bin/activate
-```
 
-The model compiler constructs the official network from its registered original
-checkpoint, applies upstream structural optimization, and captures one fixed-shape
-eager invocation through PyTorch dispatch. It folds constant computation, removes
-dead branches, lowers live operations to the CUDA runtime contract, plans tensor
-lifetimes, and writes aligned weights. Unsupported live operations fail explicitly.
-Only model preparation uses PyTorch; no framework model file is loaded at runtime.
-
-```bash
-build/model-venv/bin/python -m mlvc_tools.aot \
+# Compile and assemble canonical bundle (repeat for mlvc-s-psnr-v1)
+python -m mlvc_tools.aot \
   --profile mlvc-psnr-v1 --checkpoint /path/to/mlvc-psnr-v1.ckpt \
   --model-width 640 --model-height 368 \
   --output-dir models/generated/checkpoint/mlvc-psnr-v1/640x368
 
-build/model-venv/bin/python -m mlvc_tools.package assemble \
+python -m mlvc_tools.package assemble \
   --profile mlvc-psnr-v1 \
   --source-dir models/generated/checkpoint/mlvc-psnr-v1/640x368 \
   --output-dir models/canonical/mlvc-psnr-v1/640x368
-
-build/model-venv/bin/python -m mlvc_tools.package verify \
-  --model-dir models/canonical/mlvc-psnr-v1/640x368
 ```
 
-Repeat for `mlvc-s-psnr-v1` with its checkpoint. Both canonical bundles are
-required by the default embedded build. Checkpoint SHA-256 and construction
-parameters are registered in `models/profiles/profiles.json`. PMFs are generated
-from FP32 checkpoint parameters before neural graphs are converted to FP16.
-Each bundle contains metadata, two PMF files, and the AOT graphs/weights; model
-dimensions always come from the metadata.
-
-Native channel-first pixel shuffle/unshuffle uses AOT graph schema **3**. Earlier
-graph packages must be regenerated from the checkpoints.
-
-## Build and package
+### 2. Build
 
 ```bash
+# Linux x86_64 NVIDIA Driver+cubin release (embeds both canonical bundles)
 cmake --preset driver-cubin-release
 cmake --build --preset driver-cubin-release -j
 ctest --preset driver-cubin-release
 
-./tools/scripts/package.sh --jobs 8
+# Cross-platform CPU backend build (no CUDA Toolkit required)
+cmake -S . -B build/cpu-release -DCMAKE_BUILD_TYPE=Release -DMLVC_BACKEND=cpu
+cmake --build build/cpu-release -j
+ctest --test-dir build/cpu-release --output-on-failure
 ```
 
-The release is `packages/mlvc_cpp-<version>-driver-cubin-nvidia-linux-x86_64.tar.gz`.
-It contains the codec library, CLI, driver probe, C header, CMake
-package, licenses, `BUILD-MANIFEST.txt`, and `SHA256SUMS`. Models are embedded
-in the library. The driver and system C/C++ runtime libraries are not bundled.
-
-For driverless CI compilation without model assets:
+### 3. Encode & decode
 
 ```bash
-./tools/scripts/package.sh --jobs 2 --skip-gpu-tests --skip-models
-```
+./build/driver-cubin-release/tools/mlvc_demo --list-backends
+./build/driver-cubin-release/tools/mlvc_demo --list-model-profiles
 
-These archives have a `-ci` suffix and are compile-only artifacts. CI builds
-with GCC and Clang under warnings-as-errors and runs host safety tests with
-AddressSanitizer/UndefinedBehaviorSanitizer. Full GPU conformance requires models
-and generated Python reference fixtures.
-
-## Use
-
-After extracting a release:
-
-```bash
-./bin/mlvc_demo --backend-name
-./bin/mlvc_demo --list-model-profiles
-./bin/mlvc_demo encode --input in.yuv --output out.mlvc \
+./build/driver-cubin-release/tools/mlvc_demo encode \
+  --input in.yuv --output out.mlvc \
   --width 640 --height 360 --frames 60 --q-index 21
-./bin/mlvc_demo decode --input out.mlvc --output rec.yuv --frames 60
+
+./build/driver-cubin-release/tools/mlvc_demo decode \
+  --input out.mlvc --output rec.yuv --frames 60
 ```
 
-Both commands default to embedded `mlvc-psnr-v1`. Select the smaller model with
-`--model-profile mlvc-s-psnr-v1`. `--model-dir` overrides the embedded model with
-a complete AOT bundle for development. `--frames 0` processes until EOF;
-`--q-index` must lie in `[0, 51]` (and within the loaded model's `qp_num`).
-`--device-id` selects a GPU. Encoding and decoding can run in separate processes
-on separate GPUs using `--encode-device-id` / `--decode-device-id`.
+For CPU builds without embedded models, pass `--model-dir models/canonical/mlvc-psnr-v1/640x368` (and optionally `--backend cpu --threads 4`).
 
-Standard input/output and named FIFOs support streaming. Human-readable status
-is sent to stderr when binary output is stdout:
+## Documentation
 
-```bash
-cat in.yuv \
-  | ./bin/mlvc_demo encode --input - --output - --width 640 --height 360 \
-      --frames 60 --q-index 21 --encode-device-id 0 2>encode.log \
-  | ./bin/mlvc_demo decode --input - --output - --frames 60 \
-      --decode-device-id 1 2>decode.log \
-  > rec.yuv
-```
+All technical documentation lives in [`docs/`](docs/README.md) (written in English):
 
-The NALU Annex-B bitstream carries `SPS` (version `0.1`, model dimensions,
-crop offsets, transpose flag, temporal layers, and `frame_idx_bits`), `PPS`
-(`init_qp_minus26`), and coded frame NALUs (`IDR_N_LP`, `TRAIL_R`, `TSA_R`,
-`qp_delta`, GOP indices, and the rANS payload). On `decode`, `--width` and
-`--height` are optional and auto-detected from `SPS`, or validated against the
-bitstream when explicitly supplied.
-
-## C API
-
-The public API is `include/mlvc/codec.h`, with independent `mlvc_encode` and
-`mlvc_decode` entry points. Options and statistics use **ABI version 2**. The old
-options layout and its unused fields have been removed; rebuild applications.
-
-```c
-#include <mlvc/codec.h>
-
-mlvc_codec_options options;
-mlvc_codec_options_init(&options);
-options.width = 640;
-options.height = 360;
-options.frames = 60;
-options.q_index = 21;
-options.device_id = 0;
-options.input_path = "in.yuv";
-options.output_path = "out.mlvc";
-
-mlvc_codec_stats stats;
-mlvc_codec_stats_init(&stats);
-char error[512];
-int result = mlvc_encode(&options, &stats, error, sizeof(error));
-```
-
-Use `find_package(mlvc_codec CONFIG REQUIRED)` and link `mlvc::mlvc_codec`.
-Only the C header is installed; core, runtime, CUDA, CUTLASS, and AOT headers
-remain private. Errors return `-1` and a diagnostic instead of crossing the ABI
-as C++ exceptions. See [the Chinese integration guide](docs/integration-guide-zh.md).
-
-## Verification
-
-Run the host compiler checks in the model environment:
-
-```bash
-build/model-venv/bin/python tests/unit/aot_tests.py
-build/model-venv/bin/python tests/unit/model_package_tests.py
-```
-
-To compare serialized AOT schedules with official eager execution on varied
-inputs and Q indices 0/21/63, run
-`tests/conformance/run_aot_conformance.py --checkpoint-root /path/to/checkpoints`.
-This host check validates capture/lowering separately from CUDA arithmetic.
-
-Generate official-Python reference fixtures directly from each checkpoint,
-using the corresponding canonical bundle to identify the codec contract:
-
-```bash
-build/model-venv/bin/python -m mlvc_tools.reference \
-  --model-dir models/canonical/mlvc-psnr-v1/640x368 \
-  --checkpoint /path/to/mlvc-psnr-v1.ckpt \
-  --input input.yuv --width 640 --height 360 --frames 2 --q-index 21 \
-  --output-dir models/fixtures/references/mlvc-psnr-v1/gray-q21-2f
-```
-
-Repeat for MLVC-S, then configure and build the formal target:
-
-```bash
-cmake --preset driver-cubin-release
-cmake --build build/driver-cubin-release --target mlvc_codec_compatibility
-```
-
-`--debug-dir` dumps model inputs and outputs and disables device-state binding
-for diagnosis. The required gate exercises two I/P frames; it does not establish
-long-sequence, arbitrary-content, or rate-distortion acceptance. See the
-[compatibility contract](docs/codec-compatibility.md).
-
-## Source map
-
-```text
-public/include/mlvc/codec.h  Public C API
-codec/                      C API implementation and frame pipeline
-core/                       Model metadata, tensors, YUV, PMF/rANS, NALU bitstream
-runtime/                    Graph execution and buffered codec contracts
-backends/driver_cubin/      AOT loader, planner, Driver API, CUDA kernels
-tools/cli/                  Encode/decode command-line entry point
-tools/scripts/              Bootstrap, dependency pins, and release packaging
-tools/python/mlvc_tools/    Offline AOT compiler, Protobuf bundler, and references
-proto/mlvc_model.proto      Model, PMF, graph, bundle, and debug schemas
-licenses/                   Third-party attribution and license notices (libmlvc)
-tests/                      Host safety, C API, AOT, and codec conformance tests
-models/profiles/            Registered checkpoint identities and model parameters
-models/canonical/           Generated, ignored canonical model bundles
-models/fixtures/            Generated, ignored test fixtures and references
-```
-
-See [design notes](docs/design.md) and
-[Driver+cubin architecture](docs/nvngx-dlss-cubin-architecture.md).
-
-The [driver-only validation record](docs/validation/2026-11-12-driver-only.md)
-documents the exercised hardware, fixtures, checks, and acceptance limits.
+| Document                                                   | Contents                                                                                                                                                          |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| [docs/README.md](docs/README.md)                           | Documentation index organized by role                                                                                                                             |
+| [docs/architecture.md](docs/architecture.md)               | 4-layer system architecture, decoupling boundaries, `ModelAssetReader`, `EncoderSession`/`DecoderSession`, and source map                                         |
+| [docs/backends.md](docs/backends.md)                       | `driver-cubin` (NVIDIA Driver API, fatbin, CUTLASS, CUDA Graphs, fusion lessons) and `cpu` (ARM64 NEON/FP16FML assembly, AVX2, heterogeneous thread pool, fusion) |
+| [docs/codec-and-bitstream.md](docs/codec-and-bitstream.md) | Split-model I/O, YUV420 padding/cropping, GOP/DPB/QP schedule, scale extraction, rANS order, and `mlvc-nalu-v0` Annex-B specification                             |
+| [docs/model-pipeline.md](docs/model-pipeline.md)           | Offline checkpoint AOT compilation, `proto/mlvc_model.proto` (bundle v2 / AOT v3), arena planner, `profiles.json`, and ELF model embedding                        |
+| [docs/build-and-usage.md](docs/build-and-usage.md)         | CMake options/presets, cross-compilation (Linux, Windows, Android, OpenHarmony), release packaging, and `mlvc_demo` CLI / streaming / FIFO                        |
+| [docs/sdk-integration.md](docs/sdk-integration.md)         | Public C ABI v2 (`include/mlvc/codec.h`), CMake `find_package`, symbol boundaries, internal C++ session/asset APIs, and service/mobile deployment                 |
+| [docs/verification.md](docs/verification.md)               | Unit test matrix, CI & sanitizers, AOT host conformance, `mlvc_codec_compatibility` tolerances, and acceptance limits                                             |
 
 ## Acknowledgements
 
-- [Microsoft MLVC](https://github.com/microsoft/mlvc) supplies the model
-  architecture and `msrtc_rans` entropy coder source (MIT License).
-- [Microsoft libmlvc](https://github.com/microsoft/libmlvc) supplies the v0.x
-  NALU Annex-B bitstream specification, bit I/O / NALU parser-builder design,
-  and frozen conformance test vectors incorporated into `core/` and `tests/`
-  (MIT License; see [licenses/libmlvc/LICENSE](licenses/libmlvc/LICENSE)).
-- NVIDIA CUTLASS supplies CUDA kernel building blocks under its upstream
-  license.
+- [Microsoft MLVC](https://github.com/microsoft/mlvc) supplies the neural video codec architecture and `msrtc_rans` entropy coder (MIT License).
+- [Microsoft libmlvc](https://github.com/microsoft/libmlvc) supplies the v0.x NALU Annex-B bitstream specification, bit I/O and NALU parser/builder design, and frozen conformance vectors incorporated into `core/` and `tests/` (MIT License; see [licenses/libmlvc/LICENSE](licenses/libmlvc/LICENSE)).
+- [NVIDIA CUTLASS](https://github.com/NVIDIA/cutlass) supplies CUDA Tensor Core kernel building blocks under its upstream license.
+- [Protobuf](https://github.com/protocolbuffers/protobuf) and [Abseil](https://github.com/abseil/abseil-cpp) provide statically linked Lite binary model serialization.

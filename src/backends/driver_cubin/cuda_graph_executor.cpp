@@ -28,8 +28,52 @@ std::size_t yuv_bytes(const CodecIoConfig& config)
 
 }  // namespace
 
+void AotGraph::warmup_and_capture()
+{
+    for (const auto& buffer : input_buffers_)
+        driver_.zero_async(buffer);
+    execute_schedule();
+    cutlass_parameters_ready_ = true;
+    driver_.begin_capture();
+    execute_schedule();
+    executable_graph_ = driver_.end_capture();
+    driver_.synchronize();
+}
+
+void AotGraph::cache_runtime_metadata()
+{
+    external_outputs_.clear();
+    external_outputs_.reserve(output_ids_.size());
+    for (std::size_t index = 0; index < output_ids_.size(); ++index) {
+        if (is_state_output(index))
+            continue;
+        const TensorId id = output_ids_[index];
+        const Value& result = value(id);
+        const std::size_t bytes =
+            element_count(result.shape) * dtype_bytes(result.dtype);
+        external_outputs_.push_back({index, id, result.address, bytes});
+    }
+
+    q_input_index_.reset();
+    decoder_latent_inputs_.clear();
+    for (std::size_t index = 0; index < input_ids_.size(); ++index) {
+        const Value& input = value(input_ids_[index]);
+        if (input.name == "q_index_shifted") {
+            if (input.dtype == DataType::INT32 && input.shape.size() == 1 &&
+                input.shape[0] == 1) {
+                q_input_index_ = index;
+            }
+            continue;
+        }
+        if (!is_state_input(index))
+            decoder_latent_inputs_.push_back(index);
+    }
+}
+
 void AotGraph::reset_state()
 {
+    std::lock_guard<std::mutex> lock(exec_mutex_);
+    auto ctx_guard = driver_.bind_context();
     for (const StateBinding& binding : state_bindings_)
         driver_.zero_async(input_buffers_[binding.input_index]);
     state_initialized_ = true;
@@ -53,29 +97,20 @@ void AotGraph::enqueue_model()
 
 void AotGraph::enqueue_outputs(HostSlot& slot)
 {
-    for (std::size_t index = 0; index < output_ids_.size(); ++index) {
-        if (is_state_output(index))
-            continue;
-        const Value& result = value(output_ids_[index]);
-        const std::size_t bytes =
-            element_count(result.shape) * dtype_bytes(result.dtype);
-        driver_.download_async(slot.outputs[index].data(), result.address, bytes);
+    for (const ExternalOutput& output : external_outputs_) {
+        driver_.download_async(
+            slot.outputs[output.output_index].data(),
+            output.address, output.bytes);
     }
 }
 
 void AotGraph::set_q_index(HostSlot& slot, int shifted_q)
 {
-    const auto found = std::find(
-        input_ids_.begin(), input_ids_.end(), tensor_id("q_index_shifted"));
-    if (found == input_ids_.end())
-        throw std::runtime_error("driver-cubin: graph has no q_index_shifted input");
-    const std::size_t index = static_cast<std::size_t>(
-        std::distance(input_ids_.begin(), found));
-    const Value& q = value(*found);
-    if (q.dtype != DataType::INT32 || q.shape != std::vector<int64_t>{1} ||
-        !slot.inputs[index]) {
+    if (!q_input_index_)
+        throw std::runtime_error("driver-cubin: graph has no valid q_index_shifted input");
+    const std::size_t index = *q_input_index_;
+    if (!slot.inputs[index])
         throw std::runtime_error("driver-cubin: invalid q_index_shifted input");
-    }
     std::memcpy(slot.inputs[index].data(), &shifted_q, sizeof(shifted_q));
     driver_.upload_async(input_buffers_[index], slot.inputs[index].data(),
                          sizeof(shifted_q));
@@ -89,6 +124,8 @@ void AotGraph::finish_submit(HostSlot& slot)
 
 std::vector<Tensor> AotGraph::run(const std::vector<Tensor>& inputs)
 {
+    std::lock_guard<std::mutex> lock(exec_mutex_);
+    auto ctx_guard = driver_.bind_context();
     if (!state_bindings_.empty() && !state_initialized_)
         throw std::runtime_error(
             "driver-cubin: reset_state() must be called before run()");
@@ -97,7 +134,7 @@ std::vector<Tensor> AotGraph::run(const std::vector<Tensor>& inputs)
 
     ensure_host_slots(1);
     HostSlot& slot = host_slots_.front();
-    wait_codec_slot(0);
+    wait_codec_slot_locked(0);
     std::size_t external_index = 0;
     for (std::size_t graph_index = 0; graph_index < input_ids_.size();
          ++graph_index) {
@@ -124,29 +161,25 @@ std::vector<Tensor> AotGraph::run(const std::vector<Tensor>& inputs)
     driver_.synchronize();
 
     std::vector<Tensor> outputs;
-    outputs.reserve(output_ids_.size() - state_bindings_.size());
-    for (std::size_t index = 0; index < output_ids_.size(); ++index) {
-        if (is_state_output(index))
-            continue;
-        const TensorId name = output_ids_[index];
-        const Value& result = value(name);
+    outputs.reserve(external_outputs_.size());
+    for (const ExternalOutput& output : external_outputs_) {
+        const Value& result = value(output.id);
         Tensor tensor;
         tensor.name = result.name;
         tensor.shape = result.shape;
         if (result.dtype == DataType::FP16) {
             tensor.data =
-                std::vector<Float16Storage>(element_count(result.shape));
+                std::vector<Float16Storage>(output.bytes / sizeof(Float16Storage));
         } else if (result.dtype == DataType::INT32) {
             tensor.data =
-                std::vector<std::int32_t>(element_count(result.shape));
+                std::vector<std::int32_t>(output.bytes / sizeof(std::int32_t));
         } else {
             throw std::runtime_error(
                 "driver-cubin: unsupported graph output dtype");
         }
         std::visit([&](auto& storage) {
-            std::memcpy(storage.data(), slot.outputs[index].data(),
-                        storage.size() * sizeof(
-                            typename std::decay_t<decltype(storage)>::value_type));
+            std::memcpy(storage.data(), slot.outputs[output.output_index].data(),
+                        output.bytes);
         }, tensor.data);
         outputs.push_back(std::move(tensor));
     }
@@ -204,6 +237,8 @@ const AotGraph::HostSlot& AotGraph::host_slot(std::size_t slot) const
 
 void AotGraph::configure_codec_io(const CodecIoConfig& config)
 {
+    std::lock_guard<std::mutex> lock(exec_mutex_);
+    auto ctx_guard = driver_.bind_context();
     if (codec_io_configured_)
         throw std::runtime_error("driver-cubin: codec I/O is already configured");
     const std::size_t bytes = yuv_bytes(config);
@@ -220,6 +255,8 @@ void AotGraph::configure_codec_io(const CodecIoConfig& config)
 
     codec_io_ = config;
     codec_io_configured_ = true;
+    codec_image_address_ = image.address;
+    codec_yuv_bytes_ = bytes;
     codec_yuv_device_ = driver_.allocate(bytes);
     if (model_name_ == "MLVCEncoder") {
         std::vector<Float16Storage> byte_lut(256);
@@ -260,6 +297,8 @@ MutableYuv420FrameView AotGraph::encoder_input_yuv(std::size_t slot_index)
 
 void AotGraph::submit_encoder(std::size_t slot_index, int shifted_q)
 {
+    std::lock_guard<std::mutex> lock(exec_mutex_);
+    auto ctx_guard = driver_.bind_context();
     if (!codec_io_configured_ || model_name_ != "MLVCEncoder")
         throw std::runtime_error("driver-cubin: encoder codec I/O is unavailable");
     if (!state_bindings_.empty() && !state_initialized_)
@@ -269,10 +308,10 @@ void AotGraph::submit_encoder(std::size_t slot_index, int shifted_q)
     if (slot.pending)
         throw std::runtime_error("driver-cubin: encoder codec slot is pending");
 
-    driver_.upload_async(codec_yuv_device_, slot.yuv.data(), yuv_bytes(codec_io_));
+    driver_.upload_async(codec_yuv_device_, slot.yuv.data(), codec_yuv_bytes_);
     DeviceAddress input = codec_yuv_device_.address();
     DeviceAddress lut = codec_byte_lut_device_.address();
-    DeviceAddress output = value("x").address;
+    DeviceAddress output = codec_image_address_;
     int width = codec_io_.width;
     int height = codec_io_.height;
     int model_width = codec_io_.model_width;
@@ -298,15 +337,13 @@ std::vector<TensorView> AotGraph::encoder_outputs(
     if (slot.pending)
         throw std::runtime_error("driver-cubin: encoder codec slot is pending");
     std::vector<TensorView> outputs;
-    outputs.reserve(output_ids_.size() - state_bindings_.size());
-    for (std::size_t index = 0; index < output_ids_.size(); ++index) {
-        if (is_state_output(index))
-            continue;
-        const Value& result = value(output_ids_[index]);
+    outputs.reserve(external_outputs_.size());
+    for (const ExternalOutput& output : external_outputs_) {
+        const Value& result = value(output.id);
         outputs.push_back(TensorView::from_raw(
             result.name, std::span<const int64_t>(result.shape),
-            public_dtype(result.dtype), slot.outputs[index].data(),
-            element_count(result.shape) * dtype_bytes(result.dtype)));
+            public_dtype(result.dtype), slot.outputs[output.output_index].data(),
+            output.bytes));
     }
     return outputs;
 }
@@ -320,10 +357,8 @@ std::vector<MutableTensorView> AotGraph::decoder_inputs(
     if (slot.pending)
         throw std::runtime_error("driver-cubin: decoder codec slot is pending");
     std::vector<MutableTensorView> inputs;
-    inputs.reserve(input_ids_.size() - state_bindings_.size() - 1);
-    for (std::size_t index = 0; index < input_ids_.size(); ++index) {
-        if (is_state_input(index) || input_ids_[index] == tensor_id("q_index_shifted"))
-            continue;
+    inputs.reserve(decoder_latent_inputs_.size());
+    for (const std::size_t index : decoder_latent_inputs_) {
         const Value& input = value(input_ids_[index]);
         inputs.push_back(MutableTensorView::from_raw(
             input.name, std::span<const int64_t>(input.shape),
@@ -335,6 +370,8 @@ std::vector<MutableTensorView> AotGraph::decoder_inputs(
 
 void AotGraph::submit_decoder(std::size_t slot_index, int shifted_q)
 {
+    std::lock_guard<std::mutex> lock(exec_mutex_);
+    auto ctx_guard = driver_.bind_context();
     if (!codec_io_configured_ || model_name_ != "MLVCDecoder")
         throw std::runtime_error("driver-cubin: decoder codec I/O is unavailable");
     if (!state_bindings_.empty() && !state_initialized_)
@@ -344,16 +381,14 @@ void AotGraph::submit_decoder(std::size_t slot_index, int shifted_q)
     if (slot.pending)
         throw std::runtime_error("driver-cubin: decoder codec slot is pending");
 
-    for (std::size_t index = 0; index < input_ids_.size(); ++index) {
-        if (is_state_input(index) || input_ids_[index] == tensor_id("q_index_shifted"))
-            continue;
+    for (const std::size_t index : decoder_latent_inputs_) {
         driver_.upload_async(input_buffers_[index], slot.inputs[index].data(),
                              input_buffers_[index].size());
     }
     set_q_index(slot, shifted_q);
     enqueue_model();
 
-    DeviceAddress input = value("x_hat").address;
+    DeviceAddress input = codec_image_address_;
     DeviceAddress output = codec_yuv_device_.address();
     int width = codec_io_.width;
     int height = codec_io_.height;
@@ -368,7 +403,7 @@ void AotGraph::submit_decoder(std::size_t slot_index, int shifted_q)
         &pad_left, &pad_top, &rotated, &inverse_pixel_range};
     launch_linear(nchw_to_yuv420_,
                   static_cast<std::size_t>(width) * height, parameters);
-    driver_.download_async(slot.yuv.data(), codec_yuv_device_, yuv_bytes(codec_io_));
+    driver_.download_async(slot.yuv.data(), codec_yuv_device_, codec_yuv_bytes_);
     finish_submit(slot);
 }
 
@@ -390,13 +425,20 @@ Yuv420FrameView AotGraph::decoder_output_yuv(std::size_t slot_index) const
         storage.subspan(y_size + uv_size, uv_size));
 }
 
-void AotGraph::wait_codec_slot(std::size_t slot_index)
+void AotGraph::wait_codec_slot_locked(std::size_t slot_index)
 {
     HostSlot& slot = host_slot(slot_index);
     if (!slot.pending)
         return;
     driver_.synchronize(slot.completion);
     slot.pending = false;
+}
+
+void AotGraph::wait_codec_slot(std::size_t slot_index)
+{
+    std::lock_guard<std::mutex> lock(exec_mutex_);
+    auto ctx_guard = driver_.bind_context();
+    wait_codec_slot_locked(slot_index);
 }
 
 AotGraph::~AotGraph()

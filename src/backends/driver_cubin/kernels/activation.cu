@@ -51,17 +51,13 @@ extern "C" __global__ void mlvc_reglu_vec8_fp16(
     const __half* input, __half* output, int batch_count, int channels,
     int spatial_count, float minimum, float maximum)
 {
-    const int index = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
-    const int chunks_per_channel = spatial_count / 8;
-    const int count = batch_count * channels * chunks_per_channel;
-    if (index >= count)
+    const int chunk = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    const int chunks_per_channel = spatial_count >> 3;
+    const int channel = static_cast<int>(blockIdx.y);
+    const int batch = static_cast<int>(blockIdx.z);
+    if (chunk >= chunks_per_channel || channel >= channels || batch >= batch_count)
         return;
 
-    int linear = index;
-    const int chunk = linear % chunks_per_channel;
-    linear /= chunks_per_channel;
-    const int channel = linear % channels;
-    const int batch = linear / channels;
     const std::size_t plane = static_cast<std::size_t>(spatial_count);
     const std::size_t gate_base =
         (static_cast<std::size_t>(batch) * channels * 2 + channel) * plane;

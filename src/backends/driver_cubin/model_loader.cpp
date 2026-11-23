@@ -1,7 +1,8 @@
 #include "aot_graph.hpp"
 
+#include "core/env.hpp"
+
 #include <algorithm>
-#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -15,9 +16,10 @@ AotGraph::AotGraph(const ModelAssetReader& assets,
                    const driver_cubin::Module& module)
     : driver_(driver), module_(module), model_name_(model_name)
 {
+    auto ctx_guard = driver_.bind_context();
     // Opt-in L2 threadblock swizzle for the CUTLASS pointwise GEMMs.
-    if (const char* env = std::getenv("MLVC_CUTLASS_LOG_TILE"))
-        cutlass_log_tile_ = std::clamp(std::atoi(env), 0, 3);
+    cutlass_log_tile_ =
+        detail::parse_env_int("MLVC_CUTLASS_LOG_TILE", 0, 0, 3);
     load_model(assets, model_name);
     plan_input_slice_aliases();
     plan_epilogue_buffers();
@@ -27,6 +29,8 @@ AotGraph::AotGraph(const ModelAssetReader& assets,
     plan_direct_concat_buffers();
     register_kernels();
     configure_state(execution_config);
+    warmup_and_capture();
+    cache_runtime_metadata();
 }
 
 void AotGraph::load_model(const ModelAssetReader& assets,
@@ -34,10 +38,16 @@ void AotGraph::load_model(const ModelAssetReader& assets,
 {
     auto loaded = aot::load_aot_graph(assets, model_name);
     graph_ = std::move(loaded.descriptor);
-    weights_host_ = std::move(loaded.weights);
-    weights_device_ = driver_.allocate(std::max<std::size_t>(weights_host_.size(), 1));
-    if (!weights_host_.empty())
-        driver_.upload(weights_device_, weights_host_.data(), weights_host_.size());
+    tensor_consumer_counts_.assign(graph_.tensors.size(), 0U);
+    for (const auto& node : graph_.nodes) {
+        for (const TensorId input_id : node.inputs) {
+            if (input_id < tensor_consumer_counts_.size())
+                ++tensor_consumer_counts_[input_id];
+        }
+    }
+    weights_device_ = driver_.allocate(std::max<std::size_t>(loaded.weights.size(), 1));
+    if (!loaded.weights.empty())
+        driver_.upload(weights_device_, loaded.weights.data(), loaded.weights.size());
     arena_device_ = driver_.allocate(graph_.arena_bytes);
     values_.resize(graph_.tensors.size());
     for (std::size_t id = 1; id < graph_.tensors.size(); ++id) {
@@ -50,6 +60,15 @@ void AotGraph::load_model(const ModelAssetReader& assets,
             value.host_offset = weight->offset;
             value.address = weights_device_.address() + weight->offset;
             value.initializer = true;
+            // Retain only small metadata/scalar initializers on the host instead
+            // of keeping the entire multi-megabyte weights buffer in host RAM.
+            const std::size_t count = element_count(item.shape);
+            if (item.dtype == DataType::INT64 || count <= 16U) {
+                const std::byte* begin = loaded.weights.data() + weight->offset;
+                host_initializers_.emplace(
+                    static_cast<TensorId>(id),
+                    std::vector<std::byte>(begin, begin + weight->bytes));
+            }
         } else if (const auto* arena = std::get_if<ArenaSlot>(&item.storage)) {
             value.address = arena_device_.address() + arena->offset;
         }

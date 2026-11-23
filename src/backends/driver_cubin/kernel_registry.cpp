@@ -6,6 +6,8 @@ void AotGraph::register_kernels()
 {
     binary_ = module_.function("mlvc_binary_fp16");
     binary_contiguous_ = module_.function("mlvc_binary_contiguous_fp16");
+    binary_channel_broadcast_ =
+        module_.function("mlvc_binary_channel_broadcast_fp16");
     unary_ = module_.function("mlvc_unary_fp16");
     feature_update_ = module_.function("mlvc_feature_update_fp16");
     feature_update_outputs_ =
@@ -86,6 +88,10 @@ void AotGraph::register_kernels()
             module_.function("mlvc_cutlass_spatial_conv_fp16");
         driver_.set_max_dynamic_shared_memory(
             cutlass_spatial_convolution_, 73728U);
+        cutlass_spatial_convolution_small_init_ =
+            module_.function("mlvc_cutlass_spatial_conv_small_init_fp16");
+        cutlass_spatial_convolution_small_ =
+            module_.function("mlvc_cutlass_spatial_conv_small_fp16");
         transpose_ = module_.function("mlvc_transpose_fp16");
         oihw_to_krsc_ = module_.function("mlvc_oihw_to_krsc_fp16");
     }
@@ -99,11 +105,16 @@ void AotGraph::register_kernels()
         module_.function("mlvc_depthwise_conv_pair_fp16");
     depthwise_convolution_quad_ =
         module_.function("mlvc_depthwise_conv_quad_fp16");
+    depthwise_convolution_oct_ =
+        module_.function("mlvc_depthwise_conv_oct_fp16");
     gather_ = module_.function("mlvc_gather_axis0_fp16");
     slice_ = module_.function("mlvc_slice_fp16");
     concat_ = module_.function("mlvc_concat_copy_fp16");
+    copy_ = module_.function("mlvc_copy_fp16");
     depth_to_space_ = module_.function("mlvc_depth_to_space_fp16");
     space_to_depth_ = module_.function("mlvc_space_to_depth_fp16");
+    depth_to_space_3d_ = module_.function("mlvc_depth_to_space_3d_fp16");
+    space_to_depth_3d_ = module_.function("mlvc_space_to_depth_3d_fp16");
     yuv420_to_nchw_ = module_.function("mlvc_yuv420_to_nchw_fp16");
     nchw_to_yuv420_ = module_.function("mlvc_nchw_to_yuv420");
 }

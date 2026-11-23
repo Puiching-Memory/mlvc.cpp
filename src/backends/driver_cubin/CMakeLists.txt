@@ -75,10 +75,9 @@ mlvc_enable_ipo(mlvc_driver_kernels)
 
 add_library(mlvc_driver STATIC driver.cpp)
 set_target_properties(mlvc_driver PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_include_directories(mlvc_driver PUBLIC
-    "${PROJECT_SOURCE_DIR}/src"
-    "${CUDAToolkit_INCLUDE_DIRS}")
-target_link_libraries(mlvc_driver PUBLIC CUDA::cuda_driver)
+target_include_directories(mlvc_driver PUBLIC "${PROJECT_SOURCE_DIR}/src")
+target_include_directories(mlvc_driver SYSTEM PUBLIC "${CUDAToolkit_INCLUDE_DIRS}")
+target_link_libraries(mlvc_driver PUBLIC ${CMAKE_DL_LIBS} PRIVATE mlvc_core)
 mlvc_configure_target(mlvc_driver)
 mlvc_enable_ipo(mlvc_driver)
 
@@ -87,11 +86,6 @@ target_link_libraries(mlvc_driver_probe PRIVATE
     mlvc_driver mlvc_driver_kernels)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_options(mlvc_driver_probe PRIVATE "LINKER:--disable-new-dtags")
-    # The codec library links the CUDA driver API through CUDA::cuda_driver; on
-    # driverless CI hosts the probe needs the toolkit stub to resolve the
-    # transitive libcuda.so.1 dependency at link time.
-    target_link_options(mlvc_driver_probe PRIVATE
-        "LINKER:-rpath-link,${CUDAToolkit_LIBRARY_DIR}/stubs")
 endif()
 mlvc_configure_target(mlvc_driver_probe)
 mlvc_enable_ipo(mlvc_driver_probe)

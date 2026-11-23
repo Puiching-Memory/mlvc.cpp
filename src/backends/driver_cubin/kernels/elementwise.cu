@@ -56,6 +56,39 @@ extern "C" __global__ void mlvc_binary_contiguous_fp16(
     }
 }
 
+extern "C" __global__ void mlvc_binary_channel_broadcast_fp16(
+    const __half* __restrict__ tensor, const __half* __restrict__ channel_vec,
+    __half* __restrict__ output, int batch_count, int channels,
+    int spatial_count, int op, int swapped)
+{
+    const int pair = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    const int channel = static_cast<int>(blockIdx.y);
+    const int batch = static_cast<int>(blockIdx.z);
+    const int spatial = pair * 2;
+    if (spatial >= spatial_count || channel >= channels || batch >= batch_count)
+        return;
+
+    const __half cval = __ldg(channel_vec + channel);
+    const std::size_t base =
+        (static_cast<std::size_t>(batch) * channels + channel) * spatial_count +
+        spatial;
+    auto apply = [&](__half tval) {
+        return swapped ? binary_value(cval, tval, op)
+                       : binary_value(tval, cval, op);
+    };
+    if (spatial + 1 < spatial_count &&
+        ((reinterpret_cast<std::uintptr_t>(tensor + base) & 3U) == 0) &&
+        ((reinterpret_cast<std::uintptr_t>(output + base) & 3U) == 0)) {
+        const __half2 tv = *reinterpret_cast<const __half2*>(tensor + base);
+        *reinterpret_cast<__half2*>(output + base) = __halves2half2(
+            apply(__low2half(tv)), apply(__high2half(tv)));
+    } else {
+        output[base] = apply(tensor[base]);
+        if (spatial + 1 < spatial_count)
+            output[base + 1] = apply(tensor[base + 1]);
+    }
+}
+
 extern "C" __global__ void mlvc_unary_fp16(
     const __half* input, __half* output, int count, int op,
     float alpha, float minimum, float maximum)

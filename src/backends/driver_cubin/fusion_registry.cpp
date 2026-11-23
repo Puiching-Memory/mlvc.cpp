@@ -31,15 +31,6 @@ bool AotGraph::try_execute_y0_tail(const std::vector<Node>& nodes, std::size_t i
         const auto names = nodes.at(index + offset).outputs;
         return names.size() == 1 ? names[0] : TensorId{};
     };
-    auto consumer_count = [&](TensorId name) {
-        std::size_t count = 0;
-        for (const auto& candidate : nodes) {
-            const auto candidate_inputs = candidate.inputs;
-            count += static_cast<std::size_t>(std::count(
-                candidate_inputs.begin(), candidate_inputs.end(), name));
-        }
-        return count;
-    };
 
     const auto slice0_inputs = inputs(0);
     const auto slice1_inputs = inputs(1);
@@ -110,7 +101,7 @@ bool AotGraph::try_execute_y0_tail(const std::vector<Node>& nodes, std::size_t i
             {&updated0, 1}, {&updated_input1, 1}, {&updated1, 1},
             {&concat2, 2}}};
     for (const auto& [name, expected] : expected_consumers) {
-        if (consumer_count(*name) != expected)
+        if (tensor_consumer_count(*name) != expected)
             return false;
     }
 
@@ -135,9 +126,7 @@ bool AotGraph::try_execute_y0_tail(const std::vector<Node>& nodes, std::size_t i
     }
 
     int quant_channels = static_cast<int>(raw_value.shape[1]);
-    // The small profile has too little parallel work to amortize this
-    // fused kernel's register and launch footprint on the A30.
-    if (quant_channels < 32)
+    if (quant_channels < 16)
         return false;
     const std::vector<int64_t> raw_shape{
         raw_value.shape[0], raw_value.shape[1], raw_value.shape[2],
@@ -242,15 +231,6 @@ bool AotGraph::try_execute_y1_tail(const std::vector<Node>& nodes, std::size_t i
         const auto names = nodes.at(index + offset).outputs;
         return names.size() == 1 ? names[0] : TensorId{};
     };
-    auto consumer_count = [&](TensorId name) {
-        std::size_t count = 0;
-        for (const auto& candidate : nodes) {
-            const auto candidate_inputs = candidate.inputs;
-            count += static_cast<std::size_t>(std::count(
-                candidate_inputs.begin(), candidate_inputs.end(), name));
-        }
-        return count;
-    };
 
     const auto first_inputs = inputs(0);
     if (first_inputs.size() != 2 || (first_inputs[0] == 0) ||
@@ -304,15 +284,15 @@ bool AotGraph::try_execute_y1_tail(const std::vector<Node>& nodes, std::size_t i
 
     const TensorId concat2_name = inputs(13)[0];
     const TensorId clipped_name = inputs(14)[1];
-    if (consumer_count(difference) != 1 || consumer_count(scaled) != 2 ||
-        consumer_count(scaled0) != 1 || consumer_count(scaled1) != 1 ||
-        consumer_count(rounded_input) != 1 || consumer_count(y_raw) != 2 ||
-        consumer_count(prior_name) != 3 || consumer_count(prior0) != 1 ||
-        consumer_count(prior1) != 1 || consumer_count(updated_input0) != 1 ||
-        consumer_count(updated0) != 1 || consumer_count(updated_input1) != 1 ||
-        consumer_count(updated1) != 1 || consumer_count(concat4) != 1 ||
-        consumer_count(added) != 1 || consumer_count(result_name) != 1 ||
-        consumer_count(concat2_name) != 2 || consumer_count(clipped_name) != 2) {
+    if (tensor_consumer_count(difference) != 1 || tensor_consumer_count(scaled) != 2 ||
+        tensor_consumer_count(scaled0) != 1 || tensor_consumer_count(scaled1) != 1 ||
+        tensor_consumer_count(rounded_input) != 1 || tensor_consumer_count(y_raw) != 2 ||
+        tensor_consumer_count(prior_name) != 3 || tensor_consumer_count(prior0) != 1 ||
+        tensor_consumer_count(prior1) != 1 || tensor_consumer_count(updated_input0) != 1 ||
+        tensor_consumer_count(updated0) != 1 || tensor_consumer_count(updated_input1) != 1 ||
+        tensor_consumer_count(updated1) != 1 || tensor_consumer_count(concat4) != 1 ||
+        tensor_consumer_count(added) != 1 || tensor_consumer_count(result_name) != 1 ||
+        tensor_consumer_count(concat2_name) != 2 || tensor_consumer_count(clipped_name) != 2) {
         return false;
     }
 
@@ -335,9 +315,7 @@ bool AotGraph::try_execute_y1_tail(const std::vector<Node>& nodes, std::size_t i
         return false;
     }
     int quant_channels = static_cast<int>(raw_value.shape[1]);
-    // Keep the generic schedule for small fixed-shape profiles; their
-    // simpler kernels are faster than this wider fused tail.
-    if (quant_channels < 32)
+    if (quant_channels < 16)
         return false;
     const std::vector<int64_t> raw_shape{
         raw_value.shape[0], raw_value.shape[1], raw_value.shape[2],
@@ -459,22 +437,13 @@ bool AotGraph::try_execute_feature_update(const std::vector<Node>& nodes, std::s
         return false;
     }
 
-    auto consumer_count = [&](TensorId name) {
-        std::size_t count = 0;
-        for (const auto& candidate : nodes) {
-            const auto candidate_inputs = candidate.inputs;
-            count += static_cast<std::size_t>(std::count(
-                candidate_inputs.begin(), candidate_inputs.end(), name));
-        }
-        return count;
-    };
     const std::array<std::pair<const TensorId*, std::size_t>, 11>
         expected_consumers{{
             {&slice0, 1}, {&slice1, 1}, {&slice2, 1}, {&sigmoid0, 2},
             {&sigmoid1, 1}, {&weighted1, 1}, {&inverse_gate, 1},
             {&weighted0, 1}, {&blended, 2}, {&gated, 1}, {&scaled, 1}}};
     for (const auto& [name, expected] : expected_consumers) {
-        if (consumer_count(*name) != expected)
+        if (tensor_consumer_count(*name) != expected)
             return false;
     }
 
@@ -549,15 +518,6 @@ bool AotGraph::try_execute_feature_update_outputs(
         const auto names = nodes.at(index + offset).outputs;
         return names.size() == 1 ? names[0] : TensorId{};
     };
-    auto consumer_count = [&](TensorId name) {
-        std::size_t count = 0;
-        for (const auto& candidate : nodes) {
-            const auto candidate_inputs = candidate.inputs;
-            count += static_cast<std::size_t>(std::count(
-                candidate_inputs.begin(), candidate_inputs.end(), name));
-        }
-        return count;
-    };
 
     const auto slice0_inputs = inputs(0);
     const auto slice1_inputs = inputs(1);
@@ -621,7 +581,7 @@ bool AotGraph::try_execute_feature_update_outputs(
             {&sigmoid1, 1}, {&weighted1, 1}, {&inverse_gate, 1},
             {&weighted0, 1}, {&blended, 2}, {&gated, 1}, {&scaled, 2}}};
     for (const auto& [name, expected] : expected_consumers) {
-        if (consumer_count(*name) != expected)
+        if (tensor_consumer_count(*name) != expected)
             return false;
     }
 
@@ -736,15 +696,8 @@ bool AotGraph::try_execute_pointwise_epilogue(const std::vector<Node>& nodes, st
         return false;
     }
 
-    TensorId convolution_output_name = convolution_outputs[0];
-    std::size_t consumer_count = 0;
-    for (const auto& candidate : nodes) {
-        for (TensorId input :
-             candidate.inputs) {
-            consumer_count += input == convolution_output_name ? 1 : 0;
-        }
-    }
-    if (consumer_count != 1)
+    const TensorId convolution_output_name = convolution_outputs[0];
+    if (tensor_consumer_count(convolution_output_name) != 1)
         return false;
 
     DeviceAddress epilogue_input_address = 0;
@@ -788,12 +741,26 @@ bool AotGraph::try_execute_pointwise_epilogue(const std::vector<Node>& nodes, st
         input.shape[3] != output.shape[3] ||
         output.shape[1] != weight.shape[0] ||
         convolution_output.shape != output.shape ||
-        input.shape[1] % 16 != 0 || output.shape[1] % 128 != 0 ||
         (residual && residual->shape != output.shape) ||
         ranges_overlap(output, input) ||
         (residual && ranges_overlap(output, *residual))) {
         return false;
     }
+
+    const bool has_bias = convolution_inputs.size() > 2 &&
+                          !(convolution_inputs[2] == 0);
+    const int batch_count = static_cast<int>(input.shape[0]);
+    const int in_channels = static_cast<int>(input.shape[1]);
+    const int out_channels = static_cast<int>(output.shape[1]);
+    const int spatial_count =
+        static_cast<int>(output.shape[2] * output.shape[3]);
+    const bool cutlass_supported = can_use_cutlass_pointwise(
+        batch_count, has_bias, in_channels, spatial_count, out_channels,
+        epilogue, alpha, epilogue_input_address != 0);
+    const bool mma_supported =
+        (in_channels % 16 == 0) && (out_channels % 128 == 0);
+    if (!cutlass_supported && !mma_supported)
+        return false;
 
     execute(convolution, &output, epilogue_input_address, epilogue, alpha);
     return true;
@@ -876,11 +843,12 @@ bool AotGraph::try_execute_reglu(const std::vector<Node>& nodes, std::size_t ind
         &input_address, &output_address, &batch_count, &channels,
         &spatial_count, &minimum, &maximum};
     if (spatial_count % 8 == 0) {
-        launch_linear(
+        driver_.launch(
             reglu_vec8_,
-            static_cast<std::size_t>(batch_count) * channels *
-                (spatial_count / 8),
-            parameters);
+            {divide_up(static_cast<std::size_t>(spatial_count / 8), 128),
+             static_cast<unsigned int>(channels),
+             static_cast<unsigned int>(batch_count)},
+            {128, 1, 1}, 0, parameters);
     } else {
         driver_.launch(reglu_, {divide_up(work_count, 256),
                                 static_cast<unsigned int>(channels),
@@ -1000,11 +968,12 @@ bool AotGraph::try_execute_pointwise_reglu(const std::vector<Node>& nodes, std::
             &convolution_output_address, &output_address, &batch_count,
             &gate_channels, &spatial_count, &minimum, &maximum};
         if (spatial_count % 8 == 0) {
-            launch_linear(
+            driver_.launch(
                 reglu_vec8_,
-                static_cast<std::size_t>(batch_count) * gate_channels *
-                    (spatial_count / 8),
-                reglu_parameters);
+                {divide_up(static_cast<std::size_t>(spatial_count / 8), 128),
+                 static_cast<unsigned int>(gate_channels),
+                 static_cast<unsigned int>(batch_count)},
+                {128, 1, 1}, 0, reglu_parameters);
         } else {
             driver_.launch(
                 reglu_,

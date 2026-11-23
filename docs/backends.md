@@ -15,13 +15,13 @@
 
 `driver-cubin` follows an ahead-of-time monolithic kernel-runtime boundary (the same deployment pattern used by standalone GPU inference libraries such as NGX/DLSS):
 
-1. **Build-host-only CUDA toolchain**: CUDA Toolkit (`13.3`) and NVIDIA CUTLASS are used exclusively during the build to compile fixed-shape kernels into a multi-architecture fatbin.
-2. **Precompiled fatbin embedded in `libmlvc_codec.so`**: [`src/backends/driver_cubin/tools/build_fatbin.sh`](../src/backends/driver_cubin/tools/build_fatbin.sh) compiles [`src/backends/driver_cubin/kernels/module.cu`](../src/backends/driver_cubin/kernels/module.cu) into cubins for `sm_75`, `sm_80`, `sm_86`, and `sm_89` plus a `compute_89` PTX forward-compatibility image, embedded as a read-only C array via `cmake/EmbedBinary.cmake`.
-3. **Driver API only**: At runtime, the library links `CUDA::cuda_driver` (`libcuda.so.1`) — never `libcudart`, `libcudnn`, `libcublas`, `libnvinfer`, `libonnxruntime`, or `libtorch`. Modules are loaded with `cuModuleLoadData`, kernels resolved via `cuModuleGetFunction`, and launched via `cuLaunchKernel`.
-4. **Device-resident state & CUDA Graphs**: Weights, the static tensor arena, and bound recurrent DPB features stay permanently on the GPU. After loading and planning, the execution schedule is captured once into a CUDA Graph and replayed per frame.
-5. **Double-buffered GPU codec I/O**: Through `BufferedCodecBackend`, `driver-cubin` allocates two pinned host slots and runs YUV420↔FP16-YUV444 conversion, edge padding, cropping, and optional rotation directly on the GPU (`kernels/codec_io.cu`), overlapping CPU rANS coding with GPU inference.
+1. **Build-host-only CUDA toolchain**: CUDA Toolkit (`>= 12.0`; CI/packaging pins `13.3` in [`tools/scripts/dependencies.env`](../tools/scripts/dependencies.env)) and NVIDIA CUTLASS are used exclusively during the build to compile fixed-shape kernels into a multi-architecture fatbin.
+2. **Precompiled fatbin embedded in `libmlvc_codec.so`**: [`src/backends/driver_cubin/tools/build_fatbin.sh`](../src/backends/driver_cubin/tools/build_fatbin.sh) compiles [`src/backends/driver_cubin/kernels/module.cu`](../src/backends/driver_cubin/kernels/module.cu) in parallel (`nvcc --threads 0`) into cubins for `sm_75`, `sm_80`, `sm_86`, and `sm_89` plus a `compute_89` PTX forward-compatibility image, embedded as a read-only C array via `cmake/EmbedBinary.cmake`.
+3. **Dynamically loaded Driver API only**: At runtime, `driver.cpp` resolves NVIDIA Driver symbols via `dlopen("libcuda.so.1")` / `dlsym` — declaring **no** `DT_NEEDED libcuda.so.1` and never linking `libcudart`, `libcudnn`, `libcublas`, `libnvinfer`, `libonnxruntime`, or `libtorch`. Modules are loaded with `cuModuleLoadData`, kernels resolved via `cuModuleGetFunction`, and launched via `cuLaunchKernel`, with RAII `ScopedContext` / `ContextGuard` (`cuCtxGetCurrent` fast path) protecting caller CUDA contexts.
+4. **Device-resident state, eager warmup & CUDA Graphs**: Weights, the static tensor arena, and bound recurrent DPB features stay permanently on the GPU. During `load()`, `AotGraph` pre-initializes CUTLASS kernel parameters, captures and instantiates the CUDA Graph once, and caches codec tensor bindings — eliminating cold-start stalls on the first frames.
+5. **Buffered GPU codec I/O**: Through `BufferedCodecBackend`, `driver-cubin` allocates pinned host slots (2 slots for pipelined `encode_video`/`decode_video`, 1 slot lazily for single-frame `EncoderSession`/`DecoderSession`) and runs YUV420↔FP16-YUV444 conversion, edge padding, cropping, and optional rotation directly on the GPU (`kernels/codec_io.cu`), overlapping CPU rANS coding with GPU inference.
 
-> **Note**: Unlike libraries that dynamically fall back when `libcuda.so.1` is absent, a `driver-cubin`-linked binary intentionally declares `DT_NEEDED libcuda.so.1`. Use `-DMLVC_BACKEND=cpu` for driverless deployments or `-DMLVC_BACKEND=all` if you want both backends available on Linux `x86_64`.
+> **Note**: Because `libcuda.so.1` is loaded lazily via `dlopen()`, a multi-backend (`-DMLVC_BACKEND=all`) binary runs cleanly on driverless Linux hosts and automatically falls back to the `cpu` backend when no NVIDIA driver/GPU is present. Use `-DMLVC_BACKEND=cpu` if you want to omit the embedded CUDA fatbin entirely.
 
 ### Internal Module Boundaries
 
@@ -46,8 +46,8 @@ The lifecycle is strictly `load -> validate/plan -> capture -> replay`; no graph
 
 `module.cu` aggregates focused compilation units tracked as CMake dependencies:
 
-- **Convolutions**: `cutlass.cu` (SM80+ Tensor Core spatial & pointwise GEMM via vendored CUTLASS), `pointwise_conv.cu`, `spatial_conv.cu`, `depthwise_conv.cu`, `generic_conv.cu`
-- **Codec & Tensor Ops**: `codec_io.cu` (GPU YUV420/444 padding/crop), `layout.cu` (NCHW/NHWC/KRSC transposes), `tensor_ops.cu` (native channel-first `DepthToSpace`/`SpaceToDepth`, `Slice`, `Concat`, `Gather`), `elementwise.cu`, `activation.cu`
+- **Convolutions**: `cutlass.cu` (SM80+ Tensor Core pointwise GEMM with fused bias/LeakyReLU/residual epilogues plus `128×256` and small-grid `64×64` spatial convolutions via vendored CUTLASS, supporting any 8-channel-aligned profile including `mlvc-s-psnr-v1`), `pointwise_conv.cu`, `spatial_conv.cu`, `depthwise_conv.cu` (vectorized 16B `oct` 3×3 depthwise kernel + `quad`/`pair`/scalar fallbacks), `generic_conv.cu`
+- **Codec & Tensor Ops**: `codec_io.cu` (GPU YUV420/444 padding/crop), `layout.cu` (NCHW/NHWC/KRSC transposes), `tensor_ops.cu` (zero-division 3D `DepthToSpace`/`SpaceToDepth`, vectorized `mlvc_copy_fp16` for contiguous channel `Slice`/`Concat`, `Gather`), `elementwise.cu` (contiguous + channel-broadcast fast paths), `activation.cu` (3D-grid vectorized ReGLU)
 - **Fused Subgraphs**: `recurrent_feature.cu`, `quantization_tail.cu`
 - **Diagnostics**: `probe.cu` (exercised by `mlvc_driver_probe`)
 
@@ -55,11 +55,11 @@ The lifecycle is strictly `load -> validate/plan -> capture -> replay`; no graph
 
 In `execution_plan.cpp`, `AotGraph::execute_schedule()` matches fused subgraphs in priority order before falling back to single-node dispatch:
 
-1. **`mlvc_y0_tail_fp16`** (19 nodes, encoder): Fuses first prior split, `y0` normalization/quantization, `y0` prior update, and two trailing `Concat`s, while writing normalized and clipped side outputs kept live for `y1`. Gated on `quant_channels >= 32` so `mlvc-s-psnr-v1` (24 `y` channels) stays on the generic schedule where its smaller workload does not amortize the fused kernel footprint.
+1. **`mlvc_y0_tail_fp16`** (19 nodes, encoder): Fuses first prior split, `y0` normalization/quantization, `y0` prior update, and two trailing `Concat`s, while writing normalized and clipped side outputs kept live for `y1` (enabled for `quant_channels >= 16`, covering both `mlvc-psnr-v1` and `mlvc-s-psnr-v1`).
 2. **`mlvc_y1_tail_fp16`** (15 nodes, encoder): Fuses `y1` quantization, `y1` prior update, residual add, and final scale multiply, writing `y_raw_1` and the decoder input directly.
 3. **`mlvc_feature_update_outputs_fp16`** (11 nodes, decoder): Fuses the `Slice`/`Sigmoid`/binary recurrent update chain and writes all three outputs (`scaled`, `blended`, `feature`) in one launch, eliding the deferred `Concat` and its two copy launches. When `feature` is bound to `ref_feature`, it writes directly to the persistent state buffer; host-visible debug runs use a dedicated output buffer to avoid clobbering still-live reconstruction inputs.
 4. **`mlvc_feature_update_fp16`** (12 nodes, encoder): Fuses the encoder recurrent-feature tail (`Slice`/`Sigmoid`/binary/`Concat`) in place into the next recurrent state.
-5. **Pointwise + ReGLU** (5 nodes), **Pointwise + Epilogue** (2 nodes), and **Standalone ReGLU** (4 nodes).
+5. **Pointwise + ReGLU** (5 nodes), **Pointwise + Epilogue** (2 nodes, supporting both 8-channel-aligned CUTLASS and 128-channel MMA paths), and **Standalone ReGLU** (4 nodes).
 
 **Numeric & performance rules verified on NVIDIA A30**:
 
@@ -85,7 +85,7 @@ The `cpu` backend executes the same Protobuf AOT graphs across Linux, Windows, m
 
 - **FP16 storage, FP32 accumulation**: All neural activations and weights remain FP16 in memory (`Float16Storage`) while GEMM and convolution microkernels accumulate in FP32 and round back to FP16 at node boundaries — matching GPU precision and passing the same strict codec conformance thresholds.
 - **Internal NHWC layout**: 4D FP16 activations (`C > 1`, `H*W > 1`) are executed in 64-byte-aligned NHWC inside the CPU arena with boundary NCHW↔NHWC transposes, enabling contiguous channel vectorization and direct GEMM lowering for 1×1 pointwise convolutions and `im2col`/direct spatial convolutions.
-- **Weight pre-packing**: During `load()`, convolution weights and biases are packed once into microkernel-friendly tile layouts (for example, 16-column `N`-blocks for ARM64 4×16 kernels).
+- **Weight pre-packing & process-wide sharing**: During `load()`, convolution weights and biases are packed once into microkernel-friendly tile layouts (for example, 16-column `N`-blocks for ARM64 4×16 kernels) and deduplicated across concurrent sessions via a weak-reference weight cache (`weight_cache.cpp`).
 - **Buffered Codec I/O**: Implements `BufferedCodecBackend` with persistent YUV420 buffers and vectorized pre/post-processing so `EncoderSession` / `DecoderSession` and `encode_video` / `decode_video` share the same fast path as `driver-cubin`.
 
 ### Runtime ISA Dispatch & Microkernels

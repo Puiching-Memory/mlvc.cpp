@@ -19,7 +19,7 @@ This guide covers prerequisites, CMake configuration across desktop and mobile t
 
 ### Additional Requirements for `driver-cubin` (Linux `x86_64` NVIDIA GPU)
 
-- **Build host**: CUDA Toolkit **`13.3`** (pinned in [`tools/scripts/dependencies.env`](../tools/scripts/dependencies.env)). On Ubuntu 26.04, run `./tools/scripts/bootstrap.sh --with-cuda`.
+- **Build host**: CUDA Toolkit **`>= 12.0`** (CI/packaging pins `13.3` in [`tools/scripts/dependencies.env`](../tools/scripts/dependencies.env); verified on CUDA 12.4 and 13.3). On Ubuntu 26.04, run `./tools/scripts/bootstrap.sh --with-cuda`.
 - **Model embedding (`MLVC_EMBED_MODELS=ON`)**: Python 3 interpreter with `protobuf==6.33.5` (from `build/model-venv` or `tools/python/requirements-proto.txt`) and canonical bundles under `models/canonical/`.
 - **Deployment host**: NVIDIA GPU (`sm_75` Turing or newer; PTX fallback for future architectures via `compute_89`) and a compatible NVIDIA display driver (`libcuda.so.1`). CUDA Toolkit is **not** required on deployment hosts.
 
@@ -36,17 +36,23 @@ This guide covers prerequisites, CMake configuration across desktop and mobile t
 | `MLVC_MODEL_ROOT`         | `${CMAKE_SOURCE_DIR}/models/canonical`         | Directory searched for canonical model bundles when embedding or testing                                                             |
 | `MLVC_TEST_ASSETS_DIR`    | `${CMAKE_SOURCE_DIR}/models/fixtures`          | Directory containing official Python reference fixtures                                                                              |
 | `MLVC_PROTOC_EXECUTABLE`  | *(auto)*                                       | Host `protoc` binary when cross-compiling (required if `CMAKE_CROSSCOMPILING=TRUE` and not in `PATH`)                                |
-| `MLVC_ENABLE_IPO`         | `ON`                                           | Enable LTO/IPO in Release builds (skipped safely on MSVC shared/object targets)                                                      |
+| `MLVC_BUILD_SHARED`       | `ON` (follows `BUILD_SHARED_LIBS`)             | Build `mlvc_codec` as a shared library (`ON`) or static library (`OFF`)                                                              |
+| `MLVC_ENABLE_IPO`         | `ON`                                           | Enable LTO/IPO in Release builds                                                                                                     |
 | `MLVC_WARNINGS_AS_ERRORS` | `OFF`                                          | Treat compiler warnings as errors (`-Werror` / `/WX`)                                                                                |
 | `MLVC_ENABLE_SANITIZERS`  | `OFF`                                          | Enable ASan + UBSan on GCC/Clang (also instruments `libprotobuf-lite` & `mlvc_model_proto` with ASan)                                |
+| `MLVC_ENABLE_TSAN`        | `OFF`                                          | Enable ThreadSanitizer on GCC/Clang (mutually exclusive with `MLVC_ENABLE_SANITIZERS`)                                               |
+| `MLVC_ENABLE_FUZZERS`     | `OFF`                                          | Build libFuzzer harnesses under `tests/fuzz/` (requires Clang)                                                                       |
 | `BUILD_TESTING`           | `ON`                                           | Register CTest unit and conformance targets                                                                                          |
 
 ### Built-In Presets (`CMakePresets.json`)
 
-| Preset                  | Purpose                                                                                                                                  |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `driver-cubin-release`  | Linux `x86_64` Release build with `IPO=ON`, `BUILD_TESTING=ON`, embedded models                                                          |
-| `driver-cubin-sanitize` | Debug host build (`MLVC_EMBED_MODELS=OFF`, `MLVC_ENABLE_SANITIZERS=ON`, `MLVC_WARNINGS_AS_ERRORS=ON`) targeting `mlvc_core_safety_tests` |
+| Preset                  | Purpose                                                                                                                               |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `driver-cubin-release`  | Linux `x86_64` Release build with `IPO=ON`, `BUILD_TESTING=ON`, embedded models                                                       |
+| `driver-cubin-sanitize` | Debug host build (`MLVC_EMBED_MODELS=OFF`, `MLVC_ENABLE_SANITIZERS=ON`, `MLVC_WARNINGS_AS_ERRORS=ON`) running all non-GPU unit tests  |
+| `cpu-release`           | Cross-platform Release build for the `cpu` backend (`MLVC_WARNINGS_AS_ERRORS=ON`, Ninja)                                              |
+| `cpu-sanitize`          | Debug `cpu` backend build with ASan + UBSan across all host unit tests                                                                |
+| `cpu-tsan`              | RelWithDebInfo `cpu` backend build with ThreadSanitizer across all host unit tests                                                    |
 
 ---
 
@@ -134,7 +140,7 @@ Both toolchains automatically enable `MLVC_CPU_ENABLE_ARM64=1` and compile the A
 [`tools/scripts/package.sh`](../tools/scripts/package.sh) builds, runs CTest, audits dynamic linkage with `ldd`, checks embedded model discovery and `mlvc_driver_probe`, writes `BUILD-MANIFEST.txt` and `SHA256SUMS`, and outputs a tarball:
 
 ```bash
-# Deployable release (requires CUDA 13.3, NVIDIA GPU, canonical models, protobuf==6.33.5)
+# Deployable release (requires CUDA >= 12.0, NVIDIA GPU, canonical models, protobuf==6.33.5)
 ./tools/scripts/package.sh --jobs 8
 # -> packages/mlvc_cpp-<version>-driver-cubin-nvidia-linux-x86_64.tar.gz
 
@@ -150,7 +156,7 @@ export MLVC_PREFIX=/opt/mlvc/mlvc_cpp-<version>-driver-cubin-nvidia-linux-x86_64
 
 (cd "$MLVC_PREFIX" && sha256sum -c SHA256SUMS)
 cat "$MLVC_PREFIX/BUILD-MANIFEST.txt"
-ldd "$MLVC_PREFIX/lib/libmlvc_codec.so"          # must show only libcuda.so.1 + system C/C++ libs
+ldd "$MLVC_PREFIX/lib/libmlvc_codec.so"          # must show only system C/C++ libs (libcuda.so.1 is dlopen'd at runtime)
 "$MLVC_PREFIX/bin/mlvc_driver_probe" --iterations 100
 "$MLVC_PREFIX/bin/mlvc_demo" --backend-name
 "$MLVC_PREFIX/bin/mlvc_demo" --list-model-profiles

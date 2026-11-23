@@ -160,6 +160,19 @@ using SpatialConvKernel =
         cutlass::arch::OpMultiplyAdd,
         cutlass::conv::IteratorAlgorithm::kOptimized>::Kernel;
 
+using SpatialConvSmallKernel =
+    typename cutlass::conv::kernel::DefaultConv2dFpropWithBroadcast<
+        Element, cutlass::layout::TensorNHWC,
+        Element, cutlass::layout::TensorNHWC,
+        Element, cutlass::layout::TensorNHWC,
+        float, cutlass::arch::OpClassTensorOp, cutlass::arch::Sm80,
+        cutlass::gemm::GemmShape<64, 64, 32>,
+        cutlass::gemm::GemmShape<32, 32, 32>, InstructionShape,
+        SpatialConvOutputOp,
+        cutlass::gemm::threadblock::GemmIdentityThreadblockSwizzle<>, 3,
+        cutlass::arch::OpMultiplyAdd,
+        cutlass::conv::IteratorAlgorithm::kOptimized>::Kernel;
+
 template <typename Kernel, typename OutputOp>
 __device__ __forceinline__ void initialize_pointwise(
     void* params_storage, const Element* input, const Element* weight,
@@ -211,6 +224,8 @@ static_assert(sizeof(typename SpatialWideResidualKernel::Params) <=
               mlvc::driver_cubin::kCutlassPointwiseParamsStorageBytes);
 static_assert(sizeof(typename SpatialConvKernel::Params) <=
               mlvc::driver_cubin::kCutlassPointwiseParamsStorageBytes);
+static_assert(sizeof(typename SpatialConvSmallKernel::Params) <=
+              mlvc::driver_cubin::kCutlassPointwiseParamsStorageBytes);
 static_assert(sizeof(typename BiasKernel::SharedStorage) == 36864);
 static_assert(sizeof(typename LeakyReluKernel::SharedStorage) == 36864);
 static_assert(sizeof(typename ResidualKernel::SharedStorage) == 36864);
@@ -220,6 +235,8 @@ static_assert(sizeof(typename MediumLeakyReluKernel::SharedStorage) == 49152);
 static_assert(sizeof(typename MediumResidualKernel::SharedStorage) == 49152);
 static_assert(sizeof(typename SpatialWideResidualKernel::SharedStorage) == 61440);
 static_assert(sizeof(typename SpatialConvKernel::SharedStorage) == 73728);
+static_assert(SpatialConvSmallKernel::kThreadCount == 128);
+static_assert(sizeof(typename SpatialConvSmallKernel::SharedStorage) <= 32768);
 
 template <typename Kernel, typename CallbacksParams>
 __device__ __forceinline__ void pointwise_init_body(
@@ -319,6 +336,79 @@ extern "C" __global__ void mlvc_cutlass_spatial_conv_fp16(
     auto* storage = reinterpret_cast<
         typename SpatialConvKernel::SharedStorage*>(shared_storage);
     SpatialConvKernel{}(params, *storage);
+#else
+    (void)params;
+#endif
+}
+
+extern "C" __global__ void mlvc_cutlass_spatial_conv_small_init_fp16(
+    void* params_storage, const Element* input, const Element* weight,
+    const Element* bias, Element* output, int batch_count, int in_channels,
+    int input_height, int input_width, int out_channels, int output_height,
+    int output_width, int kernel_height, int kernel_width, int stride_height,
+    int stride_width, int pad_height, int pad_width)
+{
+#if __CUDA_ARCH__ >= 800
+    if (blockIdx.x != 0 || threadIdx.x != 0)
+        return;
+    const cutlass::Tensor4DCoord input_extent{
+        batch_count, input_height, input_width, in_channels};
+    const cutlass::Tensor4DCoord weight_extent{
+        out_channels, kernel_height, kernel_width, in_channels};
+    const cutlass::Tensor4DCoord output_extent{
+        batch_count, output_height, output_width, out_channels};
+    const cutlass::conv::Conv2dProblemSize problem{
+        input_extent,
+        weight_extent,
+        {pad_height, pad_height, pad_width, pad_width},
+        {stride_height, stride_width},
+        {1, 1},
+        output_extent,
+        cutlass::conv::Mode::kCrossCorrelation,
+        1};
+    typename SpatialConvSmallKernel::Arguments arguments{
+        problem,
+        {const_cast<Element*>(input),
+         cutlass::layout::TensorNHWC::packed(input_extent)},
+        {const_cast<Element*>(weight),
+         cutlass::layout::TensorNHWC::packed(weight_extent)},
+        {output, cutlass::layout::TensorNHWC::packed(output_extent)},
+        {output, cutlass::layout::TensorNHWC::packed(output_extent)},
+        typename SpatialConvOutputOp::Params{1.0F, 0.0F}};
+    arguments.ptr_Vector = const_cast<Element*>(bias);
+    arguments.ldr = 0;
+    *static_cast<typename SpatialConvSmallKernel::Params*>(params_storage) =
+        typename SpatialConvSmallKernel::Params{arguments};
+#else
+    (void)params_storage;
+    (void)input;
+    (void)weight;
+    (void)bias;
+    (void)output;
+    (void)batch_count;
+    (void)in_channels;
+    (void)input_height;
+    (void)input_width;
+    (void)out_channels;
+    (void)output_height;
+    (void)output_width;
+    (void)kernel_height;
+    (void)kernel_width;
+    (void)stride_height;
+    (void)stride_width;
+    (void)pad_height;
+    (void)pad_width;
+#endif
+}
+
+extern "C" __global__ void mlvc_cutlass_spatial_conv_small_fp16(
+    typename SpatialConvSmallKernel::Params params)
+{
+#if __CUDA_ARCH__ >= 800
+    extern __shared__ __align__(16) unsigned char shared_storage[];
+    auto* storage = reinterpret_cast<
+        typename SpatialConvSmallKernel::SharedStorage*>(shared_storage);
+    SpatialConvSmallKernel{}(params, *storage);
 #else
     (void)params;
 #endif
@@ -428,7 +518,8 @@ extern "C" __global__ void mlvc_cutlass_pointwise_medium_init_fp16(
     initialize_pointwise<MediumBiasKernel>(
         params_storage, input, weight, output, out_channels, spatial_count,
         in_channels, typename MediumBiasCallbacks::Params{
-            {{}, {bias, Element(0), {}}, {}}, {output, stride}});
+            {{}, {bias, Element(0), {}}, {}}, {output, stride}},
+        128, 128);
 #else
     (void)params_storage;
     (void)input;
@@ -488,7 +579,8 @@ mlvc_cutlass_pointwise_medium_leaky_relu_init_fp16(
     initialize_pointwise<MediumLeakyReluKernel>(
         params_storage, input, weight, output, out_channels, spatial_count,
         in_channels, typename MediumLeakyReluCallbacks::Params{
-            {{{}, {bias, Element(0), {}}, {}}, {}}, {output, stride}});
+            {{{}, {bias, Element(0), {}}, {}}, {}}, {output, stride}},
+        128, 128);
 #else
     (void)params_storage;
     (void)input;
@@ -520,7 +612,8 @@ mlvc_cutlass_pointwise_medium_residual_init_fp16(
             {{{}, {bias, Element(0), {}}, {}},
              {const_cast<Element*>(residual), Element(0), stride},
              {}},
-            {output, stride}});
+            {output, stride}},
+        128, 128);
 #else
     (void)params_storage;
     (void)input;

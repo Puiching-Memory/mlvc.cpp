@@ -7,7 +7,7 @@
 ```mermaid
 flowchart TD
     CLI["tools/cli/main.cpp (mlvc_demo)"] --> Codec
-    CApp["External C/C++ Consumer"] --> Public["include/mlvc/codec.h (C ABI v2)"]
+    CApp["External C/C++ Consumer"] --> Public["include/mlvc/codec.h (C ABI v2/v3)"]
     Public --> Codec
 
     subgraph CodecLayer["src/codec/ (libmlvc_codec)"]
@@ -113,30 +113,31 @@ At runtime, `create_backend(BackendOptions)` resolves the requested `backend_nam
 
 - **`EncoderSession` / `DecoderSession`**: File-I/O-free, move-only C++ classes holding the model config, entropy coder, bitstream encoder/decoder, inference backend, and GOP/DPB state. Callers push/pull `Yuv420FrameView` and `EncodedFrame` per frame without touching disk.
 - **`encode_video(CodecOptions)` / `decode_video(CodecOptions)`**: Streaming wrappers built on top of the sessions. They read/write YUV420 frames and `mlvc-nalu-v0` Access Units over files, stdin/stdout (`-`), or POSIX named FIFOs, using the double-buffered `BufferedCodecBackend` overlap path whenever `--debug-dir` is disabled.
-- **Public C ABI (`src/codec/c_api.cpp`)**: Wraps `encode_video` / `decode_video` with ABI-versioned structs (`MLVC_CODEC_ABI_VERSION == 2`), translating all C++ exceptions into `-1` return codes and NUL-terminated error strings.
+- **Public C ABI (`src/codec/c_api.cpp`)**: Wraps `encode_video` / `decode_video` and stateful `EncoderSession` / `DecoderSession` with ABI-versioned structs (v2 backward-compatible plus v3 status codes, custom asset readers, logging callbacks, and zero-disk frame sessions), translating all C++ exceptions into status codes and NUL-terminated error strings.
 
 ---
 
 ## Source Tree Map
 
 ```text
-include/mlvc/codec.h            Installed public C ABI v2 header
+include/mlvc/codec.h            Installed public C ABI v2/v3 header
 src/
-  core/                         Model metadata, ModelAssetReader, Tensor/FP16, YUV, scales, rANS, NALU bitstream
+  core/                         Model metadata, SHA-256, logging, ModelAssetReader (mmap/rodata), Tensor/FP16, YUV, scales, rANS, NALU bitstream
   runtime/                      Shared AOT graph loader/IR (aot_graph.*), InferenceBackend & backend registry
   backends/
     selected_backends.cpp       Static registration glue for compiled backends
-    driver_cubin/               NVIDIA Driver API wrapper, fatbin kernels, CUTLASS, CUDA Graph executor
-    cpu/                        Cross-platform FP16 CPU executor, ARM64 ASM / AVX2 / scalar kernels, CpuThreadPool
+    driver_cubin/               Dynamic CUDA Driver API wrapper, fatbin kernels, CUTLASS, CUDA Graph executor
+    cpu/                        Modular FP16 CPU executor (execution_plan, codec_io, weight_cache, aligned_buffer), ARM64 ASM / AVX2 / scalar kernels, CpuThreadPool
   codec/                        EncoderSession, DecoderSession, file/FIFO pipeline, C ABI implementation
   proto/mlvc_model.proto        Shared Python/C++ Protobuf Lite schema
 tools/
-  cli/                          mlvc_demo command-line tool
+  cli/                          mlvc_demo command-line tool (pure public C ABI consumer)
   python/mlvc_tools/            Offline checkpoint AOT compiler, Protobuf bundler, reference generator, profiles.json
   scripts/                      bootstrap.sh, dependencies.env, package.sh
 cmake/                          Dependencies, Protobuf build, binary/model embedding, symbol export map, CMake config
 tests/
-  unit/                         C++, C, and Python unit tests
+  unit/                         C++, C, and Python unit tests (with shared test_support.hpp)
+  fuzz/                         libFuzzer harnesses for bitstream, AOT graph, and entropy decoders
   conformance/                  AOT eager conformance and end-to-end codec compatibility runners
   integration/cmake_consumer/   Installed package CMake/C consumer verification
 third_party/                    Pinned submodules (mlvc, cutlass, protobuf, abseil) and libmlvc attribution

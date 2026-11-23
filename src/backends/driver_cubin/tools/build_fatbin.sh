@@ -4,7 +4,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../../.." && pwd)"
-NVCC="${NVCC:-/usr/local/cuda-13.3/bin/nvcc}"
+NVCC="${NVCC:-$(command -v nvcc || echo /usr/local/cuda/bin/nvcc)}"
 CUTLASS_INCLUDE_DIR="$ROOT/third_party/cutlass/include"
 OUTPUT=""
 
@@ -41,7 +41,7 @@ mkdir -p "$(dirname "$OUTPUT")"
 temporary="$(mktemp "$OUTPUT.tmp.XXXXXX")"
 trap 'rm -f "$temporary"' EXIT
 
-"$NVCC" --fatbin -O3 --std=c++20 --expt-relaxed-constexpr \
+"$NVCC" --fatbin -O3 --std=c++20 --expt-relaxed-constexpr --threads 0 \
     -I"$ROOT/src" \
     -I"$ROOT/src/backends/driver_cubin/kernels" \
     -I"$CUTLASS_INCLUDE_DIR" \

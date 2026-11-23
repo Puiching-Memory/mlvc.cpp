@@ -20,6 +20,13 @@ set(INSTALL_ONLY_PYTHON_MODULE ON CACHE BOOL
     "Do not install the internal msrtc_rans static archive" FORCE)
 add_subdirectory("${MLVC_UPSTREAM_DIR}/packages/msrtc_rans"
                  "${PROJECT_BINARY_DIR}/_deps/msrtc_rans" EXCLUDE_FROM_ALL)
+if(TARGET msrtc_rans)
+    get_target_property(_mlvc_rans_inc msrtc_rans INTERFACE_INCLUDE_DIRECTORIES)
+    if(_mlvc_rans_inc)
+        set_target_properties(msrtc_rans PROPERTIES
+            INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${_mlvc_rans_inc}")
+    endif()
+endif()
 
 include("${PROJECT_SOURCE_DIR}/cmake/ModelProto.cmake")
 
@@ -30,7 +37,7 @@ if(MLVC_BACKEND MATCHES "^(driver_cubin|all)$")
             "CUTLASS source submodule is missing. Run: "
             "git submodule update --init --recursive --depth 1")
     endif()
-    find_package(CUDAToolkit 13.3 REQUIRED)
+    find_package(CUDAToolkit 12.0 REQUIRED)
 endif()
 
 if(MLVC_BACKEND MATCHES "^(cpu|all)$")

@@ -11,6 +11,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -76,6 +78,13 @@ private:
         bool pending = false;
     };
 
+    struct ExternalOutput {
+        std::size_t output_index;
+        TensorId id;
+        DeviceAddress address;
+        std::size_t bytes;
+    };
+
     void load_model(const ModelAssetReader& assets,
                     const std::string& model_name);
     void collect_graph_outputs();
@@ -87,6 +96,8 @@ private:
     void plan_direct_concat_buffers();
 
     void configure_state(const ModelExecutionConfig& config);
+    void warmup_and_capture();
+    void cache_runtime_metadata();
     bool is_state_input(std::size_t index) const;
     bool is_state_output(std::size_t index) const;
     bool is_channel_slice(const Node& node, int start, int end) const;
@@ -100,8 +111,18 @@ private:
     void enqueue_outputs(HostSlot& slot);
     void set_q_index(HostSlot& slot, int shifted_q);
     void finish_submit(HostSlot& slot);
+    void wait_codec_slot_locked(std::size_t slot);
+    bool can_use_cutlass_pointwise(
+        int batch_count, bool has_bias, int in_channels, int spatial_count,
+        int out_channels, int epilogue, float epilogue_alpha,
+        bool has_residual) const noexcept;
 
     const Value& value(TensorId name) const;
+    std::size_t tensor_consumer_count(TensorId id) const noexcept
+    {
+        return id < tensor_consumer_counts_.size()
+            ? tensor_consumer_counts_[id] : 0U;
+    }
 
     template <typename T>
     std::vector<T> initializer_values(TensorId name) const
@@ -112,10 +133,20 @@ private:
             throw std::runtime_error(
                 "driver-cubin: unexpected initializer type " + std::to_string(name));
         }
+        const auto found = host_initializers_.find(name);
+        if (found == host_initializers_.end()) {
+            throw std::runtime_error(
+                "driver-cubin: host initializer not retained for tensor " +
+                std::to_string(name));
+        }
         const std::size_t count = element_count(item.shape);
+        if (found->second.size() != count * sizeof(T)) {
+            throw std::runtime_error(
+                "driver-cubin: host initializer size mismatch for tensor " +
+                std::to_string(name));
+        }
         std::vector<T> result(count);
-        std::memcpy(result.data(), weights_host_.data() + item.host_offset,
-                    result.size() * sizeof(T));
+        std::memcpy(result.data(), found->second.data(), found->second.size());
         return result;
     }
 
@@ -152,8 +183,9 @@ private:
     driver_cubin::Driver& driver_;
     const driver_cubin::Module& module_;
     std::string model_name_;
+    mutable std::mutex exec_mutex_;
     GraphDescriptor graph_;
-    std::vector<std::byte> weights_host_;
+    std::unordered_map<TensorId, std::vector<std::byte>> host_initializers_;
     driver_cubin::DeviceBuffer weights_device_;
     driver_cubin::DeviceBuffer arena_device_;
     driver_cubin::DeviceBuffer reglu_buffer_;
@@ -165,15 +197,11 @@ private:
     std::vector<driver_cubin::DeviceBuffer> concat_buffers_;
     std::unordered_map<std::size_t, driver_cubin::DeviceBuffer>
         feature_update_output_buffers_;
-    std::unordered_map<std::size_t, driver_cubin::DeviceBuffer>
-        cutlass_parameter_buffers_;
     std::unordered_map<
         std::size_t,
         std::array<std::byte,
                    driver_cubin::kCutlassPointwiseParamsStorageBytes>>
         cutlass_host_parameters_;
-    std::unordered_map<std::size_t, driver_cubin::DeviceBuffer>
-        cutlass_spatial_parameter_buffers_;
     std::unordered_map<std::size_t, driver_cubin::DeviceBuffer>
         cutlass_spatial_weight_buffers_;
     std::unordered_map<
@@ -188,12 +216,19 @@ private:
     std::vector<TensorId> direct_concat_values_;
     std::vector<TensorId> output_ids_;
     std::vector<StateBinding> state_bindings_;
+    std::vector<ExternalOutput> external_outputs_;
+    std::vector<std::size_t> decoder_latent_inputs_;
+    std::optional<std::size_t> q_input_index_;
+    DeviceAddress codec_image_address_ = 0;
+    std::size_t codec_yuv_bytes_ = 0;
     std::vector<HostSlot> host_slots_;
     std::vector<Value> values_;
+    std::vector<std::size_t> tensor_consumer_counts_;
     TensorId tensor_id(std::string_view name) const;
     const Value& value(std::string_view name) const { return value(tensor_id(name)); }
     driver_cubin::abi::Function binary_ = nullptr;
     driver_cubin::abi::Function binary_contiguous_ = nullptr;
+    driver_cubin::abi::Function binary_channel_broadcast_ = nullptr;
     driver_cubin::abi::Function unary_ = nullptr;
     driver_cubin::abi::Function feature_update_ = nullptr;
     driver_cubin::abi::Function feature_update_outputs_ = nullptr;
@@ -245,6 +280,8 @@ private:
     int cutlass_log_tile_ = 0;
     driver_cubin::abi::Function cutlass_spatial_convolution_init_ = nullptr;
     driver_cubin::abi::Function cutlass_spatial_convolution_ = nullptr;
+    driver_cubin::abi::Function cutlass_spatial_convolution_small_init_ = nullptr;
+    driver_cubin::abi::Function cutlass_spatial_convolution_small_ = nullptr;
     driver_cubin::abi::Function transpose_ = nullptr;
     driver_cubin::abi::Function oihw_to_krsc_ = nullptr;
     driver_cubin::abi::Function spatial_convolution_mma_ = nullptr;
@@ -253,11 +290,15 @@ private:
     driver_cubin::abi::Function depthwise_convolution_ = nullptr;
     driver_cubin::abi::Function depthwise_convolution_pair_ = nullptr;
     driver_cubin::abi::Function depthwise_convolution_quad_ = nullptr;
+    driver_cubin::abi::Function depthwise_convolution_oct_ = nullptr;
     driver_cubin::abi::Function gather_ = nullptr;
     driver_cubin::abi::Function slice_ = nullptr;
     driver_cubin::abi::Function concat_ = nullptr;
+    driver_cubin::abi::Function copy_ = nullptr;
     driver_cubin::abi::Function depth_to_space_ = nullptr;
     driver_cubin::abi::Function space_to_depth_ = nullptr;
+    driver_cubin::abi::Function depth_to_space_3d_ = nullptr;
+    driver_cubin::abi::Function space_to_depth_3d_ = nullptr;
     driver_cubin::abi::Function yuv420_to_nchw_ = nullptr;
     driver_cubin::abi::Function nchw_to_yuv420_ = nullptr;
     CodecIoConfig codec_io_;

@@ -115,3 +115,117 @@ extern "C" __global__ void mlvc_space_to_depth_fp16(
     output[index] = input[input_index];
 }
 
+extern "C" __global__ void mlvc_copy_fp16(
+    const __half* __restrict__ input, __half* __restrict__ output, int count)
+{
+    const int idx = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    const bool aligned16 =
+        ((reinterpret_cast<std::uintptr_t>(input) & 15U) == 0) &&
+        ((reinterpret_cast<std::uintptr_t>(output) & 15U) == 0);
+    if (aligned16) {
+        const int vec_count = count >> 3;
+        if (idx < vec_count) {
+            reinterpret_cast<uint4*>(output)[idx] =
+                __ldg(reinterpret_cast<const uint4*>(input) + idx);
+        }
+        const int tail_start = vec_count << 3;
+        if (idx < count - tail_start)
+            output[tail_start + idx] = input[tail_start + idx];
+        return;
+    }
+    const int base = idx << 3;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+        if (base + i < count)
+            output[base + i] = input[base + i];
+    }
+}
+
+extern "C" __global__ void mlvc_depth_to_space_3d_fp16(
+    const __half* __restrict__ input, __half* __restrict__ output,
+    int batch_count, int in_channels, int input_height, int input_width,
+    int block_size, int mode)
+{
+    const int output_width = input_width * block_size;
+    const int output_height = input_height * block_size;
+    const int block_sq = block_size * block_size;
+    const int output_channels = in_channels / block_sq;
+    const int x = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    const int y = static_cast<int>(blockIdx.y * blockDim.y + threadIdx.y);
+    const int plane = static_cast<int>(blockIdx.z);
+    if (x >= output_width || y >= output_height ||
+        plane >= batch_count * output_channels) {
+        return;
+    }
+
+    const int n = batch_count == 1 ? 0 : (plane / output_channels);
+    const int channel = batch_count == 1 ? plane : (plane - n * output_channels);
+    int iy, ix, offset_y, offset_x;
+    if ((block_size & (block_size - 1)) == 0) {
+        const int shift = __ffs(block_size) - 1;
+        const int mask = block_size - 1;
+        iy = y >> shift;
+        ix = x >> shift;
+        offset_y = y & mask;
+        offset_x = x & mask;
+    } else {
+        iy = y / block_size;
+        ix = x / block_size;
+        offset_y = y - iy * block_size;
+        offset_x = x - ix * block_size;
+    }
+    const int input_channel = mode == 0
+        ? (offset_y * block_size + offset_x) * output_channels + channel
+        : channel * block_sq + offset_y * block_size + offset_x;
+    const std::size_t input_index =
+        ((static_cast<std::size_t>(n) * in_channels + input_channel) *
+             input_height + iy) * input_width + ix;
+    const std::size_t output_index =
+        (static_cast<std::size_t>(plane) * output_height + y) * output_width + x;
+    output[output_index] = __ldg(input + input_index);
+}
+
+extern "C" __global__ void mlvc_space_to_depth_3d_fp16(
+    const __half* __restrict__ input, __half* __restrict__ output,
+    int batch_count, int in_channels, int input_height, int input_width,
+    int block_size)
+{
+    const int block_sq = block_size * block_size;
+    const int output_width = input_width / block_size;
+    const int output_height = input_height / block_size;
+    const int output_channels = in_channels * block_sq;
+    const int x = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    const int y = static_cast<int>(blockIdx.y * blockDim.y + threadIdx.y);
+    const int plane = static_cast<int>(blockIdx.z);
+    if (x >= output_width || y >= output_height ||
+        plane >= batch_count * output_channels) {
+        return;
+    }
+
+    const int n = batch_count == 1 ? 0 : (plane / output_channels);
+    const int output_channel =
+        batch_count == 1 ? plane : (plane - n * output_channels);
+    int input_channel, input_y, input_x;
+    if ((block_size & (block_size - 1)) == 0) {
+        const int shift = __ffs(block_size) - 1;
+        const int mask = block_size - 1;
+        const int sq_shift = shift * 2;
+        const int sq_mask = block_sq - 1;
+        input_channel = output_channel >> sq_shift;
+        const int offset = output_channel & sq_mask;
+        input_y = (y << shift) + (offset >> shift);
+        input_x = (x << shift) + (offset & mask);
+    } else {
+        input_channel = output_channel / block_sq;
+        const int offset = output_channel - input_channel * block_sq;
+        input_y = y * block_size + offset / block_size;
+        input_x = x * block_size + offset % block_size;
+    }
+    const std::size_t input_index =
+        ((static_cast<std::size_t>(n) * in_channels + input_channel) *
+             input_height + input_y) * input_width + input_x;
+    const std::size_t output_index =
+        (static_cast<std::size_t>(plane) * output_height + y) * output_width + x;
+    output[output_index] = __ldg(input + input_index);
+}
+

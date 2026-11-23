@@ -14,7 +14,7 @@ Passing a model microbenchmark alone does not establish codec compatibility. Thi
 | `mlvc_bitstream`           | *(portable)*                          | `mlvc-nalu-v0` NALU Annex-B builder/parser, EBSP `0x03`, SPS/PPS/VCL syntax, frozen `microsoft/libmlvc` conformance vectors, QP `[0, 51]` checks |
 | `mlvc_model_proto`         | *(portable)*                          | Protobuf Lite serialization/deserialization, schema validation, corrupt/oversized message rejection                                              |
 | `mlvc_runtime_decoupling`  | *(portable)*                          | `ModelAssetReader`, `EncoderSession`/`DecoderSession`, backend registry, `ExecutionPreference`, mock backend isolation                           |
-| `mlvc_c_api`               | *(portable)*                          | Public C ABI v2 struct sizing, version rejection, error buffer handling, null guards                                                             |
+| `mlvc_c_api`               | *(portable)*                          | Public C ABI v2/v3 struct sizing, version rejection, error buffer handling, streaming session & logging guards                                   |
 | `mlvc_public_header`       | *(portable)*                          | Pure C11 compilation check of `include/mlvc/codec.h`                                                                                             |
 | `mlvc_cpu_backend`         | *(when `cpu`/`all`)*                  | CPU execution plan, ISA microkernels, fusion vs. unfused equivalence, `CpuThreadPool`                                                            |
 | `mlvc_driver_cubin_probe`  | `gpu`                                 | CUDA Driver API init, fatbin load, probe kernel launch (`--iterations 100`)                                                                      |
@@ -41,11 +41,16 @@ build/model-venv/bin/python tests/conformance/run_aot_conformance.py \
 
 ### CI Pipeline (`.github/workflows/ci.yml`)
 
-GitHub Actions runs on `ubuntu-26.04` for every push and PR to `main`:
+GitHub Actions runs on every push and PR to `main`:
 
 1. **`model-tools`**: Python 3.12 + PyTorch 2.10.0 CPU + `protobuf==6.33.5` running `aot_tests.py` and `model_package_tests.py`.
-2. **`package` (matrix: GCC and Clang)**: Installs CUDA Toolkit 13.3, runs `tools/scripts/package.sh --skip-gpu-tests --skip-models` with `-Werror`, audits ELF linkage, and uploads compile-only `-ci.tar.gz` artifacts.
-3. **Host sanitizers (GCC)**: Builds and executes `driver-cubin-sanitize` (`mlvc_core_safety` with ASan + UBSan).
+2. **`cpu-matrix` (Linux GCC/Clang, macOS ARM64, Windows MSVC)**: Builds `MLVC_BACKEND=cpu` with warnings-as-errors, runs the complete host CTest suite (including `mlvc_cpu_backend`), installs the SDK, and verifies `tests/integration/cmake_consumer`.
+3. **`sanitizers` (Linux)**: Builds and executes the full CPU host test suite under both **ASan + UBSan** (`cpu-sanitize`) and **ThreadSanitizer** (`cpu-tsan`).
+4. **`package` (matrix: GCC and Clang)**: Installs CUDA Toolkit 13.3, runs `tools/scripts/package.sh --skip-gpu-tests --skip-models` with `-Werror`, audits ELF linkage, runs `driver-cubin-sanitize` across all host unit tests, and uploads compile-only `-ci.tar.gz` artifacts.
+
+### Fuzzing (`tests/fuzz/`)
+
+Enable Clang libFuzzer targets (`mlvc_fuzz_bitstream`, `mlvc_fuzz_aot_graph`, `mlvc_fuzz_entropy`) with `-DMLVC_ENABLE_FUZZERS=ON -DMLVC_BACKEND=none`.
 
 ---
 

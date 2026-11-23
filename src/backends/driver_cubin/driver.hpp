@@ -144,6 +144,25 @@ private:
 
 class Driver final {
 public:
+    class ContextGuard final {
+    public:
+        ContextGuard() = default;
+        ~ContextGuard();
+
+        ContextGuard(const ContextGuard&) = delete;
+        ContextGuard& operator=(const ContextGuard&) = delete;
+        ContextGuard(ContextGuard&& other) noexcept;
+        ContextGuard& operator=(ContextGuard&& other) noexcept;
+
+    private:
+        friend class Driver;
+        explicit ContextGuard(std::shared_ptr<DriverState> state);
+        void reset() noexcept;
+
+        std::shared_ptr<DriverState> state_;
+        bool pushed_ = false;
+    };
+
     explicit Driver(int device_ordinal = 0);
 
     Driver(const Driver&) = delete;
@@ -152,11 +171,11 @@ public:
     Driver& operator=(Driver&&) noexcept = default;
 
     const DeviceInfo& device_info() const noexcept;
+    ContextGuard bind_context() const;
 
     DeviceBuffer allocate(std::size_t bytes) const;
     PinnedHostBuffer allocate_host_pinned(std::size_t bytes) const;
     Event create_event() const;
-    bool pin_host(const void* host_pointer, std::size_t bytes) const;
     Module load_module(std::span<const std::byte> image) const;
 
     void upload_async(const DeviceBuffer& destination,
@@ -167,8 +186,6 @@ public:
     void download_async(void* destination, abi::DeviceAddress source,
                         std::size_t bytes) const;
 
-    // Synchronous transfers for host memory that cuMemHostRegister rejected
-    // (e.g. not page-aligned); async copies require pinned host memory.
     void upload(const DeviceBuffer& destination,
                 const void* source, std::size_t bytes) const;
     void download(void* destination, abi::DeviceAddress source,

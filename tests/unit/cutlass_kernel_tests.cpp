@@ -213,7 +213,7 @@ float pointwise(Driver& driver, Module& module, const Variant& v,
 }
 
 void spatial(Driver& driver, Module& module, int channels, int outputs,
-             int stride, int kernel, int padding)
+             int stride, int kernel, int padding, bool small_tile = false)
 {
     int batch = 1, height = 13, width = 17;
     int oh = (height + 2 * padding - kernel) / stride + 1;
@@ -228,16 +228,24 @@ void spatial(Driver& driver, Module& module, int channels, int outputs,
     auto po = output.address(), ps = storage.address();
     void* init[] = {&ps, &pi, &pw, &pb, &po, &batch, &channels, &height, &width,
                    &outputs, &oh, &ow, &kernel, &kernel, &stride, &stride, &padding, &padding};
-    driver.launch(module.function("mlvc_cutlass_spatial_conv_init_fp16"),
+    driver.launch(module.function(small_tile ? "mlvc_cutlass_spatial_conv_small_init_fp16"
+                                             : "mlvc_cutlass_spatial_conv_init_fp16"),
                   {1, 1, 1}, {1, 1, 1}, 0, init);
     alignas(16) std::array<std::byte, kCutlassPointwiseParamsStorageBytes> params{};
     driver.download(params.data(), ps, params.size());
     void* args[] = {params.data()};
-    auto function = module.function("mlvc_cutlass_spatial_conv_fp16");
-    driver.set_max_dynamic_shared_memory(function, 73728);
-    driver.launch(function, {unsigned((oh * ow + 127) / 128),
-                            unsigned((outputs + 255) / 256), 1},
-                  {256, 1, 1}, 73728, args);
+    auto function = module.function(small_tile ? "mlvc_cutlass_spatial_conv_small_fp16"
+                                               : "mlvc_cutlass_spatial_conv_fp16");
+    if (small_tile) {
+        driver.launch(function, {unsigned((oh * ow + 63) / 64),
+                                 unsigned((outputs + 63) / 64), 1},
+                      {128, 1, 1}, 32768, args);
+    } else {
+        driver.set_max_dynamic_shared_memory(function, 73728);
+        driver.launch(function, {unsigned((oh * ow + 127) / 128),
+                                 unsigned((outputs + 255) / 256), 1},
+                      {256, 1, 1}, 73728, args);
+    }
     std::vector<Half> actual(std::size_t(oh) * ow * outputs), expected(actual.size());
     driver.download(actual.data(), po, output.size());
     for (int y = 0; y < oh; ++y) {
@@ -352,11 +360,13 @@ int main(int argc, char** argv)
                 max_error = std::max(
                     max_error,
                     pointwise(driver, module, v, shape[0], shape[1], shape[2]));
-        spatial(driver, module, 24, 24, 1, 3, 1);
-        spatial(driver, module, 40, 264, 2, 3, 1);
-        spatial(driver, module, 8, 8, 2, 2, 0);
-        spatial(driver, module, 128, 256, 2, 2, 0);
-        std::printf("CUTLASS kernels: %d GEMM and 4 convolution cases passed"
+        for (bool small_tile : {false, true}) {
+            spatial(driver, module, 24, 24, 1, 3, 1, small_tile);
+            spatial(driver, module, 40, 264, 2, 3, 1, small_tile);
+            spatial(driver, module, 8, 8, 2, 2, 0, small_tile);
+            spatial(driver, module, 128, 256, 2, 2, 0, small_tile);
+        }
+        std::printf("CUTLASS kernels: %d GEMM and 8 convolution cases passed"
                     " (max abs error %.5f)\n",
                     int(sizeof(variants) / sizeof(variants[0]) * 6),
                     max_error);

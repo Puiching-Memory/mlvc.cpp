@@ -55,50 +55,60 @@ bool AotGraph::launch_cutlass_spatial(
         return false;
     }
 
+    const int output_spatial = output_height * output_width;
+    const unsigned int large_blocks =
+        divide_up(output_spatial, 128) * divide_up(out_channels, 256);
+    const bool use_small_spatial =
+        large_blocks < static_cast<unsigned int>(
+                           std::max(1, driver_.device_info().multiprocessor_count / 2));
+
     const std::size_t node_index = node.index;
-    auto [params, params_inserted] =
-        cutlass_spatial_parameter_buffers_.try_emplace(node_index);
-    auto [transformed_weight, weight_inserted] =
-        cutlass_spatial_weight_buffers_.try_emplace(node_index);
-    if (params_inserted != weight_inserted)
-        throw std::runtime_error("driver-cubin: inconsistent spatial CUTLASS state");
+    auto [host_params, inserted] =
+        cutlass_spatial_host_parameters_.try_emplace(node_index);
 
     DeviceAddress input_nhwc = spatial_input_buffer_.address();
     DeviceAddress output_nhwc = spatial_output_buffer_.address();
-    if (params_inserted) {
-        const std::size_t weight_elements =
-            static_cast<std::size_t>(out_channels) * in_channels *
-            kernel_height * kernel_width;
-        params->second = driver_.allocate(
-            driver_cubin::kCutlassPointwiseParamsStorageBytes);
-        transformed_weight->second =
-            driver_.allocate(weight_elements * sizeof(Float16Storage));
-        DeviceAddress weight_krsc = transformed_weight->second.address();
-        void* transform_parameters[] = {
-            &weight, &weight_krsc, &out_channels, &in_channels,
-            &kernel_height, &kernel_width};
-        driver_.launch(
-            oihw_to_krsc_, {divide_up(weight_elements, 256), 1, 1},
-            {256, 1, 1}, 0, transform_parameters);
+    if (inserted) {
+        try {
+            const std::size_t weight_elements =
+                static_cast<std::size_t>(out_channels) * in_channels *
+                kernel_height * kernel_width;
+            driver_cubin::DeviceBuffer params_buffer = driver_.allocate(
+                driver_cubin::kCutlassPointwiseParamsStorageBytes);
+            auto [transformed_weight, weight_inserted] =
+                cutlass_spatial_weight_buffers_.try_emplace(node_index);
+            if (!weight_inserted)
+                throw std::runtime_error(
+                    "driver-cubin: inconsistent spatial CUTLASS state");
+            transformed_weight->second =
+                driver_.allocate(weight_elements * sizeof(Float16Storage));
+            DeviceAddress weight_krsc = transformed_weight->second.address();
+            void* transform_parameters[] = {
+                &weight, &weight_krsc, &out_channels, &in_channels,
+                &kernel_height, &kernel_width};
+            driver_.launch(
+                oihw_to_krsc_, {divide_up(weight_elements, 256), 1, 1},
+                {256, 1, 1}, 0, transform_parameters);
 
-        DeviceAddress params_storage = params->second.address();
-        void* init_parameters[] = {
-            &params_storage, &input_nhwc, &weight_krsc, &bias, &output_nhwc,
-            &batch_count, &in_channels, &input_height, &input_width,
-            &out_channels, &output_height, &output_width, &kernel_height,
-            &kernel_width, &stride_height, &stride_width, &pad_height,
-            &pad_width};
-        driver_.launch(
-            cutlass_spatial_convolution_init_, {1, 1, 1}, {1, 1, 1}, 0,
-            init_parameters);
-        auto [host_params, host_params_inserted] =
-            cutlass_spatial_host_parameters_.try_emplace(node_index);
-        if (!host_params_inserted)
-            throw std::runtime_error(
-                "driver-cubin: duplicate spatial CUTLASS host state");
-        driver_.download(
-            host_params->second.data(), params->second.address(),
-            host_params->second.size());
+            DeviceAddress params_storage = params_buffer.address();
+            void* init_parameters[] = {
+                &params_storage, &input_nhwc, &weight_krsc, &bias, &output_nhwc,
+                &batch_count, &in_channels, &input_height, &input_width,
+                &out_channels, &output_height, &output_width, &kernel_height,
+                &kernel_width, &stride_height, &stride_width, &pad_height,
+                &pad_width};
+            driver_.launch(
+                use_small_spatial ? cutlass_spatial_convolution_small_init_
+                                  : cutlass_spatial_convolution_init_,
+                {1, 1, 1}, {1, 1, 1}, 0, init_parameters);
+            driver_.download(
+                host_params->second.data(), params_buffer.address(),
+                host_params->second.size());
+        } catch (...) {
+            cutlass_spatial_host_parameters_.erase(node_index);
+            cutlass_spatial_weight_buffers_.erase(node_index);
+            throw;
+        }
     }
 
     int input_rows = in_channels;
@@ -109,16 +119,18 @@ bool AotGraph::launch_cutlass_spatial(
         transpose_, {divide_up(input_columns, 32), divide_up(input_rows, 32), 1},
         {32, 8, 1}, 0, input_transform_parameters);
 
-    auto host_params = cutlass_spatial_host_parameters_.find(node_index);
-    if (host_params == cutlass_spatial_host_parameters_.end())
-        throw std::runtime_error(
-            "driver-cubin: missing spatial CUTLASS host parameters");
     void* convolution_parameters[] = {host_params->second.data()};
-    const int output_spatial = output_height * output_width;
-    driver_.launch(
-        cutlass_spatial_convolution_,
-        {divide_up(output_spatial, 128), divide_up(out_channels, 256), 1},
-        {256, 1, 1}, 73728U, convolution_parameters);
+    if (use_small_spatial) {
+        driver_.launch(
+            cutlass_spatial_convolution_small_,
+            {divide_up(output_spatial, 64), divide_up(out_channels, 64), 1},
+            {128, 1, 1}, 32768U, convolution_parameters);
+    } else {
+        driver_.launch(
+            cutlass_spatial_convolution_,
+            {divide_up(output_spatial, 128), divide_up(out_channels, 256), 1},
+            {256, 1, 1}, 73728U, convolution_parameters);
+    }
 
     int output_rows = output_spatial;
     int output_columns = out_channels;
@@ -131,20 +143,28 @@ bool AotGraph::launch_cutlass_spatial(
     return true;
 }
 
+bool AotGraph::can_use_cutlass_pointwise(
+    int batch_count, bool has_bias, int in_channels, int spatial_count,
+    int out_channels, int epilogue, float epilogue_alpha,
+    bool has_residual) const noexcept
+{
+    return driver_.device_info().compute_major >= 8 && batch_count == 1 &&
+           has_bias && spatial_count >= 920 && (spatial_count % 8) == 0 &&
+           (in_channels % 8) == 0 && (out_channels % 8) == 0 &&
+           epilogue >= 0 && epilogue <= 2 &&
+           (epilogue != 1 || std::abs(epilogue_alpha - 0.01F) <= 1.0e-7F) &&
+           (epilogue != 2 || has_residual);
+}
+
 bool AotGraph::launch_cutlass_pointwise(
     const Node& node, DeviceAddress input, DeviceAddress weight,
     DeviceAddress bias, DeviceAddress residual, DeviceAddress output,
     int batch_count, int in_channels, int spatial_count, int out_channels,
     int epilogue, float epilogue_alpha)
 {
-    if (driver_.device_info().compute_major < 8 || batch_count != 1 ||
-        bias == 0 ||
-        spatial_count < 920 || (spatial_count % 8) != 0 ||
-        (in_channels % 8) != 0 || (out_channels % 8) != 0 ||
-        epilogue < 0 || epilogue > 2 ||
-        (epilogue == 1 &&
-         std::abs(epilogue_alpha - 0.01F) > 1.0e-7F) ||
-        (epilogue == 2 && residual == 0)) {
+    if (!can_use_cutlass_pointwise(batch_count, bias != 0, in_channels,
+                                   spatial_count, out_channels, epilogue,
+                                   epilogue_alpha, residual != 0)) {
         return false;
     }
 
@@ -216,32 +236,29 @@ bool AotGraph::launch_cutlass_pointwise(
     }
 
     const std::size_t node_index = node.index;
-    auto [found, inserted] = cutlass_parameter_buffers_.try_emplace(node_index);
+    auto [host_params, inserted] =
+        cutlass_host_parameters_.try_emplace(node_index);
     if (inserted) {
-        found->second = driver_.allocate(
-            driver_cubin::kCutlassPointwiseParamsStorageBytes);
-        DeviceAddress params_storage = found->second.address();
-        void* init_parameters[] = {
-            &params_storage, &input, &weight, &bias, &residual, &output,
-            &out_channels, &spatial_count, &in_channels, &log_tile};
-        driver_.launch(
-            init, {1, 1, 1}, {1, 1, 1}, 0,
-            std::span<void*>(init_parameters,
-                             cutlass_log_tile_ > 0 ? 10 : 9));
-        auto [host_params, host_params_inserted] =
-            cutlass_host_parameters_.try_emplace(node_index);
-        if (!host_params_inserted)
-            throw std::runtime_error(
-                "driver-cubin: duplicate CUTLASS host state");
-        driver_.download(
-            host_params->second.data(), found->second.address(),
-            host_params->second.size());
+        try {
+            driver_cubin::DeviceBuffer params_buffer = driver_.allocate(
+                driver_cubin::kCutlassPointwiseParamsStorageBytes);
+            DeviceAddress params_storage = params_buffer.address();
+            void* init_parameters[] = {
+                &params_storage, &input, &weight, &bias, &residual, &output,
+                &out_channels, &spatial_count, &in_channels, &log_tile};
+            driver_.launch(
+                init, {1, 1, 1}, {1, 1, 1}, 0,
+                std::span<void*>(init_parameters,
+                                 cutlass_log_tile_ > 0 ? 10 : 9));
+            driver_.download(
+                host_params->second.data(), params_buffer.address(),
+                host_params->second.size());
+        } catch (...) {
+            cutlass_host_parameters_.erase(node_index);
+            throw;
+        }
     }
 
-    auto host_params = cutlass_host_parameters_.find(node_index);
-    if (host_params == cutlass_host_parameters_.end())
-        throw std::runtime_error(
-            "driver-cubin: missing CUTLASS host parameters");
     void* parameters[] = {host_params->second.data()};
     const unsigned int tile_rows =
         variant == kSpatialWideResidual ? 64U : 128U;
@@ -314,6 +331,32 @@ void AotGraph::execute(const Node& node, const Value* output_override,
                 &lhs, &rhs, &result, &count, &operation};
             launch_linear(binary_contiguous_, (count_size + 1) / 2,
                           contiguous_parameters);
+        } else if (ld == od && rd[0] == 1 && rd[1] == od[1] &&
+                   rd[2] == 1 && rd[3] == 1) {
+            int batch = od[0], channels = od[1], spatial = od[2] * od[3];
+            int swapped = 0;
+            void* bcast_parameters[] = {
+                &lhs, &rhs, &result, &batch, &channels, &spatial,
+                &operation, &swapped};
+            driver_.launch(
+                binary_channel_broadcast_,
+                {divide_up(static_cast<std::size_t>(spatial + 1) / 2, 128),
+                 static_cast<unsigned int>(channels),
+                 static_cast<unsigned int>(batch)},
+                {128, 1, 1}, 0, bcast_parameters);
+        } else if (rd == od && ld[0] == 1 && ld[1] == od[1] &&
+                   ld[2] == 1 && ld[3] == 1) {
+            int batch = od[0], channels = od[1], spatial = od[2] * od[3];
+            int swapped = 1;
+            void* bcast_parameters[] = {
+                &rhs, &lhs, &result, &batch, &channels, &spatial,
+                &operation, &swapped};
+            driver_.launch(
+                binary_channel_broadcast_,
+                {divide_up(static_cast<std::size_t>(spatial + 1) / 2, 128),
+                 static_cast<unsigned int>(channels),
+                 static_cast<unsigned int>(batch)},
+                {128, 1, 1}, 0, bcast_parameters);
         } else {
             launch_linear(binary_, count_size, parameters);
         }
@@ -361,62 +404,78 @@ void AotGraph::execute(const Node& node, const Value* output_override,
         int sh = strides.at(0), sw = strides.at(1);
         int ph = pads.at(0), pw = pads.at(1);
         int spatial = oh * ow;
-        const bool use_pointwise =
+        const bool is_pointwise_1x1 =
             groups == 1 && kh == 1 && kw == 1 &&
             sh == 1 && sw == 1 && ph == 0 && pw == 0 &&
-            ih == oh && iw == ow && ic % 16 == 0 && oc % 64 == 0;
-        if (use_pointwise) {
+            ih == oh && iw == ow;
+        if (is_pointwise_1x1) {
             if (launch_cutlass_pointwise(
                     node, input, weight, bias, epilogue_input, result,
                     n, ic, spatial, oc, epilogue, epilogue_alpha)) {
                 return;
             }
-            if (oc % 128 == 0) {
-                const bool use_mma = driver_.device_info().compute_major >= 8;
-                if (use_mma) {
-                    void* mma_parameters[] = {
-                        &input, &weight, &bias, &result, &n, &ic, &spatial,
-                        &oc, &epilogue_input, &epilogue, &epilogue_alpha};
-                    const unsigned int large_tile_blocks =
-                        divide_up(spatial, 64) * divide_up(oc, 128) * n;
-                    const bool use_small_tile = large_tile_blocks <
-                        static_cast<unsigned int>(
-                            driver_.device_info().multiprocessor_count * 2);
-                    driver_.launch(
-                        use_small_tile ? pointwise_convolution_mma_small_
-                                       : pointwise_convolution_mma_,
-                        {divide_up(spatial, 64),
-                         divide_up(oc, use_small_tile ? 64 : 128),
-                         static_cast<unsigned int>(n)},
-                        {32, 8, 1}, 0, mma_parameters);
+            if (ic % 16 == 0 && oc % 64 == 0) {
+                if (oc % 128 == 0) {
+                    const bool use_mma = driver_.device_info().compute_major >= 8;
+                    if (use_mma) {
+                        void* mma_parameters[] = {
+                            &input, &weight, &bias, &result, &n, &ic, &spatial,
+                            &oc, &epilogue_input, &epilogue, &epilogue_alpha};
+                        const unsigned int large_tile_blocks =
+                            divide_up(spatial, 64) * divide_up(oc, 128) * n;
+                        const bool use_small_tile = large_tile_blocks <
+                            static_cast<unsigned int>(
+                                driver_.device_info().multiprocessor_count * 2);
+                        driver_.launch(
+                            use_small_tile ? pointwise_convolution_mma_small_
+                                           : pointwise_convolution_mma_,
+                            {divide_up(spatial, 64),
+                             divide_up(oc, use_small_tile ? 64 : 128),
+                             static_cast<unsigned int>(n)},
+                            {32, 8, 1}, 0, mma_parameters);
+                    } else {
+                        if (epilogue != 0) {
+                            throw std::runtime_error(
+                                "driver-cubin: epilogue fusion requires Ampere+ kernel");
+                        }
+                        void* pointwise_parameters[] = {
+                            &input, &weight, &bias, &result, &n, &ic, &spatial,
+                            &oc};
+                        driver_.launch(pointwise_convolution_balanced_,
+                            {divide_up(spatial, 64), divide_up(oc, 128),
+                             static_cast<unsigned int>(n)},
+                            {32, 8, 1}, 0, pointwise_parameters);
+                    }
                 } else {
+                    if (epilogue != 0) {
+                        throw std::runtime_error(
+                            "driver-cubin: epilogue fusion requires Ampere+ kernel");
+                    }
                     void* pointwise_parameters[] = {
-                        &input, &weight, &bias, &result, &n, &ic, &spatial,
-                        &oc};
-                    driver_.launch(pointwise_convolution_balanced_,
-                        {divide_up(spatial, 64), divide_up(oc, 128),
+                        &input, &weight, &bias, &result, &n, &ic, &spatial, &oc};
+                    driver_.launch(pointwise_convolution_,
+                        {divide_up(spatial, 16), divide_up(oc, 64),
                          static_cast<unsigned int>(n)},
-                        {32, 8, 1}, 0, pointwise_parameters);
+                        {32, 4, 1}, 0, pointwise_parameters);
                 }
-            } else {
-                void* pointwise_parameters[] = {
-                    &input, &weight, &bias, &result, &n, &ic, &spatial, &oc};
-                driver_.launch(pointwise_convolution_,
-                    {divide_up(spatial, 16), divide_up(oc, 64),
-                     static_cast<unsigned int>(n)},
-                    {32, 4, 1}, 0, pointwise_parameters);
+                return;
             }
-            return;
+            if (epilogue != 0) {
+                throw std::runtime_error(
+                    "driver-cubin: pointwise epilogue failed to dispatch");
+            }
         }
-        const int reduction = ic * kh * kw;
-        const bool use_spatial = groups == 1 && reduction % 16 == 0 &&
-                                 oc % 64 == 0;
-        if (use_spatial) {
+        if (groups == 1 && kh > 1 && kw > 1) {
             if (launch_cutlass_spatial(
                     node, input, weight, bias, result, n, ic, ih, iw, oc,
                     oh, ow, kh, kw, sh, sw, ph, pw)) {
                 return;
             }
+        }
+        const int reduction = ic * kh * kw;
+        const bool use_spatial = groups == 1 && reduction % 16 == 0 &&
+                                 oc % 64 == 0;
+        if (use_spatial) {
             void* spatial_parameters[] = {
                 &input, &weight, &bias, &result, &n, &ic, &ih, &iw,
                 &oc, &oh, &ow, &kh, &kw, &sh, &sw, &ph, &pw};
@@ -438,6 +497,23 @@ void AotGraph::execute(const Node& node, const Value* output_override,
         const bool use_depthwise = groups == ic && oc == ic &&
                                    weight_value.shape.at(1) == 1;
         if (use_depthwise) {
+            const bool use_octs = ow % 8 == 0 && kh == 3 && kw == 3 &&
+                sh == 1 && sw == 1 && ph == 1 && pw == 1 &&
+                ih == oh && iw == ow;
+            if (use_octs) {
+                void* oct_parameters[] = {
+                    &input, &weight, &bias, &result, &n, &ic,
+                    &ih, &iw, &oh, &ow};
+                const std::size_t total_octs =
+                    static_cast<std::size_t>(oh) * (ow / 8);
+                driver_.launch(
+                    depthwise_convolution_oct_,
+                    {divide_up(total_octs, 128),
+                     static_cast<unsigned int>(oc),
+                     static_cast<unsigned int>(n)},
+                    {128, 1, 1}, 0, oct_parameters);
+                return;
+            }
             void* depthwise_parameters[] = {
                 &input, &weight, &bias, &result, &n, &ic, &ih, &iw,
                 &oh, &ow, &kh, &kw, &sh, &sw, &ph, &pw};
@@ -512,6 +588,21 @@ void AotGraph::execute(const Node& node, const Value* output_override,
         }
         DeviceAddress input = input_value.address;
         DeviceAddress result = output.address;
+        const bool contiguous_channel_slice =
+            od[0] == 1 && id[0] == 1 &&
+            starts[0] == 0 && starts[2] == 0 && starts[3] == 0 &&
+            steps[0] == 1 && steps[1] == 1 && steps[2] == 1 && steps[3] == 1 &&
+            od[2] == id[2] && od[3] == id[3] &&
+            output.dtype == DataType::FP16;
+        if (contiguous_channel_slice && count_size > 0) {
+            DeviceAddress src = input +
+                static_cast<std::size_t>(starts[1]) *
+                static_cast<std::size_t>(id[2]) * id[3] *
+                sizeof(Float16Storage);
+            void* copy_parameters[] = {&src, &result, &count};
+            launch_linear(copy_, divide_up(count_size, 8), copy_parameters);
+            return;
+        }
         void* parameters[] = {
             &input, &result, &count,
             const_cast<int*>(&od[0]), const_cast<int*>(&od[1]),
@@ -542,7 +633,16 @@ void AotGraph::execute(const Node& node, const Value* output_override,
                 dtype_bytes(output.dtype);
             const DeviceAddress direct_address = result +
                 static_cast<std::size_t>(axis_offset) * channel_bytes;
-            if (axis != 1 || od[0] != 1 || input != direct_address) {
+            if (axis == 1 && od[0] == 1 && input == direct_address) {
+                // Already written directly into the destination slice.
+            } else if (axis == 1 && od[0] == 1 && id[0] == 1 &&
+                       id[2] == od[2] && id[3] == od[3] &&
+                       output.dtype == DataType::FP16 && input_count > 0) {
+                DeviceAddress dst = direct_address;
+                void* copy_parameters[] = {
+                    &input, &dst, &input_count_parameter};
+                launch_linear(copy_, divide_up(input_count, 8), copy_parameters);
+            } else {
                 void* parameters[] = {
                     &input, &result, &input_count_parameter,
                     const_cast<int*>(&id[0]), const_cast<int*>(&id[1]),
@@ -563,12 +663,20 @@ void AotGraph::execute(const Node& node, const Value* output_override,
         const auto in = dims4(input_value.shape);
         DeviceAddress input = input_value.address;
         DeviceAddress result = output.address;
-        int channels = in[1], height = in[2], width = in[3];
+        int batch = in[0], channels = in[1], height = in[2], width = in[3];
         int block = node.block_size();
         int mode = 1;
+        const int out_channels = channels / (block * block);
+        const int out_height = height * block;
+        const int out_width = width * block;
         void* parameters[] = {
-            &input, &result, &count, &channels, &height, &width, &block, &mode};
-        launch_linear(depth_to_space_, count_size, parameters);
+            &input, &result, &batch, &channels, &height, &width, &block, &mode};
+        driver_.launch(
+            depth_to_space_3d_,
+            {divide_up(static_cast<std::size_t>(out_width), 32),
+             divide_up(static_cast<std::size_t>(out_height), 8),
+             static_cast<unsigned int>(batch * out_channels)},
+            {32, 8, 1}, 0, parameters);
         return;
     }
 
@@ -577,11 +685,19 @@ void AotGraph::execute(const Node& node, const Value* output_override,
         const auto in = dims4(input_value.shape);
         DeviceAddress input = input_value.address;
         DeviceAddress result = output.address;
-        int channels = in[1], height = in[2], width = in[3];
+        int batch = in[0], channels = in[1], height = in[2], width = in[3];
         int block = node.block_size();
+        const int out_channels = channels * block * block;
+        const int out_height = height / block;
+        const int out_width = width / block;
         void* parameters[] = {
-            &input, &result, &count, &channels, &height, &width, &block};
-        launch_linear(space_to_depth_, count_size, parameters);
+            &input, &result, &batch, &channels, &height, &width, &block};
+        driver_.launch(
+            space_to_depth_3d_,
+            {divide_up(static_cast<std::size_t>(out_width), 32),
+             divide_up(static_cast<std::size_t>(out_height), 8),
+             static_cast<unsigned int>(batch * out_channels)},
+            {32, 8, 1}, 0, parameters);
         return;
     }
 

@@ -1,58 +1,38 @@
 #include "aot_graph.hpp"
 
 #include <array>
-#include <limits>
-#include <numeric>
+#include <cstddef>
+#include <cstdint>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace mlvc::driver_cubin_backend {
 
 std::size_t element_count(const std::vector<int64_t>& shape)
 {
-    return std::accumulate(shape.begin(), shape.end(), std::size_t{1},
-                           [](std::size_t value, int64_t dimension) {
-                               if (dimension <= 0 ||
-                                   value > std::numeric_limits<std::size_t>::max() /
-                                               static_cast<std::size_t>(dimension))
-                                   throw std::runtime_error("driver-cubin: invalid tensor shape");
-                               return value * static_cast<std::size_t>(dimension);
-                           });
+    return aot::checked_element_count(shape);
 }
 
 std::size_t dtype_bytes(DataType dtype)
 {
-    if (dtype == DataType::FP16) return 2;
-    if (dtype == DataType::INT32) return 4;
-    if (dtype == DataType::INT64) return 8;
-    throw std::runtime_error("driver-cubin: unsupported AOT dtype " + std::to_string(static_cast<int>(dtype)));
+    return aot::dtype_byte_size(dtype);
 }
 
 TensorDataType public_dtype(DataType dtype)
 {
-    if (dtype == DataType::FP16) return TensorDataType::kFloat16;
-    if (dtype == DataType::INT32) return TensorDataType::kInt32;
-    throw std::runtime_error("driver-cubin: unsupported graph I/O dtype " + std::to_string(static_cast<int>(dtype)));
+    return aot::to_public_dtype(dtype);
 }
 
 std::array<int, 4> dims4(const std::vector<int64_t>& shape)
 {
-    if (shape.size() > 4)
-        throw std::runtime_error("driver-cubin: tensors with rank > 4 are unsupported");
-    std::array<int, 4> result{1, 1, 1, 1};
-    const std::size_t offset = 4 - shape.size();
-    for (std::size_t i = 0; i < shape.size(); ++i) {
-        if (shape[i] <= 0 || shape[i] > std::numeric_limits<int>::max())
-            throw std::runtime_error("driver-cubin: invalid tensor dimension");
-        result[offset + i] = static_cast<int>(shape[i]);
-    }
-    return result;
+    return aot::pad_dims_to_4d(shape);
 }
 
 unsigned int divide_up(std::size_t value, unsigned int divisor)
 {
-    return static_cast<unsigned int>((value + divisor - 1) / divisor);
+    return aot::divide_up(value, divisor);
 }
 
 const Value& AotGraph::value(TensorId name) const

@@ -4,24 +4,24 @@
 
 ---
 
-## 1. Public C ABI v2 (`include/mlvc/codec.h`)
+## 1. Public C ABI v2 / v3 (`include/mlvc/codec.h`)
 
 Only [`include/mlvc/codec.h`](../include/mlvc/codec.h) is installed as part of the public SDK. All internal C++, runtime, CUDA, CUTLASS, Protobuf, and Abseil headers remain private.
 
 ### ABI Contract
 
-- **Version**: `MLVC_CODEC_ABI_VERSION == 2` (`MLVC_CODEC_OPTIONS_V2_SIZE`, `MLVC_CODEC_STATS_V2_SIZE`).
-- **Initialization**: Always call `mlvc_codec_options_init(&options)` and `mlvc_codec_stats_init(&stats)` before populating fields so `struct_size` and `abi_version` are set. Incompatible callers are rejected cleanly.
-- **Error handling**: C++ exceptions never cross the ABI boundary. `mlvc_encode()` and `mlvc_decode()` return `0` on success and `-1` on failure, writing a NUL-terminated diagnostic message into `error_buffer` (when non-null and `error_capacity > 0`).
-- **Entry points**:
-  - `mlvc_backend_name()`: Returns the default compiled backend name (e.g. `"driver-cubin"`, `"cpu"`, or `"none"`).
-  - `mlvc_encode(options, stats, error_buffer, error_capacity)`
-  - `mlvc_decode(options, stats, error_buffer, error_capacity)`
-- **Model selection via `options.model_dir`**:
+- **Versioning**:
+  - **ABI v2 (`MLVC_CODEC_ABI_VERSION == 2`)**: Preserved for full backward compatibility (`mlvc_codec_options`, `mlvc_codec_stats`, `mlvc_encode`, `mlvc_decode`, `mlvc_backend_name`).
+  - **ABI v3 (`MLVC_CODEC_ABI_V3_VERSION == 3`)**: Adds structured status codes (`mlvc_status`), process-wide logging (`mlvc_set_log_callback`), runtime backend/profile discovery (`mlvc_list_backends`, `mlvc_list_model_profiles`), extended video options (`mlvc_video_options`, `mlvc_encode_video`, `mlvc_decode_video`), custom model asset callbacks (`mlvc_asset_reader`), and stateful file-I/O-free per-frame sessions (`mlvc_encoder_*`, `mlvc_decoder_*`) with strided YUV420 frames and `force_idr`.
+- **Initialization**: Always call the matching `*_init()` helper (`mlvc_codec_options_init`, `mlvc_codec_stats_init`, `mlvc_video_options_init`, `mlvc_session_options_init`, `mlvc_encode_params_init`) so `struct_size` and `abi_version` are populated.
+- **Error handling**: C++ exceptions never cross the ABI boundary. v2 entry points return `0` / `-1`; v3 entry points return typed `mlvc_status` codes (`MLVC_STATUS_OK`, `MLVC_STATUS_INVALID_ARGUMENT`, `MLVC_STATUS_ABI_MISMATCH`, `MLVC_STATUS_IO_ERROR`, `MLVC_STATUS_BITSTREAM_ERROR`, `MLVC_STATUS_BACKEND_ERROR`, etc.) and write a NUL-terminated diagnostic into `error_buffer`.
+- **Cross-platform DLL / visibility macros**: Windows consumers automatically receive `__declspec(dllimport)` (or empty when compiling against a static `MLVC_BUILD_SHARED=OFF` target with `MLVC_CODEC_STATIC=1`).
+- **Model selection via `model_dir` / `asset_reader`**:
   - `NULL` or `""`: Uses embedded `mlvc-psnr-v1` (in embedded builds).
   - `"embedded:<profile>"`: Selects a specific embedded profile (e.g. `"embedded:mlvc-s-psnr-v1"`).
-  - `"/path/to/bundle"`: Loads a canonical directory bundle.
-- **Streamable paths**: `input_path` / `output_path` accept regular files, `"-"` (stdin/stdout), and POSIX named FIFOs. On `mlvc_decode()`, setting `width = 0` and `height = 0` auto-detects display dimensions from bitstream `SPS`.
+  - `"/path/to/bundle"`: Loads and SHA-256-verifies a canonical directory bundle (zero-copy `mmap` for large weights).
+  - `asset_reader` (v3): Custom C callbacks (`exists`, `read_binary`, `free_buffer`) for in-memory or mobile asset-pack loading without unpacking to disk.
+- **Streamable paths**: `input_path` / `output_path` accept regular files, `"-"` (stdin/stdout, automatically switched to binary mode on Windows), and POSIX named FIFOs. On decode, setting `width = 0` and `height = 0` auto-detects display dimensions from bitstream `SPS`.
 
 ### Minimal C Example
 
@@ -76,7 +76,7 @@ See [`tests/integration/cmake_consumer/`](../tests/integration/cmake_consumer/) 
 
 ### Exported Symbol Policy
 
-On Linux/Android/OpenHarmony ELF targets, [`cmake/codec.exports.map`](../cmake/codec.exports.map) exports only the 5 C ABI symbols plus the internal `mlvc::` entry points consumed by `mlvc_demo` (`encode_video`, `decode_video`, `EncoderSession`, `DecoderSession`, `available_model_profiles`, `available_backends`, `default_backend_name`, `compiled_backend_name_c_str`). All Protobuf Lite, Abseil, `msrtc_rans`, CUTLASS, and backend symbols are hidden (`local: *;`), preventing ODR or version conflicts in host applications that link their own Protobuf or Abseil versions.
+All targets compile with hidden default visibility (`-fvisibility=hidden` on Unix/macOS) and explicit `MLVC_CODEC_API` export annotations (no `WINDOWS_EXPORT_ALL_SYMBOLS` on MSVC). On Linux/Android/OpenHarmony ELF targets, [`cmake/codec.exports.map`](../cmake/codec.exports.map) further locks the dynamic symbol table strictly to the pure C ABI `mlvc_*` functions (`local: *;`). `mlvc_demo` itself consumes only the public C ABI. All C++ internals, Protobuf Lite, Abseil, `msrtc_rans`, CUTLASS, and backend symbols remain strictly private, preventing ODR or version conflicts across Linux, Windows, and macOS hosts.
 
 ---
 

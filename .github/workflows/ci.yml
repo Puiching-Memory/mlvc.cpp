@@ -27,8 +27,107 @@ jobs:
           python tests/unit/aot_tests.py
           python tests/unit/model_package_tests.py
 
+  cpu-matrix:
+    name: CPU backend + SDK consumer (${{ matrix.label }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: linux-gcc
+            os: ubuntu-latest
+            cc: gcc
+            cxx: g++
+          - label: linux-clang
+            os: ubuntu-latest
+            cc: clang
+            cxx: clang++
+          - label: macos-arm64
+            os: macos-15
+            cc: clang
+            cxx: clang++
+          - label: windows-msvc
+            os: windows-latest
+            cc: ""
+            cxx: ""
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install Ninja (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build clang
+
+      - name: Install Ninja (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: Configure, build, test, and verify installed CMake consumer (Unix)
+        if: runner.os != 'Windows'
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: |
+          cmake -S . -B build/cpu -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DMLVC_BACKEND=cpu \
+            -DMLVC_EMBED_MODELS=OFF \
+            -DMLVC_WARNINGS_AS_ERRORS=ON \
+            -DBUILD_TESTING=ON
+          cmake --build build/cpu --parallel 4
+          ctest --test-dir build/cpu --output-on-failure
+          cmake --install build/cpu --prefix "$PWD/install/cpu"
+          cmake -S tests/integration/cmake_consumer -B build/consumer -G Ninja \
+            -DCMAKE_PREFIX_PATH="$PWD/install/cpu"
+          cmake --build build/consumer --parallel 2
+          ./build/consumer/mlvc_installed_consumer
+
+      - name: Configure, build, test, and verify installed CMake consumer (Windows MSVC)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cmake -S . -B build/cpu `
+            -DMLVC_BACKEND=cpu `
+            -DMLVC_EMBED_MODELS=OFF `
+            -DMLVC_WARNINGS_AS_ERRORS=ON `
+            -DBUILD_TESTING=ON
+          cmake --build build/cpu --config Release --parallel 4
+          ctest --test-dir build/cpu -C Release --output-on-failure
+          cmake --install build/cpu --config Release --prefix "$PWD/install/cpu"
+          cmake -S tests/integration/cmake_consumer -B build/consumer `
+            -DCMAKE_PREFIX_PATH="$PWD/install/cpu"
+          cmake --build build/consumer --config Release --parallel 2
+          $env:PATH = "$PWD/install/cpu/bin;$env:PATH"
+          .\build\consumer\Release\mlvc_installed_consumer.exe
+
+  sanitizers:
+    name: Host sanitizers (${{ matrix.mode }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - mode: asan-ubsan
+            preset: cpu-sanitize
+          - mode: tsan
+            preset: cpu-tsan
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+      - name: Install build tools
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Build and run sanitizer test suite
+        run: |
+          cmake --preset ${{ matrix.preset }}
+          cmake --build --preset ${{ matrix.preset }} --parallel 4
+          ctest --preset ${{ matrix.preset }}
+
   package:
-    name: build, test, and package (${{ matrix.compiler }})
+    name: driver-cubin build, test, and package (${{ matrix.compiler }})
     runs-on: ubuntu-26.04
     strategy:
       fail-fast: false
@@ -63,11 +162,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y cuda-toolkit-13-3
           echo "/usr/local/cuda-13.3/bin" >> "$GITHUB_PATH"
-          # Driverless runners have only the unversioned stub (SONAME
-          # libcuda.so.1); alias it so links resolve the codec's transitive
-          # DT_NEEDED libcuda.so.1 against the toolkit stub.
-          sudo ln -sf libcuda.so /usr/local/cuda-13.3/lib64/stubs/libcuda.so.1
-          sudo ln -sf libcuda.so /usr/local/cuda-13.3/targets/x86_64-linux/lib/stubs/libcuda.so.1
 
       - name: Build, test, and create CI package
         run: |
@@ -76,7 +170,7 @@ jobs:
             --output-dir "packages/${{ matrix.compiler }}" \
             --skip-gpu-tests --skip-models
 
-      - name: Run host sanitizer tests
+      - name: Run driver-cubin host sanitizer tests
         if: matrix.compiler == 'gcc'
         run: |
           cmake --preset driver-cubin-sanitize

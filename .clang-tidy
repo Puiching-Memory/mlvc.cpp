@@ -1,0 +1,14 @@
+Checks: >
+  -*,
+  bugprone-*,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-narrowing-conversions,
+  -bugprone-implicit-widening-of-multiplication-result,
+  clang-analyzer-*,
+  concurrency-*,
+  performance-*,
+  portability-*,
+  readability-redundant-control-flow,
+  readability-simplify-boolean-expr
+HeaderFilterRegex: '^(include|src)/.*'
+FormatStyle: file

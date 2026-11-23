@@ -39,6 +39,50 @@
         "MLVC_WARNINGS_AS_ERRORS": "ON",
         "BUILD_TESTING": "ON"
       }
+    },
+    {
+      "name": "cpu-release",
+      "displayName": "CPU Backend Release",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "MLVC_BACKEND": "cpu",
+        "MLVC_EMBED_MODELS": "OFF",
+        "MLVC_ENABLE_IPO": "ON",
+        "MLVC_WARNINGS_AS_ERRORS": "ON",
+        "BUILD_TESTING": "ON"
+      }
+    },
+    {
+      "name": "cpu-sanitize",
+      "displayName": "CPU Backend ASan+UBSan",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "MLVC_BACKEND": "cpu",
+        "MLVC_EMBED_MODELS": "OFF",
+        "MLVC_ENABLE_IPO": "OFF",
+        "MLVC_ENABLE_SANITIZERS": "ON",
+        "MLVC_WARNINGS_AS_ERRORS": "ON",
+        "BUILD_TESTING": "ON"
+      }
+    },
+    {
+      "name": "cpu-tsan",
+      "displayName": "CPU Backend ThreadSanitizer",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/${presetName}",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "MLVC_BACKEND": "cpu",
+        "MLVC_EMBED_MODELS": "OFF",
+        "MLVC_ENABLE_IPO": "OFF",
+        "MLVC_ENABLE_TSAN": "ON",
+        "MLVC_WARNINGS_AS_ERRORS": "ON",
+        "BUILD_TESTING": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -50,8 +94,25 @@
       "name": "driver-cubin-sanitize",
       "configurePreset": "driver-cubin-sanitize",
       "targets": [
-        "mlvc_core_safety_tests"
+        "mlvc_core_safety_tests",
+        "mlvc_bitstream_tests",
+        "mlvc_c_api_tests",
+        "mlvc_public_header_tests",
+        "mlvc_model_proto_tests",
+        "mlvc_runtime_decoupling_tests"
       ]
+    },
+    {
+      "name": "cpu-release",
+      "configurePreset": "cpu-release"
+    },
+    {
+      "name": "cpu-sanitize",
+      "configurePreset": "cpu-sanitize"
+    },
+    {
+      "name": "cpu-tsan",
+      "configurePreset": "cpu-tsan"
     }
   ],
   "testPresets": [
@@ -66,10 +127,31 @@
       "name": "driver-cubin-sanitize",
       "configurePreset": "driver-cubin-sanitize",
       "filter": {
-        "include": {
-          "name": "mlvc_core_safety"
+        "exclude": {
+          "label": "gpu"
         }
       },
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "cpu-release",
+      "configurePreset": "cpu-release",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "cpu-sanitize",
+      "configurePreset": "cpu-sanitize",
+      "output": {
+        "outputOnFailure": true
+      }
+    },
+    {
+      "name": "cpu-tsan",
+      "configurePreset": "cpu-tsan",
       "output": {
         "outputOnFailure": true
       }

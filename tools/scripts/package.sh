@@ -95,21 +95,9 @@ if [[ "$SKIP_GPU_TESTS" -eq 0 ]]; then
     GPU_NAMES="$(nvidia-smi --query-gpu=name --format=csv,noheader | LC_ALL=C sort -u | paste -sd ',' -)"
 fi
 
-CUDA_ROOT="$(dirname "$(dirname "$(readlink -f "$(command -v nvcc)")")")"
-CUDA_STUB_DIR="$CUDA_ROOT/targets/x86_64-linux/lib/stubs"
-
-run_on_host_or_cuda_stub() {
-    if [[ "$SKIP_GPU_TESTS" -eq 1 && -f "$CUDA_STUB_DIR/libcuda.so" ]]; then
-        LD_LIBRARY_PATH="$CUDA_STUB_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" "$@"
-    else
-        "$@"
-    fi
-}
-
 run_basic_tests() {
     if [[ "$SKIP_GPU_TESTS" -eq 1 ]]; then
-        run_on_host_or_cuda_stub ctest "$@" --exclude-regex '^mlvc_driver_cubin_probe$' \
-            --label-exclude gpu
+        ctest "$@" --exclude-regex '^mlvc_driver_cubin_probe$' --label-exclude gpu
     else
         ctest "$@"
     fi
@@ -149,17 +137,8 @@ audit_driver_linkage() {
     local target="$1" report
     report="$(ldd "$target")"
     if [[ "$report" == *"not found"* ]]; then
-        local unresolved
-        unresolved="$(grep 'not found' <<<"$report" |
-            grep -vE '^[[:space:]]*libcuda\.so\.1 => not found$' || true)"
-        if [[ "$SKIP_GPU_TESTS" -eq 0 || -n "$unresolved" ]]; then
-            echo "$report" >&2
-            return 1
-        fi
-        echo "note: allowing missing NVIDIA driver library while GPU tests are skipped: $target"
-    fi
-    if [[ "$report" != *"libcuda.so.1"* ]]; then
-        echo "error: $target does not require the NVIDIA driver" >&2
+        echo "error: $target has unresolved shared library dependencies" >&2
+        echo "$report" >&2
         return 1
     fi
     if grep -Eqi \

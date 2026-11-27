@@ -16,7 +16,14 @@ if(MLVC_BACKEND MATCHES "^(driver_cubin|all)$")
     target_link_libraries(mlvc_backend INTERFACE mlvc_backend_driver_cubin)
 endif()
 
-if(MLVC_BACKEND MATCHES "^(cpu|all)$")
+if(MLVC_BACKEND MATCHES "^(webgpu|webgpu_cpu)$")
+    add_subdirectory(webgpu)
+    target_compile_definitions(mlvc_backend_registration PRIVATE
+        MLVC_HAS_BACKEND_WEBGPU=1)
+    target_link_libraries(mlvc_backend INTERFACE mlvc_backend_webgpu)
+endif()
+
+if(MLVC_BACKEND MATCHES "^(cpu|webgpu_cpu|all)$")
     add_subdirectory(cpu)
     target_compile_definitions(mlvc_backend_registration PRIVATE
         MLVC_HAS_BACKEND_CPU=1)

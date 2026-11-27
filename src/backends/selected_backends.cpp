@@ -6,6 +6,12 @@ void register_driver_cubin_backend();
 }
 #endif
 
+#ifdef MLVC_HAS_BACKEND_WEBGPU
+namespace mlvc::webgpu_backend {
+void register_webgpu_backend(bool make_default);
+}
+#endif
+
 #ifdef MLVC_HAS_BACKEND_CPU
 namespace mlvc::cpu_backend {
 void register_cpu_backend(bool make_default);
@@ -19,8 +25,15 @@ bool g_selected_backends_registered = []() {
 #ifdef MLVC_HAS_BACKEND_DRIVER_CUBIN
     driver_cubin_backend::register_driver_cubin_backend();
 #endif
-#ifdef MLVC_HAS_BACKEND_CPU
+#ifdef MLVC_HAS_BACKEND_WEBGPU
 #ifdef MLVC_HAS_BACKEND_DRIVER_CUBIN
+    webgpu_backend::register_webgpu_backend(false);
+#else
+    webgpu_backend::register_webgpu_backend(true);
+#endif
+#endif
+#ifdef MLVC_HAS_BACKEND_CPU
+#if defined(MLVC_HAS_BACKEND_DRIVER_CUBIN) || defined(MLVC_HAS_BACKEND_WEBGPU)
     cpu_backend::register_cpu_backend(false);
 #else
     cpu_backend::register_cpu_backend(true);

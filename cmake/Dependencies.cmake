@@ -40,8 +40,22 @@ if(MLVC_BACKEND MATCHES "^(driver_cubin|all)$")
     find_package(CUDAToolkit 12.0 REQUIRED)
 endif()
 
-if(MLVC_BACKEND MATCHES "^(cpu|all)$")
+if(MLVC_BACKEND MATCHES "^(cpu|webgpu_cpu|all)$")
     find_package(Threads REQUIRED)
+endif()
+
+if(MLVC_BACKEND MATCHES "^(webgpu|webgpu_cpu)$" AND NOT EMSCRIPTEN)
+    set(_mlvc_default_dawn_dir "")
+    if(EXISTS "${PROJECT_SOURCE_DIR}/build/tools/dawn/dawn-x64/webgpu.h")
+        set(_mlvc_default_dawn_dir "${PROJECT_SOURCE_DIR}/build/tools/dawn/dawn-x64")
+    endif()
+    set(MLVC_DAWN_DIR "${_mlvc_default_dawn_dir}" CACHE PATH
+        "Directory containing Dawn webgpu.h and webgpu_dawn library")
+    if(NOT MLVC_DAWN_DIR OR NOT EXISTS "${MLVC_DAWN_DIR}")
+        message(FATAL_ERROR
+            "MLVC_BACKEND=${MLVC_BACKEND} on native targets requires Dawn. "
+            "Pass -DMLVC_DAWN_DIR=/path/to/dawn containing webgpu.h and webgpu_dawn.")
+    endif()
 endif()
 
 set(_mlvc_python_protobuf_ok FALSE)

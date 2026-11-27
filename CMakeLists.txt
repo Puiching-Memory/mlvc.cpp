@@ -6,8 +6,8 @@ include(CMakePackageConfigHelpers)
 include(CTest)
 
 set(MLVC_BACKEND "AUTO" CACHE STRING
-    "Inference backend to build (AUTO, cpu, driver_cubin, all, none)")
-set_property(CACHE MLVC_BACKEND PROPERTY STRINGS AUTO cpu driver_cubin all none)
+    "Inference backend to build (AUTO, cpu, driver_cubin, webgpu, webgpu_cpu, all, none)")
+set_property(CACHE MLVC_BACKEND PROPERTY STRINGS AUTO cpu driver_cubin webgpu webgpu_cpu all none)
 
 set(_mlvc_is_linux_x86_64 FALSE)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
@@ -16,25 +16,27 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
 endif()
 
 if(MLVC_BACKEND STREQUAL "AUTO")
-    if(_mlvc_is_linux_x86_64)
+    if(EMSCRIPTEN)
+        set(_mlvc_resolved_backend "webgpu")
+    elseif(_mlvc_is_linux_x86_64)
         set(_mlvc_resolved_backend "driver_cubin")
     else()
         set(_mlvc_resolved_backend "cpu")
     endif()
     set(MLVC_BACKEND "${_mlvc_resolved_backend}" CACHE STRING
-        "Inference backend to build (AUTO, cpu, driver_cubin, all, none)" FORCE)
+        "Inference backend to build (AUTO, cpu, driver_cubin, webgpu, webgpu_cpu, all, none)" FORCE)
 endif()
 
-if(NOT MLVC_BACKEND MATCHES "^(cpu|driver_cubin|all|none)$")
+if(NOT MLVC_BACKEND MATCHES "^(cpu|driver_cubin|webgpu|webgpu_cpu|all|none)$")
     message(FATAL_ERROR
         "Unsupported MLVC_BACKEND='${MLVC_BACKEND}'. "
-        "Supported values: AUTO, cpu, driver_cubin, all, none.")
+        "Supported values: AUTO, cpu, driver_cubin, webgpu, webgpu_cpu, all, none.")
 endif()
 if(MLVC_BACKEND MATCHES "^(driver_cubin|all)$" AND NOT _mlvc_is_linux_x86_64)
     message(FATAL_ERROR
         "MLVC_BACKEND=${MLVC_BACKEND} requires a Linux x86_64 NVIDIA host "
         "(current target: ${CMAKE_SYSTEM_NAME} ${CMAKE_SYSTEM_PROCESSOR}). "
-        "Configure with -DMLVC_BACKEND=cpu or -DMLVC_BACKEND=none.")
+        "Configure with -DMLVC_BACKEND=cpu, -DMLVC_BACKEND=webgpu, -DMLVC_BACKEND=webgpu_cpu, or -DMLVC_BACKEND=none.")
 endif()
 message(STATUS "MLVC inference backend: ${MLVC_BACKEND}")
 
@@ -53,16 +55,29 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 set(_mlvc_default_shared ON)
-if(DEFINED BUILD_SHARED_LIBS AND NOT BUILD_SHARED_LIBS)
+if(EMSCRIPTEN OR (DEFINED BUILD_SHARED_LIBS AND NOT BUILD_SHARED_LIBS))
     set(_mlvc_default_shared OFF)
 endif()
 option(MLVC_BUILD_SHARED "Build mlvc_codec as a shared library" ${_mlvc_default_shared})
+
+set(_mlvc_default_tools ON)
+set(_mlvc_default_web_demo OFF)
+set(_mlvc_default_ipo ON)
+if(EMSCRIPTEN)
+    set(_mlvc_default_tools OFF)
+    set(_mlvc_default_web_demo ON)
+    set(_mlvc_default_ipo OFF)
+    add_compile_options(-fwasm-exceptions)
+    add_link_options(-fwasm-exceptions)
+endif()
+option(MLVC_BUILD_TOOLS "Build mlvc_demo CLI tool" ${_mlvc_default_tools})
+option(MLVC_BUILD_WEB_DEMO "Build Emscripten WASM + WebGPU browser decoder" ${_mlvc_default_web_demo})
 
 set(_mlvc_default_embed_models OFF)
 if(MLVC_BACKEND MATCHES "^(driver_cubin|all)$")
     set(_mlvc_default_embed_models ON)
 endif()
-option(MLVC_ENABLE_IPO "Enable interprocedural optimization in Release builds" ON)
+option(MLVC_ENABLE_IPO "Enable interprocedural optimization in Release builds" ${_mlvc_default_ipo})
 option(MLVC_EMBED_MODELS
     "Embed canonical model bundles into the core library"
     ${_mlvc_default_embed_models})
@@ -154,8 +169,13 @@ if(WIN32)
 endif()
 
 add_subdirectory(src)
-add_subdirectory(tools)
-if(BUILD_TESTING)
+if(MLVC_BUILD_TOOLS)
+    add_subdirectory(tools)
+endif()
+if(MLVC_BUILD_WEB_DEMO AND EMSCRIPTEN)
+    add_subdirectory(web)
+endif()
+if(BUILD_TESTING AND NOT EMSCRIPTEN)
     add_subdirectory(tests)
 endif()
 

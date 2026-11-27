@@ -68,7 +68,7 @@ mlvc_configure_target(mlvc_runtime_decoupling_tests)
 mlvc_enable_ipo(mlvc_runtime_decoupling_tests)
 add_test(NAME mlvc_runtime_decoupling COMMAND mlvc_runtime_decoupling_tests)
 
-if(MLVC_BACKEND MATCHES "^(cpu|all)$")
+if(MLVC_BACKEND MATCHES "^(cpu|webgpu_cpu|all)$")
     add_executable(mlvc_cpu_backend_tests unit/cpu_backend_tests.cpp)
     target_include_directories(mlvc_cpu_backend_tests PRIVATE
         "${PROJECT_SOURCE_DIR}/src")
@@ -83,6 +83,21 @@ if(MLVC_BACKEND MATCHES "^(cpu|all)$")
     mlvc_configure_target(mlvc_cpu_backend_tests)
     mlvc_enable_ipo(mlvc_cpu_backend_tests)
     add_test(NAME mlvc_cpu_backend COMMAND mlvc_cpu_backend_tests)
+endif()
+
+if(MLVC_BACKEND MATCHES "^(webgpu|webgpu_cpu)$")
+    add_executable(mlvc_webgpu_backend_tests unit/webgpu_backend_tests.cpp)
+    target_include_directories(mlvc_webgpu_backend_tests PRIVATE
+        "${PROJECT_SOURCE_DIR}/src")
+    target_link_libraries(mlvc_webgpu_backend_tests PRIVATE
+        mlvc_core
+        mlvc_runtime
+        mlvc_backend
+        mlvc_model_proto)
+    mlvc_configure_target(mlvc_webgpu_backend_tests)
+    mlvc_enable_ipo(mlvc_webgpu_backend_tests)
+    add_test(NAME mlvc_webgpu_backend COMMAND mlvc_webgpu_backend_tests)
+    set_tests_properties(mlvc_webgpu_backend PROPERTIES LABELS "gpu")
 endif()
 
 if(MLVC_ENABLE_FUZZERS)
@@ -144,7 +159,25 @@ if(EXISTS "${MLVC_TEST_ASSETS_DIR}/references/mlvc-psnr-v1/gray-q21-2f/reference
                 set_tests_properties("mlvc_codec_conformance_${_mlvc_profile}"
                     PROPERTIES LABELS "gpu;conformance" TIMEOUT 300)
             endif()
-            if(MLVC_BACKEND MATCHES "^(cpu|all)$")
+            if(MLVC_BACKEND MATCHES "^(webgpu|webgpu_cpu)$")
+                set(_mlvc_wgpu_conformance_args
+                    --binary "$<TARGET_FILE:mlvc_tool_demo>"
+                    --backend webgpu
+                    --model-dir "${_mlvc_conformance_model_arg}"
+                    --bundle-dir "${_mlvc_model_dir}"
+                    --reference-dir "${_mlvc_reference_dir}")
+                if(MLVC_BACKEND STREQUAL "webgpu_cpu")
+                    set(_mlvc_wgpu_test_name "mlvc_codec_conformance_webgpu_${_mlvc_profile}")
+                else()
+                    set(_mlvc_wgpu_test_name "mlvc_codec_conformance_${_mlvc_profile}")
+                endif()
+                add_test(NAME "${_mlvc_wgpu_test_name}"
+                    COMMAND "${Python3_EXECUTABLE}" "${_mlvc_conformance_script}"
+                            ${_mlvc_wgpu_conformance_args})
+                set_tests_properties("${_mlvc_wgpu_test_name}"
+                    PROPERTIES LABELS "gpu;conformance" TIMEOUT 300)
+            endif()
+            if(MLVC_BACKEND MATCHES "^(cpu|webgpu_cpu|all)$")
                 set(_mlvc_cpu_conformance_args
                     --binary "$<TARGET_FILE:mlvc_tool_demo>"
                     --backend cpu
@@ -155,7 +188,7 @@ if(EXISTS "${MLVC_TEST_ASSETS_DIR}/references/mlvc-psnr-v1/gray-q21-2f/reference
                     list(APPEND _mlvc_cpu_conformance_args
                         --emulator "${CMAKE_CROSSCOMPILING_EMULATOR}")
                 endif()
-                if(MLVC_BACKEND STREQUAL "all")
+                if(MLVC_BACKEND MATCHES "^(all|webgpu_cpu)$")
                     set(_mlvc_cpu_test_name "mlvc_codec_conformance_cpu_${_mlvc_profile}")
                 else()
                     set(_mlvc_cpu_test_name "mlvc_codec_conformance_${_mlvc_profile}")

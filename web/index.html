@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>mlvc.cpp · Browser WebGPU Neural Video Decoder</title>
+  <style>
+    :root {
+      --bg: #0b0e14;
+      --panel: #131823;
+      --border: #232c3d;
+      --text: #e6edf7;
+      --muted: #8b9bb4;
+      --accent: #38bdf8;
+      --ok: #34d399;
+      --warn: #fbbf24;
+      --err: #f87171;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+    }
+    header {
+      padding: 16px 24px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      background: var(--panel);
+    }
+    header h1 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+    header .badge {
+      font-size: 12px;
+      padding: 4px 10px;
+      border-radius: 999px;
+      background: #1b2436;
+      border: 1px solid var(--border);
+      color: var(--accent);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    main {
+      max-width: 1280px;
+      width: 100%;
+      margin: 0 auto;
+      padding: 20px 24px;
+      display: grid;
+      grid-template-columns: 1fr 340px;
+      gap: 20px;
+    }
+    @media (max-width: 960px) {
+      main { grid-template-columns: 1fr; }
+    }
+    .stage {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .canvas-wrap {
+      background: #05070b;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 380px;
+      overflow: hidden;
+    }
+    canvas {
+      max-width: 100%;
+      height: auto;
+      display: block;
+      image-rendering: auto;
+    }
+    .controls {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+    }
+    select, button, label.file-btn {
+      background: #1b2232;
+      color: var(--text);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 14px;
+      font-size: 13px;
+      cursor: pointer;
+    }
+    button.primary {
+      background: #0284c7;
+      border-color: #0ea5e9;
+      font-weight: 600;
+    }
+    button:disabled { opacity: 0.45; cursor: not-allowed; }
+    input[type="file"] { display: none; }
+    .sidebar {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px 16px;
+    }
+    .card h2 {
+      margin: 0 0 10px 0;
+      font-size: 13px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      color: var(--muted);
+    }
+    .metric-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .metric {
+      background: #0d111a;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+    }
+    .metric .label { font-size: 11px; color: var(--muted); }
+    .metric .val {
+      margin-top: 4px;
+      font-size: 18px;
+      font-weight: 700;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      color: var(--ok);
+    }
+    .kv {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      padding: 4px 0;
+      border-bottom: 1px solid #1b2232;
+    }
+    .kv:last-child { border-bottom: none; }
+    .kv .k { color: var(--muted); }
+    .kv .v { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    #log {
+      background: #070a10;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11px;
+      height: 180px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      color: #a7b6cd;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>mlvc.cpp · Browser WebGPU Neural Video Decoder (Zero-Readback)</h1>
+    <span class="badge" id="gpu-badge">Initializing WebGPU...</span>
+  </header>
+
+  <main>
+    <section class="stage">
+      <div class="canvas-wrap">
+        <canvas id="mlvc-canvas" width="640" height="360"></canvas>
+      </div>
+      <div class="controls">
+        <select id="preset-select">
+          <option value="mlvc-s-360p">mlvc-s-psnr-v1 · 640×360 (Sample)</option>
+          <option value="mlvc-s-720p">mlvc-s-psnr-v1 · 1280×720 (720p)</option>
+          <option value="mlvc-360p">mlvc-psnr-v1 · 640×360 (18.3M)</option>
+        </select>
+        <select id="matrix-select">
+          <option value="0">BT.709 Full</option>
+          <option value="1">BT.601 Full</option>
+          <option value="2">BT.709 Limited</option>
+        </select>
+        <button id="btn-load" class="primary">Load Model &amp; Stream</button>
+        <button id="btn-play" disabled>Play Loop</button>
+        <button id="btn-step" disabled>Step 1 Frame</button>
+        <button id="btn-bench" disabled>Benchmark 60 Frames</button>
+        <label class="file-btn">
+          Load Local .mlvc
+          <input type="file" id="file-input" accept=".mlvc,.bin" />
+        </label>
+      </div>
+    </section>
+
+    <aside class="sidebar">
+      <div class="card">
+        <h2>Real-Time Telemetry</h2>
+        <div class="metric-grid">
+          <div class="metric">
+            <div class="label">Sustained FPS</div>
+            <div class="val" id="m-fps">--</div>
+          </div>
+          <div class="metric">
+            <div class="label">Frame Time</div>
+            <div class="val" id="m-frame-ms">--</div>
+          </div>
+          <div class="metric">
+            <div class="label">rANS (WASM)</div>
+            <div class="val" id="m-rans-ms">--</div>
+          </div>
+          <div class="metric">
+            <div class="label">WebGPU Submit</div>
+            <div class="val" id="m-submit-ms">--</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Pipeline Info</h2>
+        <div class="kv"><span class="k">Resolution</span><span class="v" id="i-res">--</span></div>
+        <div class="kv"><span class="k">Frame / QP</span><span class="v" id="i-frame">--</span></div>
+        <div class="kv"><span class="k">Compute Dispatches</span><span class="v" id="i-dispatches">--</span></div>
+        <div class="kv"><span class="k">Shader FP16</span><span class="v" id="i-f16">--</span></div>
+        <div class="kv"><span class="k">Fused D2S8 Render</span><span class="v" id="i-d2s8">--</span></div>
+        <div class="kv"><span class="k">AU Payload</span><span class="v" id="i-bytes">--</span></div>
+      </div>
+
+      <div class="card">
+        <h2>Console</h2>
+        <div id="log"></div>
+      </div>
+    </aside>
+  </main>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>

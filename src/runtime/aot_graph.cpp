@@ -156,7 +156,9 @@ GraphDescriptor decode_graph(const wire::Graph& source)
                         weight.offset() <= result.weights_bytes &&
                         weight.size_bytes() <= result.weights_bytes - weight.offset(),
                     "weight extent");
-            tensor.storage = WeightLocation{weight.offset(), weight.size_bytes()};
+            tensor.storage = WeightLocation{
+                static_cast<std::size_t>(weight.offset()),
+                static_cast<std::size_t>(weight.size_bytes())};
         } else {
             require(tensor.dtype != DataType::INT64, "runtime int64 tensor");
             if (input.has_arena()) {
@@ -169,7 +171,9 @@ GraphDescriptor decode_graph(const wire::Graph& source)
                                 static_cast<std::uint32_t>(source.nodes_size()),
                         "arena extent");
                 tensor.storage = ArenaSlot{
-                    arena.offset(), arena.size_bytes(), arena.birth(), arena.death()};
+                    static_cast<std::size_t>(arena.offset()),
+                    static_cast<std::size_t>(arena.size_bytes()),
+                    arena.birth(), arena.death()};
             }
         }
     }

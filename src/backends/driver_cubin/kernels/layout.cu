@@ -66,3 +66,33 @@ extern "C" __global__ void mlvc_interleave_reglu_rows_fp16(
         input[static_cast<std::size_t>(src_row) * row_width + col];
 }
 
+// Interleaves [gate(0..G-1), linear(0..G-1)] rows into adjacent pairs
+// [gate(0), linear(0), gate(1), linear(1), ...] for NHWC CUTLASS ReGLU where
+// each 8-element fragment holds 4 (gate, linear) pairs in one thread.
+extern "C" __global__ void mlvc_interleave_reglu_pairs_fp16(
+    const __half* __restrict__ input, __half* __restrict__ output,
+    int gate_channels, int row_width)
+{
+    const int col = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    const int out_row = static_cast<int>(blockIdx.y);
+    if (col >= row_width || out_row >= gate_channels * 2)
+        return;
+    const int pair = out_row >> 1;
+    const int src_row = (out_row & 1) == 0 ? pair : (gate_channels + pair);
+    output[static_cast<std::size_t>(out_row) * row_width + col] =
+        input[static_cast<std::size_t>(src_row) * row_width + col];
+}
+
+// Repacks 3x3 depthwise weights from [C, 9] (OIHW) to [9, C] so NHWC depthwise
+// convolution loads all 9 taps with 128-bit coalesced channel vector loads.
+extern "C" __global__ void mlvc_dwconv_weight_oihw_to_k9c_fp16(
+    const __half* __restrict__ input, __half* __restrict__ output, int channels)
+{
+    const int c = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    const int k = static_cast<int>(blockIdx.y);
+    if (c >= channels || k >= 9)
+        return;
+    output[static_cast<std::size_t>(k) * channels + c] =
+        input[static_cast<std::size_t>(c) * 9 + k];
+}
+

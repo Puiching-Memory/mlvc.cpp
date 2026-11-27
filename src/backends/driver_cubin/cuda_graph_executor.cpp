@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -134,9 +135,22 @@ void AotGraph::enqueue_model()
 void AotGraph::enqueue_outputs(HostSlot& slot)
 {
     for (const ExternalOutput& output : external_outputs_) {
-        driver_.download_async(
-            slot.outputs[output.output_index].data(),
-            output.address, output.bytes);
+        const Value& result = value(output.id);
+        if (needs_nhwc_boundary_transpose(result)) {
+            ensure_boundary_transpose_scratch(output.bytes);
+            const int rows = static_cast<int>(result.shape[2] * result.shape[3]);
+            const int cols = static_cast<int>(result.shape[1]);
+            launch_transpose_2d(
+                output.address, boundary_transpose_scratch_.address(),
+                rows, cols);
+            driver_.download_async(
+                slot.outputs[output.output_index].data(),
+                boundary_transpose_scratch_.address(), output.bytes);
+        } else {
+            driver_.download_async(
+                slot.outputs[output.output_index].data(),
+                output.address, output.bytes);
+        }
     }
 }
 
@@ -156,14 +170,33 @@ void AotGraph::launch_yuv420_to_nchw(DeviceAddress yuv_device)
 {
     DeviceAddress input = yuv_device;
     DeviceAddress lut = codec_byte_lut_device_.address();
-    DeviceAddress output = codec_image_address_;
     int width = codec_io_.width;
     int height = codec_io_.height;
     int model_width = codec_io_.model_width;
     int model_height = codec_io_.model_height;
     int rotated = codec_io_.padding.rotated ? 1 : 0;
+    if (use_nhwc_ && codec_fused_s2d8_node_.has_value()) {
+        DeviceAddress output = codec_s2d8_output_;
+        void* parameters[] = {&input, &lut, &output, &width, &height,
+                              &model_width, &model_height, &rotated};
+        driver_.launch(
+            yuv420_to_s2d8_nhwc_,
+            {divide_up(static_cast<std::size_t>(model_width / 8), 8),
+             static_cast<unsigned int>(model_height / 8), 1},
+            {24, 8, 1}, 0, parameters);
+        return;
+    }
+    DeviceAddress output = codec_image_address_;
     void* parameters[] = {&input, &lut, &output, &width, &height,
                           &model_width, &model_height, &rotated};
+    if (use_nhwc_) {
+        driver_.launch(
+            yuv420_to_nhwc_,
+            {divide_up(static_cast<std::size_t>(model_width), 32),
+             divide_up(static_cast<std::size_t>(model_height), 8), 1},
+            {32, 8, 1}, 0, parameters);
+        return;
+    }
     driver_.launch(
         yuv420_to_nchw_,
         {divide_up(static_cast<std::size_t>(model_width), 32),
@@ -173,7 +206,6 @@ void AotGraph::launch_yuv420_to_nchw(DeviceAddress yuv_device)
 
 void AotGraph::launch_nchw_to_yuv420(DeviceAddress yuv_device)
 {
-    DeviceAddress input = codec_image_address_;
     DeviceAddress output = yuv_device;
     int width = codec_io_.width;
     int height = codec_io_.height;
@@ -183,11 +215,28 @@ void AotGraph::launch_nchw_to_yuv420(DeviceAddress yuv_device)
     int pad_top = codec_io_.padding.top;
     int rotated = codec_io_.padding.rotated ? 1 : 0;
     float inverse_pixel_range = 1.0F / codec_io_.pixel_range;
+    if (use_nhwc_ && codec_fused_d2s8_node_.has_value()) {
+        DeviceAddress input = codec_d2s8_input_;
+        int has_clip = codec_d2s8_has_clip_ ? 1 : 0;
+        float clip_min = codec_d2s8_clip_min_;
+        float clip_max = codec_d2s8_clip_max_;
+        void* parameters[] = {
+            &input, &output, &width, &height, &model_width, &model_height,
+            &pad_left, &pad_top, &rotated, &inverse_pixel_range,
+            &has_clip, &clip_min, &clip_max};
+        driver_.launch(
+            d2s8_nhwc_to_yuv420_,
+            {divide_up(static_cast<std::size_t>(width / 2), 16),
+             divide_up(static_cast<std::size_t>(height / 2), 8), 1},
+            {16, 8, 1}, 0, parameters);
+        return;
+    }
+    DeviceAddress input = codec_image_address_;
     void* parameters[] = {
         &input, &output, &width, &height, &model_width, &model_height,
         &pad_left, &pad_top, &rotated, &inverse_pixel_range};
     driver_.launch(
-        nchw_to_yuv420_,
+        use_nhwc_ ? nhwc_to_yuv420_ : nchw_to_yuv420_,
         {divide_up(static_cast<std::size_t>(width / 2), 16),
          divide_up(static_cast<std::size_t>(height / 2), 8), 1},
         {16, 8, 1}, 0, parameters);
@@ -202,32 +251,71 @@ void AotGraph::capture_codec_graph(HostSlot& slot)
         cutlass_parameters_ready_ = true;
     }
     driver_.synchronize();
-    driver_.begin_capture();
-    if (model_name_ == "MLVCEncoder") {
-        launch_yuv420_to_nchw(slot.yuv_device.address());
-        driver_.copy_dto_d_async(
-            input_buffers_[*q_input_index_].address(),
-            slot.q_device.address(), sizeof(int));
-        execute_schedule();
-        for (const ExternalOutput& output : external_outputs_) {
-            driver_.copy_dto_d_async(
-                slot.output_staging[output.output_index].address(),
-                output.address, output.bytes);
-        }
-    } else {
-        for (const std::size_t index : decoder_latent_inputs_) {
-            driver_.copy_dto_d_async(
-                input_buffers_[index].address(),
-                slot.input_staging[index].address(),
-                input_buffers_[index].size());
-        }
-        driver_.copy_dto_d_async(
-            input_buffers_[*q_input_index_].address(),
-            slot.q_device.address(), sizeof(int));
-        execute_schedule();
-        launch_nchw_to_yuv420(slot.yuv_device.address());
+    codec_elided_nodes_.clear();
+    active_codec_yuv_device_ = 0;
+    if (use_nhwc_) {
+        if (codec_fused_d2s8_clip_node_)
+            codec_elided_nodes_.push_back(*codec_fused_d2s8_clip_node_);
+        if (codec_fused_s2d8_node_ || codec_fused_d2s8_node_)
+            active_codec_yuv_device_ = slot.yuv_device.address();
     }
-    slot.codec_graph = driver_.end_capture();
+    driver_.begin_capture();
+    try {
+        if (model_name_ == "MLVCEncoder") {
+            if (!(use_nhwc_ && codec_fused_s2d8_node_.has_value()))
+                launch_yuv420_to_nchw(slot.yuv_device.address());
+            driver_.copy_dto_d_async(
+                input_buffers_[*q_input_index_].address(),
+                slot.q_device.address(), sizeof(int));
+            execute_schedule();
+            for (const ExternalOutput& output : external_outputs_) {
+                const Value& result = value(output.id);
+                if (needs_nhwc_boundary_transpose(result)) {
+                    const int rows = static_cast<int>(
+                        result.shape[2] * result.shape[3]);
+                    const int cols = static_cast<int>(result.shape[1]);
+                    launch_transpose_2d(
+                        output.address,
+                        slot.output_staging[output.output_index].address(),
+                        rows, cols);
+                } else {
+                    driver_.copy_dto_d_async(
+                        slot.output_staging[output.output_index].address(),
+                        output.address, output.bytes);
+                }
+            }
+        } else {
+            for (const std::size_t index : decoder_latent_inputs_) {
+                const Value& in_val = value(input_ids_[index]);
+                if (needs_nhwc_boundary_transpose(in_val)) {
+                    const int rows = static_cast<int>(in_val.shape[1]);
+                    const int cols = static_cast<int>(
+                        in_val.shape[2] * in_val.shape[3]);
+                    launch_transpose_2d(
+                        slot.input_staging[index].address(),
+                        input_buffers_[index].address(), rows, cols);
+                } else {
+                    driver_.copy_dto_d_async(
+                        input_buffers_[index].address(),
+                        slot.input_staging[index].address(),
+                        input_buffers_[index].size());
+                }
+            }
+            driver_.copy_dto_d_async(
+                input_buffers_[*q_input_index_].address(),
+                slot.q_device.address(), sizeof(int));
+            execute_schedule();
+            if (!(use_nhwc_ && codec_fused_d2s8_node_.has_value()))
+                launch_nchw_to_yuv420(slot.yuv_device.address());
+        }
+        slot.codec_graph = driver_.end_capture();
+    } catch (...) {
+        active_codec_yuv_device_ = 0;
+        codec_elided_nodes_.clear();
+        throw;
+    }
+    active_codec_yuv_device_ = 0;
+    codec_elided_nodes_.clear();
 }
 
 void AotGraph::finish_submit(HostSlot& slot)
@@ -267,8 +355,22 @@ std::vector<Tensor> AotGraph::run(const std::vector<Tensor>& inputs)
                 "driver-cubin: graph input byte size mismatch");
         std::memcpy(slot.inputs[graph_index].data(), input.raw_data(),
                     input.byte_size());
-        driver_.upload_async(input_buffers_[graph_index],
-                             slot.inputs[graph_index].data(), input.byte_size());
+        if (needs_nhwc_boundary_transpose(expected)) {
+            ensure_boundary_transpose_scratch(input.byte_size());
+            driver_.upload_async(boundary_transpose_scratch_,
+                                 slot.inputs[graph_index].data(),
+                                 input.byte_size());
+            const int rows = static_cast<int>(expected.shape[1]);
+            const int cols =
+                static_cast<int>(expected.shape[2] * expected.shape[3]);
+            launch_transpose_2d(boundary_transpose_scratch_.address(),
+                                input_buffers_[graph_index].address(),
+                                rows, cols);
+        } else {
+            driver_.upload_async(input_buffers_[graph_index],
+                                 slot.inputs[graph_index].data(),
+                                 input.byte_size());
+        }
     }
 
     enqueue_model();
@@ -394,6 +496,87 @@ void AotGraph::configure_codec_io(const CodecIoConfig& config)
     codec_io_configured_ = true;
     codec_image_address_ = image.address;
     codec_yuv_bytes_ = bytes;
+    codec_fused_s2d8_node_.reset();
+    codec_fused_d2s8_node_.reset();
+    codec_fused_d2s8_clip_node_.reset();
+    codec_s2d8_output_ = 0;
+    codec_d2s8_input_ = 0;
+    codec_d2s8_has_clip_ = false;
+    if (use_nhwc_ && (config.model_width % 8) == 0 &&
+        (config.model_height % 8) == 0) {
+        const std::vector<int64_t> s2d_shape{
+            1, 192, config.model_height / 8, config.model_width / 8};
+        if (model_name_ == "MLVCEncoder") {
+            const TensorId x_id = tensor_id("x");
+            if (tensor_consumer_count(x_id) == 1) {
+                for (const auto& node : graph_.nodes) {
+                    if (node.op == Op::SPACE_TO_DEPTH &&
+                        node.block_size() == 8 && node.inputs.size() == 1 &&
+                        node.inputs[0] == x_id && node.outputs.size() == 1) {
+                        const TensorId out_id = node.outputs[0];
+                        const Value& out_v = value(out_id);
+                        if (out_v.dtype == DataType::FP16 &&
+                            out_v.shape == s2d_shape && is_packed_nhwc(out_v) &&
+                            std::find(output_ids_.begin(), output_ids_.end(),
+                                      out_id) == output_ids_.end()) {
+                            codec_fused_s2d8_node_ = node.index;
+                            codec_s2d8_output_ = out_v.address;
+                        }
+                        break;
+                    }
+                }
+            }
+        } else if (model_name_ == "MLVCDecoder") {
+            const TensorId x_hat_id = tensor_id("x_hat");
+            const Node* prod = nullptr;
+            for (const auto& node : graph_.nodes) {
+                if (node.outputs.size() == 1 && node.outputs[0] == x_hat_id) {
+                    prod = &node;
+                    break;
+                }
+            }
+            if (prod != nullptr && prod->op == Op::DEPTH_TO_SPACE &&
+                prod->block_size() == 8 && prod->inputs.size() == 1) {
+                const Value& in_v = value(prod->inputs[0]);
+                if (in_v.dtype == DataType::FP16 && in_v.shape == s2d_shape &&
+                    is_packed_nhwc(in_v)) {
+                    codec_fused_d2s8_node_ = prod->index;
+                    codec_d2s8_input_ = in_v.address;
+                    codec_d2s8_has_clip_ = false;
+                }
+            } else if (prod != nullptr && prod->op == Op::CLIP &&
+                       !prod->inputs.empty() &&
+                       tensor_consumer_count(prod->inputs[0]) == 1 &&
+                       std::find(output_ids_.begin(), output_ids_.end(),
+                                 prod->inputs[0]) == output_ids_.end()) {
+                const TensorId mid_id = prod->inputs[0];
+                const Node* d2s = nullptr;
+                for (const auto& node : graph_.nodes) {
+                    if (node.outputs.size() == 1 && node.outputs[0] == mid_id) {
+                        d2s = &node;
+                        break;
+                    }
+                }
+                if (d2s != nullptr && d2s->op == Op::DEPTH_TO_SPACE &&
+                    d2s->block_size() == 8 && d2s->inputs.size() == 1) {
+                    const Value& in_v = value(d2s->inputs[0]);
+                    if (in_v.dtype == DataType::FP16 && in_v.shape == s2d_shape &&
+                        is_packed_nhwc(in_v)) {
+                        codec_fused_d2s8_node_ = d2s->index;
+                        codec_fused_d2s8_clip_node_ = prod->index;
+                        codec_d2s8_input_ = in_v.address;
+                        codec_d2s8_has_clip_ = true;
+                        codec_d2s8_clip_min_ = -std::numeric_limits<float>::infinity();
+                        codec_d2s8_clip_max_ = std::numeric_limits<float>::infinity();
+                        if (prod->inputs.size() > 1 && prod->inputs[1] != 0)
+                            codec_d2s8_clip_min_ = scalar_fp16(prod->inputs[1]);
+                        if (prod->inputs.size() > 2 && prod->inputs[2] != 0)
+                            codec_d2s8_clip_max_ = scalar_fp16(prod->inputs[2]);
+                    }
+                }
+            }
+        }
+    }
     if (model_name_ == "MLVCEncoder") {
         std::vector<Float16Storage> byte_lut(256);
         for (std::size_t value = 0; value < byte_lut.size(); ++value) {

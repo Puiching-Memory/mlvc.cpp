@@ -20,12 +20,15 @@ AotGraph::AotGraph(const ModelAssetReader& assets,
     // Opt-in L2 threadblock swizzle for the CUTLASS pointwise GEMMs.
     cutlass_log_tile_ =
         detail::parse_env_int("MLVC_CUTLASS_LOG_TILE", 0, 0, 3);
+    use_nhwc_ = driver_.device_info().compute_major >= 8 &&
+        detail::parse_env_int("MLVC_GLOBAL_NHWC", 1, 0, 1) != 0;
     load_model(assets, model_name);
+    collect_graph_outputs();
     plan_input_slice_aliases();
     plan_epilogue_buffers();
+    plan_spatial_slice_aliases();
     plan_reglu_buffer();
     plan_spatial_buffers();
-    collect_graph_outputs();
     plan_direct_concat_buffers();
     register_kernels();
     configure_state(execution_config);
@@ -84,6 +87,20 @@ void AotGraph::load_model(const ModelAssetReader& assets,
 void AotGraph::collect_graph_outputs()
 {
     output_ids_ = graph_.outputs;
+    if (use_nhwc_) {
+        // Keep NCHW external outputs (y_raw_0, y_raw_1) in dedicated buffers so
+        // they never alias NHWC arena tensors (e.g. latent in y0_tail).
+        for (const TensorId id : output_ids_) {
+            Value& out = values_.at(id);
+            if (is_nchw_external_tensor(out) && !out.initializer) {
+                const std::size_t bytes =
+                    element_count(out.shape) * dtype_bytes(out.dtype);
+                alias_buffers_.push_back(driver_.allocate(bytes));
+                out.address = alias_buffers_.back().address();
+                out.nhwc_stride = 0;
+            }
+        }
+    }
 }
 
 }  // namespace mlvc::driver_cubin_backend

@@ -535,3 +535,194 @@ extern "C" __global__ void mlvc_depthwise_conv_3x3_small_fp16(
     }
 }
 
+namespace {
+
+__device__ __forceinline__ void fma_h2_pair(
+    float (&acc)[4], const __half2 (&v)[2], const __half2 (&w)[2])
+{
+    const float2 fv0 = __half22float2(v[0]);
+    const float2 fv1 = __half22float2(v[1]);
+    const float2 fw0 = __half22float2(w[0]);
+    const float2 fw1 = __half22float2(w[1]);
+    acc[0] = fmaf(fv0.x, fw0.x, acc[0]);
+    acc[1] = fmaf(fv0.y, fw0.y, acc[1]);
+    acc[2] = fmaf(fv1.x, fw1.x, acc[2]);
+    acc[3] = fmaf(fv1.y, fw1.y, acc[3]);
+}
+
+__device__ __forceinline__ void load_h2_pair(
+    const __half* __restrict__ ptr, __half2 (&dst)[2])
+{
+    const uint2 u = __ldg(reinterpret_cast<const uint2*>(ptr));
+    dst[0] = *reinterpret_cast<const __half2*>(&u.x);
+    dst[1] = *reinterpret_cast<const __half2*>(&u.y);
+}
+
+__device__ __forceinline__ void store_f4_as_u2(
+    __half* __restrict__ ptr, const float (&acc)[4])
+{
+    const __half2 o0 = __floats2half2_rn(acc[0], acc[1]);
+    const __half2 o1 = __floats2half2_rn(acc[2], acc[3]);
+    uint2 u;
+    u.x = *reinterpret_cast<const unsigned int*>(&o0);
+    u.y = *reinterpret_cast<const unsigned int*>(&o1);
+    *reinterpret_cast<uint2*>(ptr) = u;
+}
+
+template <int kStripW>
+__device__ __forceinline__ void dwconv_3x3_nhwc_sliding_u2(
+    const __half* __restrict__ input, const __half* __restrict__ weight_k9c,
+    const __half* __restrict__ bias, __half* __restrict__ output,
+    int batch_count, int channels, int height, int width,
+    int in_stride, int out_stride, int c_chunks)
+{
+    const int z = static_cast<int>(blockIdx.z);
+    const int c_chunk = (batch_count == 1) ? z : (z % c_chunks);
+    const int batch = (batch_count == 1) ? 0 : (z / c_chunks);
+    const int c = (c_chunk * static_cast<int>(blockDim.x) +
+                   static_cast<int>(threadIdx.x)) << 2;
+    const int strip_x = static_cast<int>(blockIdx.x * blockDim.y + threadIdx.y);
+    const int y0 = static_cast<int>(blockIdx.y) << 1;
+    const int x0 = strip_x * kStripW;
+    if (c >= channels || x0 >= width || y0 >= height || batch >= batch_count)
+        return;
+
+    // Keep weights and sliding window in packed __half2 registers to preserve
+    // high warp occupancy on memory-latency-bound depthwise convolutions.
+    const __half2 zero2 = __halves2half2(__float2half(0.0F), __float2half(0.0F));
+    __half2 w[9][2];
+#pragma unroll
+    for (int k = 0; k < 9; ++k)
+        load_h2_pair(weight_k9c + static_cast<std::size_t>(k) * channels + c, w[k]);
+
+    float b[4] = {0.0F, 0.0F, 0.0F, 0.0F};
+    if (bias != nullptr) {
+        __half2 bh[2];
+        load_h2_pair(bias + c, bh);
+        const float2 f0 = __half22float2(bh[0]);
+        const float2 f1 = __half22float2(bh[1]);
+        b[0] = f0.x; b[1] = f0.y; b[2] = f1.x; b[3] = f1.y;
+    }
+
+    const bool has_y1 = (y0 + 1) < height;
+    const std::size_t in_row_stride = static_cast<std::size_t>(width) * in_stride;
+    const std::size_t out_row_stride = static_cast<std::size_t>(width) * out_stride;
+    const __half* in_batch =
+        input + static_cast<std::size_t>(batch) * height * in_row_stride + c;
+    __half* out_batch =
+        output + static_cast<std::size_t>(batch) * height * out_row_stride + c;
+
+    const int ys[4] = {y0 - 1, y0, y0 + 1, y0 + 2};
+    const bool valid_r[4] = {
+        ys[0] >= 0,
+        true,
+        ys[2] < height,
+        has_y1 && (ys[3] < height)};
+    const __half* row_ptrs[4] = {
+        valid_r[0] ? (in_batch + static_cast<std::size_t>(ys[0]) * in_row_stride) : nullptr,
+        in_batch + static_cast<std::size_t>(ys[1]) * in_row_stride,
+        valid_r[2] ? (in_batch + static_cast<std::size_t>(ys[2]) * in_row_stride) : nullptr,
+        valid_r[3] ? (in_batch + static_cast<std::size_t>(ys[3]) * in_row_stride) : nullptr};
+
+    __half2 c_left[4][2];
+    __half2 c_mid[4][2];
+#pragma unroll
+    for (int r = 0; r < 4; ++r) {
+        if (valid_r[r] && x0 > 0) {
+            load_h2_pair(row_ptrs[r] + static_cast<std::size_t>(x0 - 1) * in_stride,
+                         c_left[r]);
+        } else {
+            c_left[r][0] = zero2; c_left[r][1] = zero2;
+        }
+        if (valid_r[r]) {
+            load_h2_pair(row_ptrs[r] + static_cast<std::size_t>(x0) * in_stride,
+                         c_mid[r]);
+        } else {
+            c_mid[r][0] = zero2; c_mid[r][1] = zero2;
+        }
+    }
+
+    __half* out_r0 = out_batch + static_cast<std::size_t>(y0) * out_row_stride +
+                     static_cast<std::size_t>(x0) * out_stride;
+    __half* out_r1 = has_y1 ? (out_r0 + out_row_stride) : nullptr;
+    const int x_end = (x0 + kStripW < width) ? (x0 + kStripW) : width;
+
+    for (int x = x0; x < x_end; ++x) {
+        __half2 c_right[4][2];
+        const bool has_right = (x + 1) < width;
+#pragma unroll
+        for (int r = 0; r < 4; ++r) {
+            if (valid_r[r] && has_right) {
+                load_h2_pair(
+                    row_ptrs[r] + static_cast<std::size_t>(x + 1) * in_stride,
+                    c_right[r]);
+            } else {
+                c_right[r][0] = zero2; c_right[r][1] = zero2;
+            }
+        }
+
+        float acc0[4] = {b[0], b[1], b[2], b[3]};
+        fma_h2_pair(acc0, c_left[0], w[0]);
+        fma_h2_pair(acc0, c_mid[0], w[1]);
+        fma_h2_pair(acc0, c_right[0], w[2]);
+        fma_h2_pair(acc0, c_left[1], w[3]);
+        fma_h2_pair(acc0, c_mid[1], w[4]);
+        fma_h2_pair(acc0, c_right[1], w[5]);
+        fma_h2_pair(acc0, c_left[2], w[6]);
+        fma_h2_pair(acc0, c_mid[2], w[7]);
+        fma_h2_pair(acc0, c_right[2], w[8]);
+        store_f4_as_u2(out_r0 + static_cast<std::size_t>(x - x0) * out_stride, acc0);
+
+        if (has_y1) {
+            float acc1[4] = {b[0], b[1], b[2], b[3]};
+            fma_h2_pair(acc1, c_left[1], w[0]);
+            fma_h2_pair(acc1, c_mid[1], w[1]);
+            fma_h2_pair(acc1, c_right[1], w[2]);
+            fma_h2_pair(acc1, c_left[2], w[3]);
+            fma_h2_pair(acc1, c_mid[2], w[4]);
+            fma_h2_pair(acc1, c_right[2], w[5]);
+            fma_h2_pair(acc1, c_left[3], w[6]);
+            fma_h2_pair(acc1, c_mid[3], w[7]);
+            fma_h2_pair(acc1, c_right[3], w[8]);
+            store_f4_as_u2(out_r1 + static_cast<std::size_t>(x - x0) * out_stride, acc1);
+        }
+
+#pragma unroll
+        for (int r = 0; r < 4; ++r) {
+            c_left[r][0] = c_mid[r][0]; c_left[r][1] = c_mid[r][1];
+            c_mid[r][0] = c_right[r][0]; c_mid[r][1] = c_right[r][1];
+        }
+    }
+}
+
+}  // namespace
+
+// Horizontal-sliding 2x4 NHWC 3x3 depthwise conv (4 channels/thread, uint2).
+// Launch: block = (chunk_threads, strips_per_block, 1),
+//         grid  = (ceil(ceil(W / 4) / strips_per_block), ceil(H / 2), N * c_chunks).
+extern "C" __global__ void mlvc_depthwise_conv_3x3_nhwc_h4_u2_fp16(
+    const __half* __restrict__ input, const __half* __restrict__ weight_k9c,
+    const __half* __restrict__ bias, __half* __restrict__ output,
+    int batch_count, int channels, int height, int width,
+    int in_stride, int out_stride, int c_chunks)
+{
+    dwconv_3x3_nhwc_sliding_u2<4>(
+        input, weight_k9c, bias, output, batch_count, channels, height, width,
+        in_stride, out_stride, c_chunks);
+}
+
+// Horizontal-sliding 2x2 NHWC 3x3 depthwise conv for compact maps (12x20, 6x10, 3x5).
+// Cuts per-CTA loop latency in half and doubles SM parallelism on small spatial maps.
+// Launch: block = (chunk_threads, strips_per_block, 1),
+//         grid  = (ceil(ceil(W / 2) / strips_per_block), ceil(H / 2), N * c_chunks).
+extern "C" __global__ void mlvc_depthwise_conv_3x3_nhwc_h2_u2_fp16(
+    const __half* __restrict__ input, const __half* __restrict__ weight_k9c,
+    const __half* __restrict__ bias, __half* __restrict__ output,
+    int batch_count, int channels, int height, int width,
+    int in_stride, int out_stride, int c_chunks)
+{
+    dwconv_3x3_nhwc_sliding_u2<2>(
+        input, weight_k9c, bias, output, batch_count, channels, height, width,
+        in_stride, out_stride, c_chunks);
+}
+

@@ -36,6 +36,29 @@ void AotGraph::plan_input_slice_aliases()
              ++start) {
             if (!is_channel_slice(node, start, start + output_channels))
                 continue;
+            if (use_nhwc_) {
+                if ((start % 8) != 0 || (output_channels % 8) != 0 ||
+                    (value_stride(input) % 8) != 0) {
+                    break;
+                }
+                bool all_supported = true;
+                for (const auto& consumer : graph_.nodes) {
+                    if (std::find(consumer.inputs.begin(), consumer.inputs.end(),
+                                  outputs[0]) != consumer.inputs.end()) {
+                        if (!supports_strided_nhwc_input(consumer)) {
+                            all_supported = false;
+                            break;
+                        }
+                    }
+                }
+                if (!all_supported)
+                    break;
+                output.address = input.address +
+                    static_cast<std::size_t>(start) * dtype_bytes(input.dtype);
+                output.nhwc_stride = value_stride(input);
+                aliased_input_slices_.push_back(node.index);
+                break;
+            }
             const std::size_t channel_bytes =
                 static_cast<std::size_t>(input.shape[2] * input.shape[3]) *
                 dtype_bytes(input.dtype);
@@ -45,6 +68,74 @@ void AotGraph::plan_input_slice_aliases()
                 node.index);
             break;
         }
+    }
+}
+
+void AotGraph::plan_spatial_slice_aliases()
+{
+    if (!use_nhwc_)
+        return;
+    for (const auto& node : graph_.nodes) {
+        if (node.op != Op::SLICE || node.inputs.size() < 2 ||
+            node.outputs.size() != 1) {
+            continue;
+        }
+        const TensorId in_id = node.inputs[0];
+        const TensorId out_id = node.outputs[0];
+        if (in_id == 0 || out_id == 0 ||
+            tensor_consumer_count(in_id) != 1 ||
+            std::find(input_ids_.begin(), input_ids_.end(), in_id) !=
+                input_ids_.end() ||
+            std::find(output_ids_.begin(), output_ids_.end(), in_id) !=
+                output_ids_.end() ||
+            std::find(output_ids_.begin(), output_ids_.end(), out_id) !=
+                output_ids_.end()) {
+            continue;
+        }
+        Value& input = values_.at(in_id);
+        Value& output = values_.at(out_id);
+        if (input.initializer || input.dtype != DataType::FP16 ||
+            output.dtype != DataType::FP16 || input.shape.size() != 4 ||
+            output.shape.size() != 4 || input.shape[0] != 1 ||
+            output.shape[0] != 1 || input.shape[1] != output.shape[1] ||
+            input.shape[3] != output.shape[3] ||
+            output.shape[2] >= input.shape[2] || !is_packed_nhwc(input) ||
+            !std::holds_alternative<ArenaSlot>(graph_.tensors.at(in_id).storage) ||
+            !std::holds_alternative<ArenaSlot>(graph_.tensors.at(out_id).storage)) {
+            continue;
+        }
+        const auto starts_vals = initializer_values<std::int64_t>(node.inputs[1]);
+        const auto axes_vals = node.inputs.size() > 3 && node.inputs[3] != 0
+            ? initializer_values<std::int64_t>(node.inputs[3])
+            : std::vector<std::int64_t>{};
+        const auto steps_vals = node.inputs.size() > 4 && node.inputs[4] != 0
+            ? initializer_values<std::int64_t>(node.inputs[4])
+            : std::vector<std::int64_t>{};
+        bool prefix_h_slice = true;
+        for (std::size_t i = 0; i < starts_vals.size(); ++i) {
+            int axis = axes_vals.empty() ? static_cast<int>(i)
+                                         : static_cast<int>(axes_vals.at(i));
+            if (axis < 0)
+                axis += 4;
+            int step = steps_vals.empty() ? 1 : static_cast<int>(steps_vals.at(i));
+            if (starts_vals[i] != 0 || step != 1 || axis != 2) {
+                prefix_h_slice = false;
+                break;
+            }
+        }
+        if (!prefix_h_slice)
+            continue;
+        // Allocate a dedicated buffer shared by input and its height-prefix slice
+        // so the slice becomes a 0 us no-op with zero arena lifetime conflicts.
+        const std::size_t bytes =
+            element_count(input.shape) * dtype_bytes(input.dtype);
+        alias_buffers_.push_back(driver_.allocate(bytes));
+        input.address = alias_buffers_.back().address();
+        output.address = alias_buffers_.back().address();
+        output.nhwc_stride = input.nhwc_stride;
+        aliased_input_slices_.push_back(node.index);
+        aliased_spatial_values_.push_back(in_id);
+        aliased_spatial_values_.push_back(out_id);
     }
 }
 
@@ -138,6 +229,8 @@ void AotGraph::plan_reglu_buffer()
 
 void AotGraph::plan_spatial_buffers()
 {
+    if (use_nhwc_)
+        return;
     const auto& nodes = graph_.nodes;
     if (driver_.device_info().compute_major >= 8) {
         std::size_t spatial_input_bytes = 0;
@@ -203,10 +296,13 @@ void AotGraph::plan_direct_concat_buffers()
 
         std::vector<bool> redirect(inputs.size(), false);
         bool has_redirect = false;
+        std::size_t scan_channel_offset = 0;
         for (std::size_t input_index = 0; input_index < inputs.size();
              ++input_index) {
             TensorId input_name = inputs[input_index];
             const Value& input = value(input_name);
+            const std::size_t this_offset = scan_channel_offset;
+            scan_channel_offset += static_cast<std::size_t>(input.shape[1]);
             if (input.initializer || input.dtype != output.dtype ||
                 input.shape.size() != 4 || input.shape[0] != 1 ||
                 input.shape[2] != output.shape[2] ||
@@ -214,22 +310,36 @@ void AotGraph::plan_direct_concat_buffers()
                 std::find(input_ids_.begin(), input_ids_.end(),
                           input_name) != input_ids_.end() ||
                 std::find(output_ids_.begin(), output_ids_.end(),
-                          input_name) != output_ids_.end()) {
+                          input_name) != output_ids_.end() ||
+                std::find(aliased_spatial_values_.begin(),
+                          aliased_spatial_values_.end(), input_name) !=
+                    aliased_spatial_values_.end()) {
+                continue;
+            }
+            if (use_nhwc_ &&
+                ((this_offset % 8U) != 0 || (output.shape[1] % 8) != 0 ||
+                 (input.shape[1] % 8) != 0)) {
                 continue;
             }
             std::size_t consumers = 0;
-            bool produced = false;
+            const Node* producer_node = nullptr;
             for (const auto& candidate : nodes) {
                 const auto candidate_inputs = candidate.inputs;
                 consumers += static_cast<std::size_t>(std::count(
                     candidate_inputs.begin(), candidate_inputs.end(),
                     input_name));
                 const auto candidate_outputs = candidate.outputs;
-                produced = produced || std::find(
-                    candidate_outputs.begin(), candidate_outputs.end(),
-                    input_name) != candidate_outputs.end();
+                if (std::find(candidate_outputs.begin(),
+                              candidate_outputs.end(),
+                              input_name) != candidate_outputs.end()) {
+                    producer_node = &candidate;
+                }
             }
-            redirect[input_index] = produced && consumers == 1;
+            bool can_redirect = producer_node != nullptr && consumers == 1;
+            if (can_redirect && use_nhwc_) {
+                can_redirect = supports_strided_nhwc_output(*producer_node);
+            }
+            redirect[input_index] = can_redirect;
             has_redirect = has_redirect || redirect[input_index];
         }
         if (!has_redirect)
@@ -246,7 +356,14 @@ void AotGraph::plan_direct_concat_buffers()
              ++input_index) {
             Value& input = values_.at(inputs[input_index]);
             if (redirect[input_index]) {
-                input.address = output.address + channel_offset * channel_bytes;
+                if (use_nhwc_) {
+                    input.address = output.address +
+                        channel_offset * dtype_bytes(output.dtype);
+                    input.nhwc_stride = value_stride(output);
+                } else {
+                    input.address =
+                        output.address + channel_offset * channel_bytes;
+                }
                 direct_concat_values_.push_back(inputs[input_index]);
             }
             channel_offset += static_cast<std::size_t>(input.shape[1]);

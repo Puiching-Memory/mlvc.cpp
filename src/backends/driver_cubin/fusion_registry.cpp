@@ -235,7 +235,13 @@ std::size_t AotGraph::try_execute_y0_tail(const std::vector<Node>& nodes, std::s
 
     const int batch_count = static_cast<int>(raw_shape[0]);
     const bool raw_in_place_latent =
-        batch_count == 1 && raw_value.address == latent_value.address;
+        !use_nhwc_ && batch_count == 1 &&
+        raw_value.address == latent_value.address;
+    if (use_nhwc_ &&
+        (!is_packed_nhwc(normalized_value) || !is_packed_nhwc(clipped_value) ||
+         !is_packed_nhwc(concat2_value))) {
+        return 0;
+    }
     if (ranges_overlap(concat3_value, prior_value) ||
         ranges_overlap(concat3_value, latent_value) ||
         ranges_overlap(concat3_value, normalized_value) ||
@@ -246,14 +252,16 @@ std::size_t AotGraph::try_execute_y0_tail(const std::vector<Node>& nodes, std::s
         ranges_overlap(concat2_value, normalized_value) ||
         ranges_overlap(concat2_value, clipped_value) ||
         (ranges_overlap(concat2_value, latent_value) &&
-         concat2_value.address != latent_value.address) ||
+         (concat2_value.address != latent_value.address ||
+          (use_nhwc_ && value_stride(latent_value) != quant_channels * 2))) ||
         ranges_overlap(raw_value, prior_value) ||
         ranges_overlap(raw_value, normalized_value) ||
         ranges_overlap(raw_value, clipped_value) ||
         ranges_overlap(raw_value, concat2_value) ||
         (ranges_overlap(raw_value, latent_value) && !raw_in_place_latent) ||
         (ranges_overlap(normalized_value, latent_value) &&
-         normalized_value.address != latent_value.address) ||
+         (normalized_value.address != latent_value.address ||
+          (use_nhwc_ && value_stride(latent_value) != quant_channels * 2))) ||
         ranges_overlap(normalized_value, prior_value) ||
         ranges_overlap(normalized_value, clipped_value) ||
         ranges_overlap(clipped_value, prior_value) ||
@@ -276,6 +284,23 @@ std::size_t AotGraph::try_execute_y0_tail(const std::vector<Node>& nodes, std::s
     float clip_min = scalar_fp16(clip_inputs[1]);
     int batch_param = batch_count;
     int spatial_count = static_cast<int>(raw_shape[2] * raw_shape[3]);
+    if (use_nhwc_) {
+        int latent_stride = value_stride(latent_value);
+        int prior_stride = value_stride(prior_value);
+        int concat3_stride = value_stride(concat3_value);
+        void* parameters[] = {
+            &latent, &prior, &quant, &update0, &update1, &normalized_address,
+            &clipped_address, &raw, &concat2_address, &concat3_address,
+            &clip_min, &clip_max, &batch_param, &quant_channels, &spatial_count,
+            &latent_stride, &prior_stride, &concat3_stride};
+        driver_.launch(
+            y0_tail_nhwc_,
+            {divide_up(static_cast<std::size_t>(quant_channels), 16),
+             divide_up(static_cast<std::size_t>(spatial_count), 16),
+             static_cast<unsigned int>(batch_count)},
+            {16, 16, 1}, 0, parameters);
+        return (cursor + 15) - index;
+    }
     void* parameters[] = {
         &latent, &prior, &quant, &update0, &update1, &normalized_address,
         &clipped_address, &raw, &concat2_address, &concat3_address,
@@ -423,18 +448,27 @@ bool AotGraph::try_execute_y1_tail(const std::vector<Node>& nodes, std::size_t i
         return false;
     }
 
+    if (use_nhwc_ &&
+        (!is_packed_nhwc(normalized_value) || !is_packed_nhwc(concat2_value) ||
+         !is_packed_nhwc(clipped_value))) {
+        return false;
+    }
     if (ranges_overlap(raw_value, normalized_value) ||
         ranges_overlap(raw_value, prior_value) ||
         ranges_overlap(raw_value, concat2_value) ||
         ranges_overlap(raw_value, clipped_value) ||
         (ranges_overlap(result, concat2_value) &&
-         result.address != concat2_value.address) ||
+         (result.address != concat2_value.address ||
+          (use_nhwc_ && value_stride(result) != quant_channels * 2))) ||
         (ranges_overlap(result, normalized_value) &&
-         result.address != normalized_value.address) ||
+         (result.address != normalized_value.address ||
+          (use_nhwc_ && value_stride(result) != quant_channels * 2))) ||
         (ranges_overlap(result, prior_value) &&
-         result.address != prior_value.address) ||
+         (result.address != prior_value.address ||
+          (use_nhwc_ && value_stride(result) != value_stride(prior_value)))) ||
         (ranges_overlap(result, clipped_value) &&
-         result.address != clipped_value.address) ||
+         (result.address != clipped_value.address ||
+          (use_nhwc_ && value_stride(result) != quant_channels * 2))) ||
         ranges_overlap(result, raw_value)) {
         return false;
     }
@@ -452,6 +486,21 @@ bool AotGraph::try_execute_y1_tail(const std::vector<Node>& nodes, std::size_t i
     DeviceAddress result_address = result.address;
     int batch_count = static_cast<int>(raw_shape[0]);
     int spatial_count = static_cast<int>(raw_shape[2] * raw_shape[3]);
+    if (use_nhwc_) {
+        int prior_stride = value_stride(prior_value);
+        int output_stride = value_stride(result);
+        void* parameters[] = {
+            &normalized, &prior, &quant, &update0, &update1, &concat2,
+            &clipped, &raw, &result_address, &batch_count, &quant_channels,
+            &spatial_count, &prior_stride, &output_stride};
+        driver_.launch(
+            y1_tail_nhwc_,
+            {divide_up(static_cast<std::size_t>(quant_channels), 16),
+             divide_up(static_cast<std::size_t>(spatial_count), 16),
+             static_cast<unsigned int>(batch_count)},
+            {16, 16, 1}, 0, parameters);
+        return true;
+    }
     void* parameters[] = {
         &normalized, &prior, &quant, &update0, &update1, &concat2,
         &clipped, &raw, &result_address, &batch_count, &quant_channels,
@@ -606,6 +655,10 @@ bool AotGraph::try_execute_dec_y0_tail(const std::vector<Node>& nodes, std::size
         return false;
     }
 
+    if (use_nhwc_ &&
+        (!is_packed_nhwc(clipped_value) || !is_packed_nhwc(concat2_value))) {
+        return false;
+    }
     if (ranges_overlap(concat3_value, prior_value) ||
         ranges_overlap(concat3_value, raw_value) ||
         ranges_overlap(concat3_value, clipped_value) ||
@@ -630,6 +683,22 @@ bool AotGraph::try_execute_dec_y0_tail(const std::vector<Node>& nodes, std::size
     float clip_min = scalar_fp16(clip_inputs[1]);
     int batch_count = static_cast<int>(raw_shape[0]);
     int spatial_count = static_cast<int>(raw_shape[2] * raw_shape[3]);
+    if (use_nhwc_) {
+        int prior_stride = value_stride(prior_value);
+        int concat3_stride = value_stride(concat3_value);
+        void* parameters[] = {
+            &prior, &raw, &update0, &update1, &clipped_address,
+            &concat2_address, &concat3_address, &clip_min, &clip_max,
+            &batch_count, &quant_channels, &spatial_count,
+            &prior_stride, &concat3_stride};
+        driver_.launch(
+            dec_y0_tail_nhwc_,
+            {divide_up(static_cast<std::size_t>(quant_channels), 16),
+             divide_up(static_cast<std::size_t>(spatial_count), 16),
+             static_cast<unsigned int>(batch_count)},
+            {16, 16, 1}, 0, parameters);
+        return true;
+    }
     void* parameters[] = {
         &prior, &raw, &update0, &update1, &clipped_address,
         &concat2_address, &concat3_address, &clip_min, &clip_max,
@@ -766,13 +835,20 @@ bool AotGraph::try_execute_dec_y1_tail(const std::vector<Node>& nodes, std::size
         return false;
     }
 
+    if (use_nhwc_ &&
+        (!is_packed_nhwc(concat2_value) || !is_packed_nhwc(clipped_value))) {
+        return false;
+    }
     if (ranges_overlap(result, raw_value) ||
         (ranges_overlap(result, prior_value) &&
-         result.address != prior_value.address) ||
+         (result.address != prior_value.address ||
+          (use_nhwc_ && value_stride(result) != value_stride(prior_value)))) ||
         (ranges_overlap(result, concat2_value) &&
-         result.address != concat2_value.address) ||
+         (result.address != concat2_value.address ||
+          (use_nhwc_ && value_stride(result) != quant_channels * 2))) ||
         (ranges_overlap(result, clipped_value) &&
-         result.address != clipped_value.address)) {
+         (result.address != clipped_value.address ||
+          (use_nhwc_ && value_stride(result) != quant_channels * 2)))) {
         return false;
     }
 
@@ -787,6 +863,21 @@ bool AotGraph::try_execute_dec_y1_tail(const std::vector<Node>& nodes, std::size
     DeviceAddress result_address = result.address;
     int batch_count = static_cast<int>(raw_shape[0]);
     int spatial_count = static_cast<int>(raw_shape[2] * raw_shape[3]);
+    if (use_nhwc_) {
+        int prior_stride = value_stride(prior_value);
+        int output_stride = value_stride(result);
+        void* parameters[] = {
+            &prior, &raw, &update0, &update1, &concat2, &clipped,
+            &result_address, &batch_count, &quant_channels, &spatial_count,
+            &prior_stride, &output_stride};
+        driver_.launch(
+            dec_y1_tail_nhwc_,
+            {divide_up(static_cast<std::size_t>(quant_channels), 16),
+             divide_up(static_cast<std::size_t>(spatial_count), 16),
+             static_cast<unsigned int>(batch_count)},
+            {16, 16, 1}, 0, parameters);
+        return true;
+    }
     void* parameters[] = {
         &prior, &raw, &update0, &update1, &concat2, &clipped,
         &result_address, &batch_count, &quant_channels, &spatial_count};
@@ -910,6 +1001,24 @@ bool AotGraph::try_execute_feature_update(const std::vector<Node>& nodes, std::s
     DeviceAddress result_address = result.address;
     int batch_count = static_cast<int>(first.shape[0]);
     int spatial_count = static_cast<int>(first.shape[2] * first.shape[3]);
+    if (use_nhwc_) {
+        int input_stride = value_stride(source);
+        int history_stride = value_stride(history);
+        int output_stride = value_stride(result);
+        const bool vec8 = ((channels & 7) == 0) && ((input_stride & 7) == 0) &&
+            ((history_stride & 7) == 0) && ((output_stride & 7) == 0) &&
+            ((source_address & 15U) == 0) && ((history_address & 15U) == 0) &&
+            ((scale_address & 15U) == 0) && ((result_address & 15U) == 0);
+        const std::size_t work = static_cast<std::size_t>(batch_count) *
+            static_cast<std::size_t>(spatial_count) *
+            static_cast<std::size_t>(vec8 ? (channels / 8) : channels);
+        void* parameters[] = {
+            &source_address, &history_address, &scale_address, &result_address,
+            &batch_count, &channels, &spatial_count,
+            &input_stride, &history_stride, &output_stride};
+        launch_linear(feature_update_nhwc_, work, parameters);
+        return true;
+    }
     void* parameters[] = {
         &source_address, &history_address, &scale_address, &result_address,
         &batch_count, &channels, &spatial_count};
@@ -1081,6 +1190,29 @@ bool AotGraph::try_execute_feature_update_outputs(
     DeviceAddress result_address = result.address;
     int batch_count = static_cast<int>(first.shape[0]);
     int spatial_count = static_cast<int>(first.shape[2] * first.shape[3]);
+    if (use_nhwc_) {
+        int input_stride = value_stride(source);
+        int history_stride = value_stride(history);
+        int scaled_stride = value_stride(scaled_value);
+        int blended_stride = value_stride(blended_value);
+        int feature_stride = value_stride(result);
+        const bool vec8 = ((channels & 7) == 0) && ((input_stride & 7) == 0) &&
+            ((history_stride & 7) == 0) && ((scaled_stride & 7) == 0) &&
+            ((blended_stride & 7) == 0) && ((feature_stride & 7) == 0) &&
+            ((source_address & 15U) == 0) && ((history_address & 15U) == 0) &&
+            ((scale_address & 15U) == 0) && ((scaled_address & 15U) == 0) &&
+            ((blended_address & 15U) == 0) && ((result_address & 15U) == 0);
+        const std::size_t work = static_cast<std::size_t>(batch_count) *
+            static_cast<std::size_t>(spatial_count) *
+            static_cast<std::size_t>(vec8 ? (channels / 8) : channels);
+        void* parameters[] = {
+            &source_address, &history_address, &scale_address, &scaled_address,
+            &blended_address, &result_address, &batch_count, &channels,
+            &spatial_count, &input_stride, &history_stride, &scaled_stride,
+            &blended_stride, &feature_stride};
+        launch_linear(feature_update_outputs_nhwc_, work, parameters);
+        return true;
+    }
     void* parameters[] = {
         &source_address, &history_address, &scale_address, &scaled_address,
         &blended_address, &result_address, &batch_count, &channels,
@@ -1177,17 +1309,24 @@ bool AotGraph::try_execute_pointwise_epilogue(const std::vector<Node>& nodes, st
     const int out_channels = static_cast<int>(output.shape[1]);
     const int spatial_count =
         static_cast<int>(output.shape[2] * output.shape[3]);
+    const int in_stride = use_nhwc_ ? value_stride(input) : 0;
+    const int res_stride = (use_nhwc_ && residual) ? value_stride(*residual) : 0;
+    const int out_stride = use_nhwc_ ? value_stride(output) : 0;
     const bool cutlass_supported = can_use_cutlass_pointwise(
         batch_count, has_bias, in_channels, spatial_count, out_channels,
-        epilogue, alpha, epilogue_input_address != 0);
-    const bool mma_supported =
-        (in_channels % 16 == 0) &&
-        ((out_channels % 128 == 0) ||
-         (spatial_count < 920 && (out_channels % 16 == 0)));
+        epilogue, alpha, epilogue_input_address != 0,
+        in_stride, res_stride, out_stride);
+    const bool mma_supported = use_nhwc_
+        ? ((in_channels % 16 == 0) && (out_channels % 16 == 0) &&
+           (in_stride % 8 == 0))
+        : ((in_channels % 16 == 0) &&
+           ((out_channels % 128 == 0) ||
+            (spatial_count < 920 && (out_channels % 16 == 0))));
     if (!cutlass_supported && !mma_supported)
         return false;
 
-    execute(convolution, &output, epilogue_input_address, epilogue, alpha);
+    execute(convolution, &output, epilogue_input_address, epilogue, alpha,
+            res_stride);
     return true;
 }
 
@@ -1257,14 +1396,32 @@ bool AotGraph::try_execute_reglu(const std::vector<Node>& nodes, std::size_t ind
     DeviceAddress input_address = input.address;
     if (std::find(direct_concat_values_.begin(),
                   direct_concat_values_.end(), multiply_outputs[0]) ==
-        direct_concat_values_.end()) {
+            direct_concat_values_.end() &&
+        std::find(aliased_spatial_values_.begin(),
+                  aliased_spatial_values_.end(), multiply_outputs[0]) ==
+            aliased_spatial_values_.end()) {
         output.address = reglu_buffer_.address();
+        output.nhwc_stride = 0;
     }
     if (batch_initializing_cutlass_)
         return true;
     DeviceAddress output_address = output.address;
     int batch_count = static_cast<int>(output.shape[0]);
     int spatial_count = static_cast<int>(output.shape[2] * output.shape[3]);
+    if (use_nhwc_) {
+        int pixels = batch_count * spatial_count;
+        int in_stride = value_stride(input);
+        int out_stride = value_stride(output);
+        void* parameters[] = {
+            &input_address, &output_address, &pixels, &channels,
+            &in_stride, &out_stride, &minimum, &maximum};
+        driver_.launch(
+            reglu_nhwc_,
+            {divide_up(static_cast<std::size_t>(channels), 32),
+             divide_up(static_cast<std::size_t>(pixels), 8), 1},
+            {32, 8, 1}, 0, parameters);
+        return true;
+    }
     int work_count = spatial_count % 2 == 0 ? spatial_count / 2 : spatial_count;
     void* parameters[] = {
         &input_address, &output_address, &batch_count, &channels,
@@ -1364,15 +1521,32 @@ bool AotGraph::try_execute_pointwise_reglu(const std::vector<Node>& nodes, std::
     DeviceAddress bias_address = convolution_inputs.size() > 2 &&
         !(convolution_inputs[2] == 0)
         ? value(convolution_inputs[2]).address : 0;
-    const bool cutlass_reglu_eligible =
-        batch_count == 1 && bias_address != 0 && spatial_count >= 920 &&
-        (spatial_count % 8) == 0 && (in_channels % 8) == 0 &&
-        (gate_channels % 8) == 0 &&
-        tensor_consumer_count(convolution_outputs[0]) == 2 &&
-        tensor_consumer_count(first_outputs[0]) == 1 &&
-        tensor_consumer_count(second_outputs[0]) == 1 &&
-        tensor_consumer_count(clip_outputs[0]) == 1;
-    const bool mma_reglu_eligible =
+    const int in_stride = use_nhwc_ ? value_stride(input) : 0;
+    const bool redirect_reglu_out =
+        std::find(direct_concat_values_.begin(),
+                  direct_concat_values_.end(), multiply_outputs[0]) ==
+            direct_concat_values_.end() &&
+        std::find(aliased_spatial_values_.begin(),
+                  aliased_spatial_values_.end(), multiply_outputs[0]) ==
+            aliased_spatial_values_.end();
+    const int out_stride = use_nhwc_
+        ? (redirect_reglu_out ? gate_channels : value_stride(output)) : 0;
+    const bool cutlass_reglu_eligible = use_nhwc_
+        ? (batch_count == 1 && bias_address != 0 && (in_channels % 8) == 0 &&
+           (gate_channels % 8) == 0 && (in_stride % 8) == 0 &&
+           (out_stride % 8) == 0 &&
+           tensor_consumer_count(convolution_outputs[0]) == 2 &&
+           tensor_consumer_count(first_outputs[0]) == 1 &&
+           tensor_consumer_count(second_outputs[0]) == 1 &&
+           tensor_consumer_count(clip_outputs[0]) == 1)
+        : (batch_count == 1 && bias_address != 0 && spatial_count >= 920 &&
+           (spatial_count % 8) == 0 && (in_channels % 8) == 0 &&
+           (gate_channels % 8) == 0 &&
+           tensor_consumer_count(convolution_outputs[0]) == 2 &&
+           tensor_consumer_count(first_outputs[0]) == 1 &&
+           tensor_consumer_count(second_outputs[0]) == 1 &&
+           tensor_consumer_count(clip_outputs[0]) == 1);
+    const bool mma_reglu_eligible = !use_nhwc_ &&
         (in_channels % 16 == 0) &&
         ((spatial_count < 920 && (gate_channels % 16 == 0)) ||
          (gate_channels % 64 == 0));
@@ -1390,26 +1564,43 @@ bool AotGraph::try_execute_pointwise_reglu(const std::vector<Node>& nodes, std::
         maximum = scalar_fp16(clip_inputs[2]);
     DeviceAddress input_address = input.address;
     DeviceAddress weight_address = weight.address;
-    if (std::find(direct_concat_values_.begin(),
-                  direct_concat_values_.end(), multiply_outputs[0]) ==
-        direct_concat_values_.end()) {
+    if (redirect_reglu_out) {
         output.address = reglu_buffer_.address();
+        output.nhwc_stride = 0;
     }
     DeviceAddress output_address = output.address;
     if (cutlass_reglu_eligible &&
         launch_cutlass_pointwise_reglu(
             convolution, input_address, weight_address, bias_address,
             output_address, batch_count, in_channels, spatial_count,
-            gate_channels, minimum, maximum)) {
+            gate_channels, minimum, maximum, in_stride, out_stride)) {
         return true;
     }
     DeviceAddress convolution_output_address = convolution_output.address;
+    const int conv_out_stride =
+        use_nhwc_ ? value_stride(convolution_output) : 0;
     if (launch_cutlass_pointwise(
             convolution, input_address, weight_address, bias_address, 0,
             convolution_output_address, batch_count, in_channels,
-            spatial_count, gate_channels * 2, 0, 0.0F)) {
+            spatial_count, gate_channels * 2, 0, 0.0F,
+            in_stride, 0, conv_out_stride)) {
         if (batch_initializing_cutlass_)
             return true;
+        if (use_nhwc_) {
+            int pixels = batch_count * spatial_count;
+            int r_in_stride = conv_out_stride;
+            int r_out_stride = value_stride(output);
+            void* reglu_parameters[] = {
+                &convolution_output_address, &output_address, &pixels,
+                &gate_channels, &r_in_stride, &r_out_stride,
+                &minimum, &maximum};
+            driver_.launch(
+                reglu_nhwc_,
+                {divide_up(static_cast<std::size_t>(gate_channels), 32),
+                 divide_up(static_cast<std::size_t>(pixels), 8), 1},
+                {32, 8, 1}, 0, reglu_parameters);
+            return true;
+        }
         const int work_count = (spatial_count & 1) == 0
             ? spatial_count / 2 : spatial_count;
         void* reglu_parameters[] = {

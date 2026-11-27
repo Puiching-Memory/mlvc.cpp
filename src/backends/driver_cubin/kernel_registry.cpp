@@ -174,6 +174,116 @@ void AotGraph::register_kernels()
         oihw_to_krsc_ = module_.function("mlvc_oihw_to_krsc_fp16");
         interleave_reglu_rows_ =
             module_.function("mlvc_interleave_reglu_rows_fp16");
+        interleave_reglu_pairs_ =
+            module_.function("mlvc_interleave_reglu_pairs_fp16");
+        dwconv_weight_oihw_to_k9c_ =
+            module_.function("mlvc_dwconv_weight_oihw_to_k9c_fp16");
+        binary_strided_nhwc_ =
+            module_.function("mlvc_binary_strided_nhwc_fp16");
+        binary_channel_broadcast_nhwc_ =
+            module_.function("mlvc_binary_channel_broadcast_nhwc_fp16");
+        unary_strided_nhwc_ =
+            module_.function("mlvc_unary_strided_nhwc_fp16");
+        reglu_nhwc_ = module_.function("mlvc_reglu_nhwc_fp16");
+        feature_update_nhwc_ =
+            module_.function("mlvc_feature_update_nhwc_fp16");
+        feature_update_outputs_nhwc_ =
+            module_.function("mlvc_feature_update_outputs_nhwc_fp16");
+        y0_tail_nhwc_ = module_.function("mlvc_y0_tail_nhwc_fp16");
+        y1_tail_nhwc_ = module_.function("mlvc_y1_tail_nhwc_fp16");
+        dec_y0_tail_nhwc_ = module_.function("mlvc_dec_y0_tail_nhwc_fp16");
+        dec_y1_tail_nhwc_ = module_.function("mlvc_dec_y1_tail_nhwc_fp16");
+        yuv420_to_nhwc_ = module_.function("mlvc_yuv420_to_nhwc_fp16");
+        yuv420_to_s2d8_nhwc_ =
+            module_.function("mlvc_yuv420_to_s2d8_nhwc_fp16");
+        nhwc_to_yuv420_ = module_.function("mlvc_nhwc_to_yuv420");
+        d2s8_nhwc_to_yuv420_ = module_.function("mlvc_d2s8_nhwc_to_yuv420");
+        copy_2d_nhwc_ = module_.function("mlvc_copy_2d_nhwc_fp16");
+        slice_nhwc_ = module_.function("mlvc_slice_nhwc_fp16");
+        concat_copy_nhwc_ = module_.function("mlvc_concat_copy_nhwc_fp16");
+        depth_to_space_nhwc_ =
+            module_.function("mlvc_depth_to_space_nhwc_fp16");
+        space_to_depth_nhwc_ =
+            module_.function("mlvc_space_to_depth_nhwc_fp16");
+        round_nhwc_to_nchw_ = module_.function("mlvc_round_nhwc_to_nchw_fp16");
+        depthwise_conv_3x3_nhwc_h4_u2_ =
+            module_.function("mlvc_depthwise_conv_3x3_nhwc_h4_u2_fp16");
+        depthwise_conv_3x3_nhwc_h2_u2_ =
+            module_.function("mlvc_depthwise_conv_3x3_nhwc_h2_u2_fp16");
+        pointwise_conv_mma_tiny_nhwc_ =
+            module_.function("mlvc_pointwise_conv_mma_tiny_nhwc_fp16");
+        cutlass_nhwc_m128n64_init_ =
+            module_.function("mlvc_cutlass_nhwc_m128n64_init_fp16");
+        cutlass_nhwc_m128n64_ =
+            module_.function("mlvc_cutlass_nhwc_m128n64_fp16");
+        cutlass_nhwc_m128n64_leaky_relu_init_ =
+            module_.function("mlvc_cutlass_nhwc_m128n64_leaky_relu_init_fp16");
+        cutlass_nhwc_m128n64_leaky_relu_ =
+            module_.function("mlvc_cutlass_nhwc_m128n64_leaky_relu_fp16");
+        cutlass_nhwc_m128n64_residual_init_ =
+            module_.function("mlvc_cutlass_nhwc_m128n64_residual_init_fp16");
+        cutlass_nhwc_m128n64_residual_ =
+            module_.function("mlvc_cutlass_nhwc_m128n64_residual_fp16");
+        cutlass_nhwc_m128n128_init_ =
+            module_.function("mlvc_cutlass_nhwc_m128n128_init_fp16");
+        cutlass_nhwc_m128n128_ =
+            module_.function("mlvc_cutlass_nhwc_m128n128_fp16");
+        cutlass_nhwc_m128n128_stage4_init_ =
+            module_.function("mlvc_cutlass_nhwc_m128n128_stage4_init_fp16");
+        cutlass_nhwc_m128n128_stage4_ =
+            module_.function("mlvc_cutlass_nhwc_m128n128_stage4_fp16");
+        driver_.set_max_dynamic_shared_memory(
+            cutlass_nhwc_m128n128_stage4_, 65536U);
+        cutlass_nhwc_m128n128_leaky_relu_init_ =
+            module_.function("mlvc_cutlass_nhwc_m128n128_leaky_relu_init_fp16");
+        cutlass_nhwc_m128n128_leaky_relu_ =
+            module_.function("mlvc_cutlass_nhwc_m128n128_leaky_relu_fp16");
+        cutlass_nhwc_m128n128_residual_init_ =
+            module_.function("mlvc_cutlass_nhwc_m128n128_residual_init_fp16");
+        cutlass_nhwc_m128n128_residual_ =
+            module_.function("mlvc_cutlass_nhwc_m128n128_residual_fp16");
+        cutlass_nhwc_m128n128_reglu_init_ =
+            module_.function("mlvc_cutlass_nhwc_m128n128_reglu_init_fp16");
+        cutlass_nhwc_m128n128_reglu_ =
+            module_.function("mlvc_cutlass_nhwc_m128n128_reglu_fp16");
+        cutlass_nhwc_m128n128_stage4_reglu_init_ = module_.function(
+            "mlvc_cutlass_nhwc_m128n128_stage4_reglu_init_fp16");
+        cutlass_nhwc_m128n128_stage4_reglu_ =
+            module_.function("mlvc_cutlass_nhwc_m128n128_stage4_reglu_fp16");
+        driver_.set_max_dynamic_shared_memory(
+            cutlass_nhwc_m128n128_stage4_reglu_, 65536U);
+        cutlass_nhwc_m64n128_init_ =
+            module_.function("mlvc_cutlass_nhwc_m64n128_init_fp16");
+        cutlass_nhwc_m64n128_ =
+            module_.function("mlvc_cutlass_nhwc_m64n128_fp16");
+        cutlass_nhwc_m64n128_leaky_relu_init_ =
+            module_.function("mlvc_cutlass_nhwc_m64n128_leaky_relu_init_fp16");
+        cutlass_nhwc_m64n128_leaky_relu_ =
+            module_.function("mlvc_cutlass_nhwc_m64n128_leaky_relu_fp16");
+        cutlass_nhwc_m64n128_residual_init_ =
+            module_.function("mlvc_cutlass_nhwc_m64n128_residual_init_fp16");
+        cutlass_nhwc_m64n128_residual_ =
+            module_.function("mlvc_cutlass_nhwc_m64n128_residual_fp16");
+        cutlass_nhwc_m64n128_reglu_init_ =
+            module_.function("mlvc_cutlass_nhwc_m64n128_reglu_init_fp16");
+        cutlass_nhwc_m64n128_reglu_ =
+            module_.function("mlvc_cutlass_nhwc_m64n128_reglu_fp16");
+        cutlass_nhwc_m64n64_init_ =
+            module_.function("mlvc_cutlass_nhwc_m64n64_init_fp16");
+        cutlass_nhwc_m64n64_ =
+            module_.function("mlvc_cutlass_nhwc_m64n64_fp16");
+        cutlass_nhwc_m64n64_leaky_relu_init_ =
+            module_.function("mlvc_cutlass_nhwc_m64n64_leaky_relu_init_fp16");
+        cutlass_nhwc_m64n64_leaky_relu_ =
+            module_.function("mlvc_cutlass_nhwc_m64n64_leaky_relu_fp16");
+        cutlass_nhwc_m64n64_residual_init_ =
+            module_.function("mlvc_cutlass_nhwc_m64n64_residual_init_fp16");
+        cutlass_nhwc_m64n64_residual_ =
+            module_.function("mlvc_cutlass_nhwc_m64n64_residual_fp16");
+        cutlass_nhwc_m64n64_reglu_init_ =
+            module_.function("mlvc_cutlass_nhwc_m64n64_reglu_init_fp16");
+        cutlass_nhwc_m64n64_reglu_ =
+            module_.function("mlvc_cutlass_nhwc_m64n64_reglu_fp16");
     }
     spatial_convolution_mma_ =
         module_.function("mlvc_spatial_conv_mma_fp16");

@@ -1188,3 +1188,184 @@ extern "C" __global__ void mlvc_pointwise_conv_wide_fp16(
     }
 }
 
+// Warp Split-K 16x16 NHWC MMA pointwise convolution for compact spatial maps
+// (e.g. sp = 15, 60, 240). Both X[sp, IC] and W[OC, IC] are contiguous along K,
+// so 128-bit cp.async works natively for ANY sp >= 1 and arbitrary row strides.
+// Launch: grid = (ceil(sp / 16), ceil(oc / 16), batch), block = (32, 4, 1).
+extern "C" __global__ void mlvc_pointwise_conv_mma_tiny_nhwc_fp16(
+    const __half* __restrict__ input, const __half* __restrict__ weight,
+    const __half* __restrict__ bias, __half* __restrict__ output,
+    int batch_count, int in_channels, int spatial_count, int out_channels,
+    int in_stride, int res_stride, int out_stride,
+    const __half* __restrict__ epilogue_input, int epilogue, float alpha)
+{
+#if __CUDA_ARCH__ >= 800
+    constexpr int kSplitWarps = 4;
+    constexpr int kKStep = kSplitWarps * 16;
+    constexpr int kTileStride = 24;
+
+    const int lane = static_cast<int>(threadIdx.x);
+    const int warp = static_cast<int>(threadIdx.y);
+    const int batch = static_cast<int>(blockIdx.z);
+    const int spatial_base = static_cast<int>(blockIdx.x) * 16;
+    const int channel_base = static_cast<int>(blockIdx.y) * 16;
+    if (batch >= batch_count || channel_base >= out_channels ||
+        spatial_base >= spatial_count) {
+        return;
+    }
+
+    __shared__ __align__(16) __half smem_x[2][kSplitWarps][16 * kTileStride];
+    __shared__ __align__(16) __half smem_w[2][kSplitWarps][16 * kTileStride];
+    __shared__ __align__(16) float smem_reduce[kSplitWarps - 1][8][32];
+
+    const __half* in_batch =
+        input + static_cast<std::size_t>(batch) * spatial_count * in_stride;
+    const __half* res_batch = epilogue == 2
+        ? (epilogue_input +
+           static_cast<std::size_t>(batch) * spatial_count * res_stride)
+        : nullptr;
+    __half* out_batch =
+        output + static_cast<std::size_t>(batch) * spatial_count * out_stride;
+
+    MmaAccumulator acc0, acc1;
+    acc0.values[0] = 0.0F; acc0.values[1] = 0.0F;
+    acc0.values[2] = 0.0F; acc0.values[3] = 0.0F;
+    acc1.values[0] = 0.0F; acc1.values[1] = 0.0F;
+    acc1.values[2] = 0.0F; acc1.values[3] = 0.0F;
+
+    const int ld_row = lane >> 1;      // 0..15
+    const int ld_col = (lane & 1) * 8; // 0 or 8
+    const bool valid_x_row = (spatial_base + ld_row) < spatial_count;
+
+    const int k0 = warp * 16;
+    int stage = 0;
+    if (k0 < in_channels) {
+        copy_async_16(
+            smem_w[0][warp] + ld_row * kTileStride + ld_col,
+            weight + static_cast<std::size_t>(channel_base + ld_row) *
+                         in_channels + k0 + ld_col,
+            8);
+        if (valid_x_row) {
+            copy_async_16(
+                smem_x[0][warp] + ld_row * kTileStride + ld_col,
+                in_batch + static_cast<std::size_t>(spatial_base + ld_row) *
+                               in_stride + k0 + ld_col,
+                8);
+        } else {
+            *reinterpret_cast<uint4*>(
+                smem_x[0][warp] + ld_row * kTileStride + ld_col) =
+                uint4{0, 0, 0, 0};
+        }
+        commit_async_copies();
+    }
+
+    const int a_row = lane & 15;
+    const int a_col = (lane >> 4) * 8;
+    const int b_row = (lane & 7) + ((lane >= 16) ? 8 : 0);
+    const int b_col = (lane & 8);
+
+    for (int k = k0; k < in_channels; k += kKStep) {
+        const int next_k = k + kKStep;
+        if (next_k < in_channels) {
+            copy_async_16(
+                smem_w[stage ^ 1][warp] + ld_row * kTileStride + ld_col,
+                weight + static_cast<std::size_t>(channel_base + ld_row) *
+                             in_channels + next_k + ld_col,
+                8);
+            if (valid_x_row) {
+                copy_async_16(
+                    smem_x[stage ^ 1][warp] + ld_row * kTileStride + ld_col,
+                    in_batch + static_cast<std::size_t>(spatial_base + ld_row) *
+                                   in_stride + next_k + ld_col,
+                    8);
+            } else {
+                *reinterpret_cast<uint4*>(
+                    smem_x[stage ^ 1][warp] + ld_row * kTileStride + ld_col) =
+                    uint4{0, 0, 0, 0};
+            }
+            commit_async_copies();
+            wait_for_async_copies_allow_one();
+        } else {
+            wait_for_async_copies();
+        }
+        __syncwarp();
+
+        unsigned int a[4];
+        unsigned int b[4];
+        load_matrix_x4(smem_x[stage][warp] + a_row * kTileStride + a_col, a);
+        load_matrix_x4(smem_w[stage][warp] + b_row * kTileStride + b_col, b);
+        mma_m16n8k16(acc0, a, b);
+        mma_m16n8k16(acc1, a, b + 2);
+        __syncwarp();
+        stage ^= 1;
+    }
+
+    if (warp > 0) {
+        const int slot = warp - 1;
+#pragma unroll
+        for (int v = 0; v < 4; ++v) {
+            smem_reduce[slot][v][lane] = acc0.values[v];
+            smem_reduce[slot][4 + v][lane] = acc1.values[v];
+        }
+    }
+    __syncthreads();
+    if (warp != 0)
+        return;
+
+    const int g_row = lane >> 2;
+    const int c2 = (lane & 3) * 2;
+    const float b0_0 = bias ? __half2float(__ldg(bias + channel_base + c2)) : 0.0F;
+    const float b0_1 = bias ? __half2float(__ldg(bias + channel_base + c2 + 1)) : 0.0F;
+    const float b1_0 = bias ? __half2float(__ldg(bias + channel_base + 8 + c2)) : 0.0F;
+    const float b1_1 = bias ? __half2float(__ldg(bias + channel_base + 8 + c2 + 1)) : 0.0F;
+
+    acc0.values[0] += b0_0; acc0.values[1] += b0_1;
+    acc0.values[2] += b0_0; acc0.values[3] += b0_1;
+    acc1.values[0] += b1_0; acc1.values[1] += b1_1;
+    acc1.values[2] += b1_0; acc1.values[3] += b1_1;
+#pragma unroll
+    for (int slot = 0; slot < kSplitWarps - 1; ++slot) {
+#pragma unroll
+        for (int v = 0; v < 4; ++v) {
+            acc0.values[v] += smem_reduce[slot][v][lane];
+            acc1.values[v] += smem_reduce[slot][4 + v][lane];
+        }
+    }
+
+    auto write_row = [&](int r, float v00, float v01, float v10, float v11) {
+        if (r >= spatial_count)
+            return;
+        __half* dst =
+            out_batch + static_cast<std::size_t>(r) * out_stride + channel_base;
+        if (epilogue == 0) {
+            *reinterpret_cast<__half2*>(dst + c2) = __floats2half2_rn(v00, v01);
+            *reinterpret_cast<__half2*>(dst + 8 + c2) = __floats2half2_rn(v10, v11);
+        } else {
+            const __half* res = res_batch
+                ? (res_batch + static_cast<std::size_t>(r) * res_stride +
+                   channel_base)
+                : nullptr;
+            const __half h00 = pointwise_epilogue_value(
+                v00, res ? res + c2 : nullptr, epilogue, alpha);
+            const __half h01 = pointwise_epilogue_value(
+                v01, res ? res + c2 + 1 : nullptr, epilogue, alpha);
+            const __half h10 = pointwise_epilogue_value(
+                v10, res ? res + 8 + c2 : nullptr, epilogue, alpha);
+            const __half h11 = pointwise_epilogue_value(
+                v11, res ? res + 8 + c2 + 1 : nullptr, epilogue, alpha);
+            *reinterpret_cast<__half2*>(dst + c2) = __halves2half2(h00, h01);
+            *reinterpret_cast<__half2*>(dst + 8 + c2) = __halves2half2(h10, h11);
+        }
+    };
+    write_row(spatial_base + g_row,
+              acc0.values[0], acc0.values[1], acc1.values[0], acc1.values[1]);
+    write_row(spatial_base + g_row + 8,
+              acc0.values[2], acc0.values[3], acc1.values[2], acc1.values[3]);
+#else
+    (void)input; (void)weight; (void)bias; (void)output; (void)batch_count;
+    (void)in_channels; (void)spatial_count; (void)out_channels;
+    (void)in_stride; (void)res_stride; (void)out_stride;
+    (void)epilogue_input; (void)epilogue; (void)alpha;
+#endif
+}
+

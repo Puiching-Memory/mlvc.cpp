@@ -127,3 +127,21 @@ extern "C" __global__ void mlvc_reglu_bias_fp16(
     }
 }
 
+// NHWC ReGLU: input [pixels, 2*G] (with stride in_stride) -> output [pixels, G].
+// Launch: block = (32, 8, 1), grid = (ceil(gate_channels / 32), ceil(pixels / 8), 1).
+extern "C" __global__ void mlvc_reglu_nhwc_fp16(
+    const __half* __restrict__ input, __half* __restrict__ output,
+    int pixels, int gate_channels, int in_stride, int out_stride,
+    float minimum, float maximum)
+{
+    const int c = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    const int p = static_cast<int>(blockIdx.y * blockDim.y + threadIdx.y);
+    if (c >= gate_channels || p >= pixels)
+        return;
+    const std::size_t in_base = static_cast<std::size_t>(p) * in_stride + c;
+    const __half gate = __ldg(input + in_base);
+    const __half linear = __ldg(input + in_base + gate_channels);
+    output[static_cast<std::size_t>(p) * out_stride + c] =
+        reglu_value(gate, linear, minimum, maximum);
+}
+

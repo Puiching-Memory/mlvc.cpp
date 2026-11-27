@@ -32,6 +32,7 @@ struct CudaDriverTable {
     decltype(&::cuStreamCreate) stream_create = nullptr;
     decltype(&::cuStreamDestroy) stream_destroy = nullptr;
     decltype(&::cuStreamSynchronize) stream_synchronize = nullptr;
+    decltype(&::cuStreamWaitEvent) stream_wait_event = nullptr;
     decltype(&::cuStreamBeginCapture) stream_begin_capture = nullptr;
     decltype(&::cuStreamEndCapture) stream_end_capture = nullptr;
     decltype(&::cuGetErrorName) get_error_name = nullptr;
@@ -53,6 +54,7 @@ struct CudaDriverTable {
     decltype(&::cuModuleGetFunction) module_get_function = nullptr;
     decltype(&::cuMemcpyHtoDAsync) memcpy_htod_async = nullptr;
     decltype(&::cuMemcpyDtoHAsync) memcpy_dtoh_async = nullptr;
+    decltype(&::cuMemcpyDtoDAsync) memcpy_dtod_async = nullptr;
     decltype(&::cuMemcpyHtoD) memcpy_htod = nullptr;
     decltype(&::cuMemcpyDtoH) memcpy_dtoh = nullptr;
     decltype(&::cuMemsetD8Async) memset_d8_async = nullptr;
@@ -115,6 +117,7 @@ const CudaDriverTable& load_cuda_driver()
         MLVC_LOAD_CU(stream_create, cuStreamCreate);
         MLVC_LOAD_CU(stream_destroy, cuStreamDestroy);
         MLVC_LOAD_CU(stream_synchronize, cuStreamSynchronize);
+        MLVC_LOAD_CU(stream_wait_event, cuStreamWaitEvent);
         MLVC_LOAD_CU(stream_begin_capture, cuStreamBeginCapture);
         MLVC_LOAD_CU(stream_end_capture, cuStreamEndCapture);
         MLVC_LOAD_CU(get_error_name, cuGetErrorName);
@@ -136,6 +139,7 @@ const CudaDriverTable& load_cuda_driver()
         MLVC_LOAD_CU(module_get_function, cuModuleGetFunction);
         MLVC_LOAD_CU(memcpy_htod_async, cuMemcpyHtoDAsync);
         MLVC_LOAD_CU(memcpy_dtoh_async, cuMemcpyDtoHAsync);
+        MLVC_LOAD_CU(memcpy_dtod_async, cuMemcpyDtoDAsync);
         MLVC_LOAD_CU(memcpy_htod, cuMemcpyHtoD);
         MLVC_LOAD_CU(memcpy_dtoh, cuMemcpyDtoH);
         MLVC_LOAD_CU(memset_d8_async, cuMemsetD8Async);
@@ -235,6 +239,10 @@ public:
         check(api->device_get_attribute(&info.multiprocessor_count,
                                         abi::kMultiprocessorCount, device),
               "cuDeviceGetAttribute(multiprocessor count)");
+        check(api->device_get_attribute(&info.max_shared_memory_per_sm,
+                                        abi::kMaxSharedMemoryPerMultiprocessor,
+                                        device),
+              "cuDeviceGetAttribute(max shared memory per sm)");
 
         try {
             check(api->device_primary_ctx_retain(&context, device),
@@ -242,6 +250,10 @@ public:
             ScopedContext ctx_guard = push_context();
             check(api->stream_create(&stream, abi::kStreamNonBlocking),
                   "cuStreamCreate");
+            check(api->stream_create(&htod_stream, abi::kStreamNonBlocking),
+                  "cuStreamCreate(htod)");
+            check(api->stream_create(&dtoh_stream, abi::kStreamNonBlocking),
+                  "cuStreamCreate(dtoh)");
         } catch (...) {
             cleanup();
             throw;
@@ -293,10 +305,17 @@ public:
 
     void cleanup() noexcept
     {
-        if (stream && context) {
+        if (context) {
             if (auto guard = try_push_context()) {
-                api->stream_destroy(stream);
+                if (dtoh_stream)
+                    api->stream_destroy(dtoh_stream);
+                if (htod_stream)
+                    api->stream_destroy(htod_stream);
+                if (stream)
+                    api->stream_destroy(stream);
             }
+            dtoh_stream = nullptr;
+            htod_stream = nullptr;
             stream = nullptr;
         }
         if (context) {
@@ -309,6 +328,8 @@ public:
     abi::Device device = 0;
     abi::Context context = nullptr;
     abi::Stream stream = nullptr;
+    abi::Stream htod_stream = nullptr;
+    abi::Stream dtoh_stream = nullptr;
     DeviceInfo info;
 };
 
@@ -621,6 +642,18 @@ void Driver::upload_async(const DeviceBuffer& destination,
         "cuMemcpyHtoDAsync");
 }
 
+void Driver::upload_async_htod(const DeviceBuffer& destination,
+                               const void* source, std::size_t bytes) const
+{
+    if (!source || bytes > destination.size())
+        throw std::runtime_error("driver-cubin: invalid host-to-device copy");
+    auto guard = state_->push_context();
+    state_->check(
+        state_->api->memcpy_htod_async(
+            destination.address(), source, bytes, state_->htod_stream),
+        "cuMemcpyHtoDAsync(htod)");
+}
+
 void Driver::zero_async(const DeviceBuffer& destination) const
 {
     if (!destination)
@@ -630,6 +663,20 @@ void Driver::zero_async(const DeviceBuffer& destination) const
         state_->api->memset_d8_async(
             destination.address(), 0, destination.size(), state_->stream),
         "cuMemsetD8Async");
+}
+
+void Driver::copy_dto_d_async(abi::DeviceAddress destination,
+                              abi::DeviceAddress source,
+                              std::size_t bytes) const
+{
+    if (!destination || !source)
+        throw std::runtime_error("driver-cubin: invalid device-to-device copy");
+    if (bytes == 0)
+        return;
+    auto guard = state_->push_context();
+    state_->check(
+        state_->api->memcpy_dtod_async(destination, source, bytes, state_->stream),
+        "cuMemcpyDtoDAsync");
 }
 
 void Driver::download_async(void* destination, const DeviceBuffer& source,
@@ -651,17 +698,38 @@ void Driver::download_async(void* destination, abi::DeviceAddress source,
         "cuMemcpyDtoHAsync");
 }
 
+void Driver::download_async_dtoh(void* destination, const DeviceBuffer& source,
+                                 std::size_t bytes) const
+{
+    if (!destination || bytes > source.size())
+        throw std::runtime_error("driver-cubin: invalid device-to-host copy");
+    download_async_dtoh(destination, source.address(), bytes);
+}
+
+void Driver::download_async_dtoh(void* destination, abi::DeviceAddress source,
+                                 std::size_t bytes) const
+{
+    if (!destination || !source)
+        throw std::runtime_error("driver-cubin: invalid device-to-host copy");
+    auto guard = state_->push_context();
+    state_->check(
+        state_->api->memcpy_dtoh_async(
+            destination, source, bytes, state_->dtoh_stream),
+        "cuMemcpyDtoHAsync(dtoh)");
+}
+
 void Driver::upload(const DeviceBuffer& destination, const void* source,
                     std::size_t bytes) const
 {
     if (!source || bytes > destination.size())
         throw std::runtime_error("driver-cubin: invalid host-to-device copy");
     auto guard = state_->push_context();
+    state_->check(
+        state_->api->memcpy_htod_async(
+            destination.address(), source, bytes, state_->stream),
+        "cuMemcpyHtoDAsync");
     state_->check(state_->api->stream_synchronize(state_->stream),
                   "cuStreamSynchronize");
-    state_->check(
-        state_->api->memcpy_htod(destination.address(), source, bytes),
-        "cuMemcpyHtoD");
 }
 
 void Driver::download(void* destination, abi::DeviceAddress source,
@@ -670,11 +738,12 @@ void Driver::download(void* destination, abi::DeviceAddress source,
     if (!destination || !source)
         throw std::runtime_error("driver-cubin: invalid device-to-host copy");
     auto guard = state_->push_context();
+    state_->check(
+        state_->api->memcpy_dtoh_async(
+            destination, source, bytes, state_->stream),
+        "cuMemcpyDtoHAsync");
     state_->check(state_->api->stream_synchronize(state_->stream),
                   "cuStreamSynchronize");
-    state_->check(
-        state_->api->memcpy_dtoh(destination, source, bytes),
-        "cuMemcpyDtoH");
 }
 
 void Driver::launch(abi::Function function, Dim3 grid, Dim3 block,
@@ -759,6 +828,44 @@ void Driver::record(Event& event) const
                   "cuEventRecord");
 }
 
+void Driver::record_htod(Event& event) const
+{
+    if (!event.event_ || event.state_.get() != state_.get())
+        throw std::runtime_error("driver-cubin: invalid htod event");
+    auto guard = state_->push_context();
+    state_->check(state_->api->event_record(event.event_, state_->htod_stream),
+                  "cuEventRecord(htod)");
+}
+
+void Driver::record_dtoh(Event& event) const
+{
+    if (!event.event_ || event.state_.get() != state_.get())
+        throw std::runtime_error("driver-cubin: invalid dtoh event");
+    auto guard = state_->push_context();
+    state_->check(state_->api->event_record(event.event_, state_->dtoh_stream),
+                  "cuEventRecord(dtoh)");
+}
+
+void Driver::wait_compute_on(const Event& event) const
+{
+    if (!event.event_ || event.state_.get() != state_.get())
+        throw std::runtime_error("driver-cubin: invalid wait event");
+    auto guard = state_->push_context();
+    state_->check(
+        state_->api->stream_wait_event(state_->stream, event.event_, 0),
+        "cuStreamWaitEvent(compute)");
+}
+
+void Driver::wait_dtoh_on(const Event& event) const
+{
+    if (!event.event_ || event.state_.get() != state_.get())
+        throw std::runtime_error("driver-cubin: invalid wait event");
+    auto guard = state_->push_context();
+    state_->check(
+        state_->api->stream_wait_event(state_->dtoh_stream, event.event_, 0),
+        "cuStreamWaitEvent(dtoh)");
+}
+
 void Driver::synchronize(const Event& event) const
 {
     if (!event.event_ || event.state_.get() != state_.get())
@@ -773,6 +880,17 @@ void Driver::synchronize() const
     auto guard = state_->push_context();
     state_->check(state_->api->stream_synchronize(state_->stream),
                   "cuStreamSynchronize");
+}
+
+void Driver::synchronize_all() const
+{
+    auto guard = state_->push_context();
+    state_->check(state_->api->stream_synchronize(state_->htod_stream),
+                  "cuStreamSynchronize(htod)");
+    state_->check(state_->api->stream_synchronize(state_->stream),
+                  "cuStreamSynchronize(compute)");
+    state_->check(state_->api->stream_synchronize(state_->dtoh_stream),
+                  "cuStreamSynchronize(dtoh)");
 }
 
 PinnedHostBuffer Driver::allocate_host_pinned(std::size_t bytes) const

@@ -32,7 +32,43 @@ void AotGraph::warmup_and_capture()
 {
     for (const auto& buffer : input_buffers_)
         driver_.zero_async(buffer);
-    execute_schedule();
+    if (driver_.device_info().compute_major >= 8 && !graph_.nodes.empty()) {
+        constexpr std::size_t kSlotStride =
+            driver_cubin::kCutlassPointwiseParamsStorageBytes;
+        cutlass_init_scratch_ =
+            driver_.allocate(graph_.nodes.size() * kSlotStride);
+        pending_cutlass_inits_.clear();
+        batch_initializing_cutlass_ = true;
+        try {
+            execute_schedule();
+        } catch (...) {
+            batch_initializing_cutlass_ = false;
+            pending_cutlass_inits_.clear();
+            cutlass_init_scratch_ = {};
+            throw;
+        }
+        batch_initializing_cutlass_ = false;
+        if (!pending_cutlass_inits_.empty()) {
+            const std::size_t total_bytes =
+                pending_cutlass_inits_.size() * kSlotStride;
+            std::vector<std::byte> host_scratch(total_bytes);
+            driver_.download(host_scratch.data(),
+                             cutlass_init_scratch_.address(), total_bytes);
+            for (const PendingCutlassInit& item : pending_cutlass_inits_) {
+                const std::byte* src = host_scratch.data() + item.offset;
+                if (item.is_spatial) {
+                    auto& dst =
+                        cutlass_spatial_host_parameters_[item.node_index];
+                    std::memcpy(dst.data(), src, dst.size());
+                } else {
+                    auto& dst = cutlass_host_parameters_[item.node_index];
+                    std::memcpy(dst.data(), src, dst.size());
+                }
+            }
+        }
+        pending_cutlass_inits_.clear();
+        cutlass_init_scratch_ = {};
+    }
     cutlass_parameters_ready_ = true;
     driver_.begin_capture();
     execute_schedule();
@@ -116,6 +152,84 @@ void AotGraph::set_q_index(HostSlot& slot, int shifted_q)
                          sizeof(shifted_q));
 }
 
+void AotGraph::launch_yuv420_to_nchw(DeviceAddress yuv_device)
+{
+    DeviceAddress input = yuv_device;
+    DeviceAddress lut = codec_byte_lut_device_.address();
+    DeviceAddress output = codec_image_address_;
+    int width = codec_io_.width;
+    int height = codec_io_.height;
+    int model_width = codec_io_.model_width;
+    int model_height = codec_io_.model_height;
+    int rotated = codec_io_.padding.rotated ? 1 : 0;
+    void* parameters[] = {&input, &lut, &output, &width, &height,
+                          &model_width, &model_height, &rotated};
+    driver_.launch(
+        yuv420_to_nchw_,
+        {divide_up(static_cast<std::size_t>(model_width), 32),
+         divide_up(static_cast<std::size_t>(model_height), 8), 3},
+        {32, 8, 1}, 0, parameters);
+}
+
+void AotGraph::launch_nchw_to_yuv420(DeviceAddress yuv_device)
+{
+    DeviceAddress input = codec_image_address_;
+    DeviceAddress output = yuv_device;
+    int width = codec_io_.width;
+    int height = codec_io_.height;
+    int model_width = codec_io_.model_width;
+    int model_height = codec_io_.model_height;
+    int pad_left = codec_io_.padding.left;
+    int pad_top = codec_io_.padding.top;
+    int rotated = codec_io_.padding.rotated ? 1 : 0;
+    float inverse_pixel_range = 1.0F / codec_io_.pixel_range;
+    void* parameters[] = {
+        &input, &output, &width, &height, &model_width, &model_height,
+        &pad_left, &pad_top, &rotated, &inverse_pixel_range};
+    driver_.launch(
+        nchw_to_yuv420_,
+        {divide_up(static_cast<std::size_t>(width / 2), 16),
+         divide_up(static_cast<std::size_t>(height / 2), 8), 1},
+        {16, 8, 1}, 0, parameters);
+}
+
+void AotGraph::capture_codec_graph(HostSlot& slot)
+{
+    if (!q_input_index_)
+        throw std::runtime_error("driver-cubin: graph has no valid q_index_shifted input");
+    if (!cutlass_parameters_ready_ && driver_.device_info().compute_major >= 8) {
+        execute_schedule();
+        cutlass_parameters_ready_ = true;
+    }
+    driver_.synchronize();
+    driver_.begin_capture();
+    if (model_name_ == "MLVCEncoder") {
+        launch_yuv420_to_nchw(slot.yuv_device.address());
+        driver_.copy_dto_d_async(
+            input_buffers_[*q_input_index_].address(),
+            slot.q_device.address(), sizeof(int));
+        execute_schedule();
+        for (const ExternalOutput& output : external_outputs_) {
+            driver_.copy_dto_d_async(
+                slot.output_staging[output.output_index].address(),
+                output.address, output.bytes);
+        }
+    } else {
+        for (const std::size_t index : decoder_latent_inputs_) {
+            driver_.copy_dto_d_async(
+                input_buffers_[index].address(),
+                slot.input_staging[index].address(),
+                input_buffers_[index].size());
+        }
+        driver_.copy_dto_d_async(
+            input_buffers_[*q_input_index_].address(),
+            slot.q_device.address(), sizeof(int));
+        execute_schedule();
+        launch_nchw_to_yuv420(slot.yuv_device.address());
+    }
+    slot.codec_graph = driver_.end_capture();
+}
+
 void AotGraph::finish_submit(HostSlot& slot)
 {
     driver_.record(slot.completion);
@@ -133,8 +247,9 @@ std::vector<Tensor> AotGraph::run(const std::vector<Tensor>& inputs)
         throw std::runtime_error("driver-cubin: graph input count mismatch");
 
     ensure_host_slots(1);
+    for (std::size_t slot_index = 0; slot_index < host_slots_.size(); ++slot_index)
+        wait_codec_slot_locked(slot_index);
     HostSlot& slot = host_slots_.front();
-    wait_codec_slot_locked(0);
     std::size_t external_index = 0;
     for (std::size_t graph_index = 0; graph_index < input_ids_.size();
          ++graph_index) {
@@ -192,6 +307,8 @@ void AotGraph::ensure_host_slots(std::size_t count)
         HostSlot slot;
         slot.inputs.resize(input_ids_.size());
         slot.outputs.resize(output_ids_.size());
+        slot.htod_done = driver_.create_event();
+        slot.compute_done = driver_.create_event();
         slot.completion = driver_.create_event();
         for (std::size_t index = 0; index < input_ids_.size(); ++index) {
             if (is_state_input(index))
@@ -207,16 +324,36 @@ void AotGraph::ensure_host_slots(std::size_t count)
                 element_count(result.shape) * dtype_bytes(result.dtype);
             slot.outputs[index] = driver_.allocate_host_pinned(bytes);
         }
-        if (codec_io_configured_)
-            slot.yuv = driver_.allocate_host_pinned(yuv_bytes(codec_io_));
         host_slots_.push_back(std::move(slot));
     }
     if (codec_io_configured_) {
         const std::size_t bytes = yuv_bytes(codec_io_);
         for (HostSlot& slot : host_slots_) {
-            if (slot.yuv)
-                continue;
-            slot.yuv = driver_.allocate_host_pinned(bytes);
+            if (!slot.yuv)
+                slot.yuv = driver_.allocate_host_pinned(bytes);
+            if (!slot.yuv_device)
+                slot.yuv_device = driver_.allocate(bytes);
+            if (q_input_index_ && !slot.q_device)
+                slot.q_device = driver_.allocate(sizeof(int));
+            if (model_name_ == "MLVCEncoder") {
+                if (slot.output_staging.empty()) {
+                    slot.output_staging.resize(output_ids_.size());
+                    for (const ExternalOutput& out : external_outputs_) {
+                        slot.output_staging[out.output_index] =
+                            driver_.allocate(out.bytes);
+                    }
+                }
+            } else if (model_name_ == "MLVCDecoder") {
+                if (slot.input_staging.empty()) {
+                    slot.input_staging.resize(input_ids_.size());
+                    for (const std::size_t idx : decoder_latent_inputs_) {
+                        slot.input_staging[idx] =
+                            driver_.allocate(input_buffers_[idx].size());
+                    }
+                }
+            }
+            if (!slot.codec_graph)
+                capture_codec_graph(slot);
         }
     }
 }
@@ -257,7 +394,6 @@ void AotGraph::configure_codec_io(const CodecIoConfig& config)
     codec_io_configured_ = true;
     codec_image_address_ = image.address;
     codec_yuv_bytes_ = bytes;
-    codec_yuv_device_ = driver_.allocate(bytes);
     if (model_name_ == "MLVCEncoder") {
         std::vector<Float16Storage> byte_lut(256);
         for (std::size_t value = 0; value < byte_lut.size(); ++value) {
@@ -307,25 +443,34 @@ void AotGraph::submit_encoder(std::size_t slot_index, int shifted_q)
     HostSlot& slot = host_slot(slot_index);
     if (slot.pending)
         throw std::runtime_error("driver-cubin: encoder codec slot is pending");
+    if (!q_input_index_)
+        throw std::runtime_error("driver-cubin: graph has no valid q_index_shifted input");
 
-    driver_.upload_async(codec_yuv_device_, slot.yuv.data(), codec_yuv_bytes_);
-    DeviceAddress input = codec_yuv_device_.address();
-    DeviceAddress lut = codec_byte_lut_device_.address();
-    DeviceAddress output = codec_image_address_;
-    int width = codec_io_.width;
-    int height = codec_io_.height;
-    int model_width = codec_io_.model_width;
-    int model_height = codec_io_.model_height;
-    int rotated = codec_io_.padding.rotated ? 1 : 0;
-    void* parameters[] = {&input, &lut, &output, &width, &height,
-                          &model_width, &model_height, &rotated};
-    launch_linear(yuv420_to_nchw_,
-                  static_cast<std::size_t>(3) * model_width * model_height,
-                  parameters);
-    set_q_index(slot, shifted_q);
-    enqueue_model();
-    enqueue_outputs(slot);
-    finish_submit(slot);
+    const std::size_t q_idx = *q_input_index_;
+    std::memcpy(slot.inputs[q_idx].data(), &shifted_q, sizeof(shifted_q));
+
+    // HtoD stream: upload frame YUV + q_index into slot-private device buffers
+    // while the previous slot is computing on compute_stream.
+    driver_.upload_async_htod(slot.yuv_device, slot.yuv.data(), codec_yuv_bytes_);
+    driver_.upload_async_htod(slot.q_device, slot.inputs[q_idx].data(),
+                              sizeof(shifted_q));
+    driver_.record_htod(slot.htod_done);
+
+    // Compute stream: wait for this slot's HtoD, launch full per-slot graph
+    // (yuv2nchw + q DtoD + model + outputs DtoD into slot.output_staging).
+    driver_.wait_compute_on(slot.htod_done);
+    driver_.launch_graph(slot.codec_graph);
+    driver_.record(slot.compute_done);
+
+    // DtoH stream: download slot-private staged outputs while next slot computes.
+    driver_.wait_dtoh_on(slot.compute_done);
+    for (const ExternalOutput& output : external_outputs_) {
+        driver_.download_async_dtoh(
+            slot.outputs[output.output_index].data(),
+            slot.output_staging[output.output_index], output.bytes);
+    }
+    driver_.record_dtoh(slot.completion);
+    slot.pending = true;
 }
 
 std::vector<TensorView> AotGraph::encoder_outputs(
@@ -380,31 +525,34 @@ void AotGraph::submit_decoder(std::size_t slot_index, int shifted_q)
     HostSlot& slot = host_slot(slot_index);
     if (slot.pending)
         throw std::runtime_error("driver-cubin: decoder codec slot is pending");
+    if (!q_input_index_)
+        throw std::runtime_error("driver-cubin: graph has no valid q_index_shifted input");
 
+    const std::size_t q_idx = *q_input_index_;
+    std::memcpy(slot.inputs[q_idx].data(), &shifted_q, sizeof(shifted_q));
+
+    // HtoD stream: upload latents + q_index into slot-private device staging.
     for (const std::size_t index : decoder_latent_inputs_) {
-        driver_.upload_async(input_buffers_[index], slot.inputs[index].data(),
-                             input_buffers_[index].size());
+        driver_.upload_async_htod(slot.input_staging[index],
+                                  slot.inputs[index].data(),
+                                  input_buffers_[index].size());
     }
-    set_q_index(slot, shifted_q);
-    enqueue_model();
+    driver_.upload_async_htod(slot.q_device, slot.inputs[q_idx].data(),
+                              sizeof(shifted_q));
+    driver_.record_htod(slot.htod_done);
 
-    DeviceAddress input = codec_image_address_;
-    DeviceAddress output = codec_yuv_device_.address();
-    int width = codec_io_.width;
-    int height = codec_io_.height;
-    int model_width = codec_io_.model_width;
-    int model_height = codec_io_.model_height;
-    int pad_left = codec_io_.padding.left;
-    int pad_top = codec_io_.padding.top;
-    int rotated = codec_io_.padding.rotated ? 1 : 0;
-    float inverse_pixel_range = 1.0F / codec_io_.pixel_range;
-    void* parameters[] = {
-        &input, &output, &width, &height, &model_width, &model_height,
-        &pad_left, &pad_top, &rotated, &inverse_pixel_range};
-    launch_linear(nchw_to_yuv420_,
-                  static_cast<std::size_t>(width) * height, parameters);
-    driver_.download_async(slot.yuv.data(), codec_yuv_device_, codec_yuv_bytes_);
-    finish_submit(slot);
+    // Compute stream: wait for HtoD, launch full per-slot graph
+    // (latents/q DtoD + model + nchw2yuv into slot.yuv_device).
+    driver_.wait_compute_on(slot.htod_done);
+    driver_.launch_graph(slot.codec_graph);
+    driver_.record(slot.compute_done);
+
+    // DtoH stream: download slot-private YUV while next slot computes.
+    driver_.wait_dtoh_on(slot.compute_done);
+    driver_.download_async_dtoh(slot.yuv.data(), slot.yuv_device,
+                                codec_yuv_bytes_);
+    driver_.record_dtoh(slot.completion);
+    slot.pending = true;
 }
 
 Yuv420FrameView AotGraph::decoder_output_yuv(std::size_t slot_index) const
@@ -450,6 +598,10 @@ AotGraph::~AotGraph()
             } catch (...) {
             }
         }
+    }
+    try {
+        driver_.synchronize_all();
+    } catch (...) {
     }
 }
 

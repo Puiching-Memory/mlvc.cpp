@@ -112,6 +112,258 @@ using SpatialWideAddResidual = cutlass::epilogue::threadblock::Sm80EVT<
 using SpatialWideResidualCallbacks =
     cutlass::epilogue::threadblock::Sm80EVT<
         SpatialWideStore, SpatialWideAddResidual>;
+using SpatialWideBiasCallbacks =
+    cutlass::epilogue::threadblock::Sm80EVT<
+        SpatialWideStore, SpatialWideAddBias>;
+using SpatialWideBiasLeakyRelu = cutlass::epilogue::threadblock::Sm80EVT<
+    ApplyLeakyRelu, SpatialWideAddBias>;
+using SpatialWideLeakyReluCallbacks =
+    cutlass::epilogue::threadblock::Sm80EVT<
+        SpatialWideStore, SpatialWideBiasLeakyRelu>;
+
+using SmallM128ThreadblockShape = cutlass::gemm::GemmShape<64, 128, 32>;
+using SmallM128WarpShape = cutlass::gemm::GemmShape<32, 64, 32>;
+using SmallM128ThreadMap =
+    cutlass::epilogue::threadblock::OutputTileThreadLayout<
+        SmallM128ThreadblockShape, SmallM128WarpShape, Element, kAlignment,
+        kEpilogueStages>;
+using SmallM128Bias = cutlass::epilogue::threadblock::VisitorColBroadcast<
+    SmallM128ThreadMap, Element>;
+using SmallM128AddBias = cutlass::epilogue::threadblock::Sm80EVT<
+    Add, Accumulator, SmallM128Bias>;
+using SmallM128Store = cutlass::epilogue::threadblock::VisitorAuxStore<
+    SmallM128ThreadMap, Element, cutlass::FloatRoundStyle::round_to_nearest,
+    cute::Stride<int64_t, cute::_1, int64_t>>;
+using SmallM128BiasCallbacks =
+    cutlass::epilogue::threadblock::Sm80EVT<SmallM128Store, SmallM128AddBias>;
+using SmallM128BiasLeakyRelu = cutlass::epilogue::threadblock::Sm80EVT<
+    ApplyLeakyRelu, SmallM128AddBias>;
+using SmallM128LeakyReluCallbacks =
+    cutlass::epilogue::threadblock::Sm80EVT<
+        SmallM128Store, SmallM128BiasLeakyRelu>;
+using SmallM128Residual = cutlass::epilogue::threadblock::VisitorAuxLoad<
+    SmallM128ThreadMap, Element, cute::Stride<int64_t, cute::_1, int64_t>>;
+using SmallM128AddResidual = cutlass::epilogue::threadblock::Sm80EVT<
+    Add, SmallM128AddBias, SmallM128Residual>;
+using SmallM128ResidualCallbacks =
+    cutlass::epilogue::threadblock::Sm80EVT<
+        SmallM128Store, SmallM128AddResidual>;
+
+using SmallM64N64ThreadblockShape = cutlass::gemm::GemmShape<64, 64, 32>;
+using SmallM64N64WarpShape = cutlass::gemm::GemmShape<32, 32, 32>;
+using SmallM64N64ThreadMap =
+    cutlass::epilogue::threadblock::OutputTileThreadLayout<
+        SmallM64N64ThreadblockShape, SmallM64N64WarpShape, Element, kAlignment,
+        kEpilogueStages>;
+using SmallM64N64Bias = cutlass::epilogue::threadblock::VisitorColBroadcast<
+    SmallM64N64ThreadMap, Element>;
+using SmallM64N64AddBias = cutlass::epilogue::threadblock::Sm80EVT<
+    Add, Accumulator, SmallM64N64Bias>;
+using SmallM64N64Store = cutlass::epilogue::threadblock::VisitorAuxStore<
+    SmallM64N64ThreadMap, Element, cutlass::FloatRoundStyle::round_to_nearest,
+    cute::Stride<int64_t, cute::_1, int64_t>>;
+using SmallM64N64BiasCallbacks =
+    cutlass::epilogue::threadblock::Sm80EVT<SmallM64N64Store, SmallM64N64AddBias>;
+using SmallM64N64BiasLeakyRelu = cutlass::epilogue::threadblock::Sm80EVT<
+    ApplyLeakyRelu, SmallM64N64AddBias>;
+using SmallM64N64LeakyReluCallbacks =
+    cutlass::epilogue::threadblock::Sm80EVT<
+        SmallM64N64Store, SmallM64N64BiasLeakyRelu>;
+using SmallM64N64Residual = cutlass::epilogue::threadblock::VisitorAuxLoad<
+    SmallM64N64ThreadMap, Element, cute::Stride<int64_t, cute::_1, int64_t>>;
+using SmallM64N64AddResidual = cutlass::epilogue::threadblock::Sm80EVT<
+    Add, SmallM64N64AddBias, SmallM64N64Residual>;
+using SmallM64N64ResidualCallbacks =
+    cutlass::epilogue::threadblock::Sm80EVT<
+        SmallM64N64Store, SmallM64N64AddResidual>;
+
+// Custom EVT store that fuses ReGLU in registers on top of weight-interleaved
+// 16-row blocks (rows 0..7 = gate, rows 8..15 = linear). Because
+// DefaultThreadMapTensorOp steps 8 rows per epilogue iteration, even steps
+// capture FP16-rounded gate values in registers and odd steps multiply
+// clamp(gate, min, max) * linear and write only the G output rows to HBM.
+template <class ThreadMapT, class ElementType,
+          cutlass::FloatRoundStyle RoundStyle, class StrideMNL>
+struct VisitorReGLUStore {
+    struct Arguments {
+        ElementType* ptr_aux = nullptr;
+        StrideMNL dAux = {};
+        float minimum = 0.0F;
+        float maximum = 65504.0F;
+    };
+
+    using Params = Arguments;
+
+    template <class ProblemShape>
+    static constexpr Params to_underlying_arguments(
+        ProblemShape const&, Arguments const& args, void*)
+    {
+        return args;
+    }
+
+    template <class ProblemShape>
+    static size_t get_workspace_size(ProblemShape const&, Arguments const&)
+    {
+        return 0;
+    }
+
+    struct SharedStorage {};
+
+    static int constexpr vec_bits =
+        ThreadMapT::kElementsPerAccess * cutlass::sizeof_bits<ElementType>::value;
+    using VecType = cutlass::uint_bit_t<cute::min(128, vec_bits)>;
+    static int constexpr VecLength = sizeof(VecType) / sizeof(ElementType);
+
+    CUTLASS_HOST_DEVICE
+    VisitorReGLUStore() {}
+
+    CUTLASS_HOST_DEVICE
+    VisitorReGLUStore(Params const& params, SharedStorage const&)
+        : params_ptr(&params)
+    {
+    }
+
+    Params const* params_ptr;
+
+    template <class RTensor, class CTensor, class ProblemShape>
+    struct Callbacks : cutlass::epilogue::threadblock::EmptyCallbacks {
+        CUTLASS_DEVICE
+        Callbacks(RTensor&& tC_rGate, RTensor&& tC_rAux, CTensor&& tC_cAux,
+                  ProblemShape problem_shape, Params const* params_ptr)
+            : tC_rGate(cute::forward<RTensor>(tC_rGate)),
+              tC_rAux(cute::forward<RTensor>(tC_rAux)),
+              tC_cAux(cute::forward<CTensor>(tC_cAux)),
+              problem_shape(problem_shape),
+              params_ptr(params_ptr)
+        {
+        }
+
+        RTensor tC_rGate;
+        RTensor tC_rAux;
+        CTensor tC_cAux;
+        ProblemShape problem_shape;
+        Params const* params_ptr;
+
+        CUTLASS_DEVICE void begin_step(int step_idx)
+        {
+            if ((step_idx & 1) == 1)
+                cute::clear(tC_rAux);
+        }
+
+        template <class ElementAccumulator, class ElementInput, int FragmentSize>
+        CUTLASS_DEVICE auto visit(
+            int iter_idx, int row_idx, int column_idx, int frg_idx,
+            cutlass::Array<ElementAccumulator, FragmentSize> const& frg_acc,
+            cutlass::Array<ElementInput, FragmentSize> const& frg_input)
+        {
+            (void)row_idx;
+            (void)column_idx;
+            (void)frg_acc;
+            using ConvertInput = cutlass::NumericArrayConverter<
+                ElementType, ElementInput, FragmentSize, RoundStyle>;
+            using ConvertScalar = cutlass::NumericConverter<
+                ElementType, float, RoundStyle>;
+            ConvertInput convert_input{};
+            ConvertScalar convert_scalar{};
+
+            auto tC_rGate_frg = cute::recast<
+                cutlass::Array<ElementType, FragmentSize>>(
+                cute::coalesce(tC_rGate));
+            auto tC_rAux_frg = cute::recast<
+                cutlass::Array<ElementType, FragmentSize>>(
+                cute::coalesce(tC_rAux));
+
+            const cutlass::Array<ElementType, FragmentSize> rounded =
+                convert_input(frg_input);
+            if ((iter_idx & 1) == 0) {
+                tC_rGate_frg(frg_idx) = rounded;
+            } else {
+                const auto gate_h = tC_rGate_frg(frg_idx);
+                cutlass::Array<ElementType, FragmentSize> out;
+                const float lo = params_ptr->minimum;
+                const float hi = params_ptr->maximum;
+                CUTLASS_PRAGMA_UNROLL
+                for (int e = 0; e < FragmentSize; ++e) {
+                    const float g =
+                        fminf(fmaxf(static_cast<float>(gate_h[e]), lo), hi);
+                    const float l = static_cast<float>(rounded[e]);
+                    out[e] = convert_scalar(g * l);
+                }
+                tC_rAux_frg(frg_idx) = out;
+            }
+            return frg_input;
+        }
+
+        CUTLASS_DEVICE void end_step(int step_idx)
+        {
+            if ((step_idx & 1) == 0)
+                return;
+            auto src_v = cute::filter(tC_rAux);
+            auto coord_v = cute::filter(
+                tC_cAux(cute::_, cute::_, cute::_, step_idx));
+            const int gate_channels = cute::get<0>(problem_shape) >> 1;
+            const int spatial_count = cute::get<1>(problem_shape);
+            const int64_t row_stride = cute::get<0>(params_ptr->dAux);
+            CUTLASS_PRAGMA_UNROLL
+            for (int i = 0; i < cute::size(src_v); ++i) {
+                const auto coord = coord_v(i);
+                const int m_inter = cute::get<0>(coord);
+                const int n = cute::get<1>(coord);
+                const int out_m = ((m_inter >> 4) << 3) | (m_inter & 7);
+                const bool guard =
+                    (out_m < gate_channels) && (n < spatial_count);
+                ElementType* dst = params_ptr->ptr_aux +
+                    static_cast<int64_t>(out_m) * row_stride + n;
+                cutlass::arch::global_store<VecType, sizeof(VecType)>(
+                    src_v(i), static_cast<void*>(dst), guard);
+            }
+        }
+    };
+
+    template <class ProblemShape>
+    CUTLASS_DEVICE auto get_callbacks(
+        cutlass::gemm::GemmCoord threadblock_tile_offset, int thread_idx,
+        ProblemShape problem_shape)
+    {
+        using namespace cute;
+        Tensor mDummy = make_tensor(
+            make_gmem_ptr(params_ptr->ptr_aux), problem_shape,
+            params_ptr->dAux);
+        Tensor tC_gDummy = recast<VecType>(group_modes<3, 6>(
+            ThreadMapT::partition(mDummy, thread_idx, threadblock_tile_offset)));
+        Tensor tC_rGate = make_tensor_like(take<0, 3>(tC_gDummy));
+        Tensor tC_rAux = make_tensor_like(take<0, 3>(tC_gDummy));
+
+        Tensor cAux = make_identity_tensor(mDummy.shape());
+        Tensor tC_cAux = outer_partition(
+            group_modes<3, 6>(ThreadMapT::partition(
+                cAux, thread_idx, threadblock_tile_offset)),
+            Shape<Int<VecLength>>{}, (_0{}));
+
+        return Callbacks<decltype(tC_rAux), decltype(tC_cAux), ProblemShape>(
+            cute::move(tC_rGate), cute::move(tC_rAux), cute::move(tC_cAux),
+            problem_shape, params_ptr);
+    }
+};
+
+using ReGLUStore = VisitorReGLUStore<
+    ThreadMap, Element, cutlass::FloatRoundStyle::round_to_nearest,
+    cute::Stride<int64_t, cute::_1, int64_t>>;
+using ReGLUCallbacks =
+    cutlass::epilogue::threadblock::Sm80EVT<ReGLUStore, AddBias>;
+
+using MediumReGLUStore = VisitorReGLUStore<
+    MediumThreadMap, Element, cutlass::FloatRoundStyle::round_to_nearest,
+    cute::Stride<int64_t, cute::_1, int64_t>>;
+using MediumReGLUCallbacks =
+    cutlass::epilogue::threadblock::Sm80EVT<MediumReGLUStore, MediumAddBias>;
+
+using SmallM64N64ReGLUStore = VisitorReGLUStore<
+    SmallM64N64ThreadMap, Element, cutlass::FloatRoundStyle::round_to_nearest,
+    cute::Stride<int64_t, cute::_1, int64_t>>;
+using SmallM64N64ReGLUCallbacks =
+    cutlass::epilogue::threadblock::Sm80EVT<
+        SmallM64N64ReGLUStore, SmallM64N64AddBias>;
 
 template <typename Callbacks, typename TileShape = ThreadblockShape,
           typename TileWarpShape = WarpShape, int Stages = 3>
@@ -141,6 +393,34 @@ using MediumResidualKernel = PointwiseKernel<
 using SpatialWideResidualKernel = PointwiseKernel<
     SpatialWideResidualCallbacks, SpatialWideThreadblockShape,
     SpatialWideWarpShape>;
+using SpatialWideBiasKernel = PointwiseKernel<
+    SpatialWideBiasCallbacks, SpatialWideThreadblockShape,
+    SpatialWideWarpShape>;
+using SpatialWideLeakyReluKernel = PointwiseKernel<
+    SpatialWideLeakyReluCallbacks, SpatialWideThreadblockShape,
+    SpatialWideWarpShape>;
+using SmallM128BiasKernel = PointwiseKernel<
+    SmallM128BiasCallbacks, SmallM128ThreadblockShape, SmallM128WarpShape>;
+using SmallM128LeakyReluKernel = PointwiseKernel<
+    SmallM128LeakyReluCallbacks, SmallM128ThreadblockShape, SmallM128WarpShape>;
+using SmallM128ResidualKernel = PointwiseKernel<
+    SmallM128ResidualCallbacks, SmallM128ThreadblockShape, SmallM128WarpShape>;
+using SmallM64N64BiasKernel = PointwiseKernel<
+    SmallM64N64BiasCallbacks, SmallM64N64ThreadblockShape, SmallM64N64WarpShape>;
+using SmallM64N64LeakyReluKernel = PointwiseKernel<
+    SmallM64N64LeakyReluCallbacks, SmallM64N64ThreadblockShape,
+    SmallM64N64WarpShape>;
+using SmallM64N64ResidualKernel = PointwiseKernel<
+    SmallM64N64ResidualCallbacks, SmallM64N64ThreadblockShape,
+    SmallM64N64WarpShape>;
+using ReGLUKernel = PointwiseKernel<ReGLUCallbacks>;
+using MediumReGLUKernel = PointwiseKernel<
+    MediumReGLUCallbacks, MediumThreadblockShape, MediumWarpShape>;
+using MediumStage4ReGLUKernel = PointwiseKernel<
+    MediumReGLUCallbacks, MediumThreadblockShape, MediumWarpShape, 4>;
+using SmallM64N64ReGLUKernel = PointwiseKernel<
+    SmallM64N64ReGLUCallbacks, SmallM64N64ThreadblockShape,
+    SmallM64N64WarpShape>;
 
 using SpatialConvOutputOp =
     cutlass::epilogue::thread::LinearCombinationBiasElementwise<
@@ -222,6 +502,30 @@ static_assert(sizeof(typename MediumResidualKernel::Params) <=
               mlvc::driver_cubin::kCutlassPointwiseParamsStorageBytes);
 static_assert(sizeof(typename SpatialWideResidualKernel::Params) <=
               mlvc::driver_cubin::kCutlassPointwiseParamsStorageBytes);
+static_assert(sizeof(typename SpatialWideBiasKernel::Params) <=
+              mlvc::driver_cubin::kCutlassPointwiseParamsStorageBytes);
+static_assert(sizeof(typename SpatialWideLeakyReluKernel::Params) <=
+              mlvc::driver_cubin::kCutlassPointwiseParamsStorageBytes);
+static_assert(sizeof(typename SmallM128BiasKernel::Params) <=
+              mlvc::driver_cubin::kCutlassPointwiseParamsStorageBytes);
+static_assert(sizeof(typename SmallM128LeakyReluKernel::Params) <=
+              mlvc::driver_cubin::kCutlassPointwiseParamsStorageBytes);
+static_assert(sizeof(typename SmallM128ResidualKernel::Params) <=
+              mlvc::driver_cubin::kCutlassPointwiseParamsStorageBytes);
+static_assert(sizeof(typename SmallM64N64BiasKernel::Params) <=
+              mlvc::driver_cubin::kCutlassPointwiseParamsStorageBytes);
+static_assert(sizeof(typename SmallM64N64LeakyReluKernel::Params) <=
+              mlvc::driver_cubin::kCutlassPointwiseParamsStorageBytes);
+static_assert(sizeof(typename SmallM64N64ResidualKernel::Params) <=
+              mlvc::driver_cubin::kCutlassPointwiseParamsStorageBytes);
+static_assert(sizeof(typename ReGLUKernel::Params) <=
+              mlvc::driver_cubin::kCutlassPointwiseParamsStorageBytes);
+static_assert(sizeof(typename MediumReGLUKernel::Params) <=
+              mlvc::driver_cubin::kCutlassPointwiseParamsStorageBytes);
+static_assert(sizeof(typename MediumStage4ReGLUKernel::Params) <=
+              mlvc::driver_cubin::kCutlassPointwiseParamsStorageBytes);
+static_assert(sizeof(typename SmallM64N64ReGLUKernel::Params) <=
+              mlvc::driver_cubin::kCutlassPointwiseParamsStorageBytes);
 static_assert(sizeof(typename SpatialConvKernel::Params) <=
               mlvc::driver_cubin::kCutlassPointwiseParamsStorageBytes);
 static_assert(sizeof(typename SpatialConvSmallKernel::Params) <=
@@ -234,6 +538,18 @@ static_assert(sizeof(typename MediumStage4BiasKernel::SharedStorage) == 65536);
 static_assert(sizeof(typename MediumLeakyReluKernel::SharedStorage) == 49152);
 static_assert(sizeof(typename MediumResidualKernel::SharedStorage) == 49152);
 static_assert(sizeof(typename SpatialWideResidualKernel::SharedStorage) == 61440);
+static_assert(sizeof(typename SpatialWideBiasKernel::SharedStorage) == 61440);
+static_assert(sizeof(typename SpatialWideLeakyReluKernel::SharedStorage) == 61440);
+static_assert(sizeof(typename SmallM128BiasKernel::SharedStorage) <= 36864);
+static_assert(sizeof(typename SmallM128LeakyReluKernel::SharedStorage) <= 36864);
+static_assert(sizeof(typename SmallM128ResidualKernel::SharedStorage) <= 36864);
+static_assert(sizeof(typename SmallM64N64BiasKernel::SharedStorage) <= 24576);
+static_assert(sizeof(typename SmallM64N64LeakyReluKernel::SharedStorage) <= 24576);
+static_assert(sizeof(typename SmallM64N64ResidualKernel::SharedStorage) <= 24576);
+static_assert(sizeof(typename ReGLUKernel::SharedStorage) == 36864);
+static_assert(sizeof(typename MediumReGLUKernel::SharedStorage) == 49152);
+static_assert(sizeof(typename MediumStage4ReGLUKernel::SharedStorage) == 65536);
+static_assert(sizeof(typename SmallM64N64ReGLUKernel::SharedStorage) <= 24576);
 static_assert(sizeof(typename SpatialConvKernel::SharedStorage) == 73728);
 static_assert(SpatialConvSmallKernel::kThreadCount == 128);
 static_assert(sizeof(typename SpatialConvSmallKernel::SharedStorage) <= 32768);
@@ -812,4 +1128,166 @@ MLVC_POINTWISE_INIT(
      {const_cast<Element*>(residual), Element(0), stride}, {}},
     {output, stride})
 
+#define MLVC_POINTWISE_BASE_INIT(ExportName, KernelType, CallbacksType,        \
+                                 TileRows, TileColumns, ...)                   \
+extern "C" __global__ void ExportName(                                         \
+    void* params_storage, const Element* input, const Element* weight,         \
+    const Element* bias, const Element* residual, Element* output,             \
+    int out_channels, int spatial_count, int in_channels)                      \
+{                                                                              \
+    (void)residual;                                                            \
+    const auto stride = cute::Stride<int64_t, cute::_1, int64_t>{              \
+        int64_t(spatial_count), cute::_1{},                                    \
+        int64_t(out_channels) * spatial_count};                                \
+    pointwise_init_body<KernelType>(                                           \
+        params_storage, input, weight, output, out_channels, spatial_count,    \
+        in_channels, typename CallbacksType::Params{__VA_ARGS__}, TileRows,    \
+        TileColumns, 0);                                                       \
+}
+
+#define MLVC_POINTWISE_MAIN(ExportName, KernelType)                            \
+extern "C" __global__ void ExportName(typename KernelType::Params params)      \
+{                                                                              \
+    __if_sm80_run_kernel<KernelType>(params);                                  \
+}
+
+template <typename KernelType>
+__device__ __forceinline__ void __if_sm80_run_kernel(
+    typename KernelType::Params params)
+{
+#if __CUDA_ARCH__ >= 800
+    extern __shared__ __align__(16) unsigned char mlvc_cutlass_dynamic_smem[];
+    auto* storage = reinterpret_cast<
+        typename KernelType::SharedStorage*>(mlvc_cutlass_dynamic_smem);
+    KernelType{}(params, *storage);
+#else
+    (void)params;
+#endif
+}
+
+MLVC_POINTWISE_MAIN(mlvc_cutlass_pointwise_spatial_wide_fp16,
+                    SpatialWideBiasKernel)
+MLVC_POINTWISE_MAIN(mlvc_cutlass_pointwise_spatial_wide_leaky_relu_fp16,
+                    SpatialWideLeakyReluKernel)
+MLVC_POINTWISE_MAIN(mlvc_cutlass_pointwise_m64n128_fp16, SmallM128BiasKernel)
+MLVC_POINTWISE_MAIN(mlvc_cutlass_pointwise_m64n128_leaky_relu_fp16,
+                    SmallM128LeakyReluKernel)
+MLVC_POINTWISE_MAIN(mlvc_cutlass_pointwise_m64n128_residual_fp16,
+                    SmallM128ResidualKernel)
+MLVC_POINTWISE_MAIN(mlvc_cutlass_pointwise_m64n64_fp16, SmallM64N64BiasKernel)
+MLVC_POINTWISE_MAIN(mlvc_cutlass_pointwise_m64n64_leaky_relu_fp16,
+                    SmallM64N64LeakyReluKernel)
+MLVC_POINTWISE_MAIN(mlvc_cutlass_pointwise_m64n64_residual_fp16,
+                    SmallM64N64ResidualKernel)
+
+MLVC_POINTWISE_BASE_INIT(mlvc_cutlass_pointwise_spatial_wide_init_fp16,
+                         SpatialWideBiasKernel, SpatialWideBiasCallbacks,
+                         64, 256,
+                         {{}, {bias, Element(0), {}}, {}}, {output, stride})
+MLVC_POINTWISE_BASE_INIT(
+    mlvc_cutlass_pointwise_spatial_wide_leaky_relu_init_fp16,
+    SpatialWideLeakyReluKernel, SpatialWideLeakyReluCallbacks, 64, 256,
+    {{{}, {bias, Element(0), {}}, {}}, {}}, {output, stride})
+MLVC_POINTWISE_BASE_INIT(mlvc_cutlass_pointwise_m64n128_init_fp16,
+                         SmallM128BiasKernel, SmallM128BiasCallbacks, 64, 128,
+                         {{}, {bias, Element(0), {}}, {}}, {output, stride})
+MLVC_POINTWISE_BASE_INIT(mlvc_cutlass_pointwise_m64n128_leaky_relu_init_fp16,
+                         SmallM128LeakyReluKernel, SmallM128LeakyReluCallbacks,
+                         64, 128,
+                         {{{}, {bias, Element(0), {}}, {}}, {}}, {output, stride})
+MLVC_POINTWISE_BASE_INIT(
+    mlvc_cutlass_pointwise_m64n128_residual_init_fp16,
+    SmallM128ResidualKernel, SmallM128ResidualCallbacks, 64, 128,
+    {{{}, {bias, Element(0), {}}, {}},
+     {const_cast<Element*>(residual), Element(0), stride}, {}},
+    {output, stride})
+MLVC_POINTWISE_BASE_INIT(mlvc_cutlass_pointwise_m64n64_init_fp16,
+                         SmallM64N64BiasKernel, SmallM64N64BiasCallbacks,
+                         64, 64,
+                         {{}, {bias, Element(0), {}}, {}}, {output, stride})
+MLVC_POINTWISE_BASE_INIT(mlvc_cutlass_pointwise_m64n64_leaky_relu_init_fp16,
+                         SmallM64N64LeakyReluKernel,
+                         SmallM64N64LeakyReluCallbacks, 64, 64,
+                         {{{}, {bias, Element(0), {}}, {}}, {}}, {output, stride})
+MLVC_POINTWISE_BASE_INIT(
+    mlvc_cutlass_pointwise_m64n64_residual_init_fp16,
+    SmallM64N64ResidualKernel, SmallM64N64ResidualCallbacks, 64, 64,
+    {{{}, {bias, Element(0), {}}, {}},
+     {const_cast<Element*>(residual), Element(0), stride}, {}},
+    {output, stride})
+
+MLVC_POINTWISE_INIT(mlvc_cutlass_pointwise_spatial_wide_swizzle_init_fp16,
+                    SpatialWideBiasKernel, SpatialWideBiasCallbacks, 64, 256,
+                    {{}, {bias, Element(0), {}}, {}}, {output, stride})
+MLVC_POINTWISE_INIT(
+    mlvc_cutlass_pointwise_spatial_wide_leaky_relu_swizzle_init_fp16,
+    SpatialWideLeakyReluKernel, SpatialWideLeakyReluCallbacks, 64, 256,
+    {{{}, {bias, Element(0), {}}, {}}, {}}, {output, stride})
+MLVC_POINTWISE_INIT(mlvc_cutlass_pointwise_m64n128_swizzle_init_fp16,
+                    SmallM128BiasKernel, SmallM128BiasCallbacks, 64, 128,
+                    {{}, {bias, Element(0), {}}, {}}, {output, stride})
+MLVC_POINTWISE_INIT(
+    mlvc_cutlass_pointwise_m64n128_leaky_relu_swizzle_init_fp16,
+    SmallM128LeakyReluKernel, SmallM128LeakyReluCallbacks, 64, 128,
+    {{{}, {bias, Element(0), {}}, {}}, {}}, {output, stride})
+MLVC_POINTWISE_INIT(
+    mlvc_cutlass_pointwise_m64n128_residual_swizzle_init_fp16,
+    SmallM128ResidualKernel, SmallM128ResidualCallbacks, 64, 128,
+    {{{}, {bias, Element(0), {}}, {}},
+     {const_cast<Element*>(residual), Element(0), stride}, {}},
+    {output, stride})
+MLVC_POINTWISE_INIT(mlvc_cutlass_pointwise_m64n64_swizzle_init_fp16,
+                    SmallM64N64BiasKernel, SmallM64N64BiasCallbacks, 64, 64,
+                    {{}, {bias, Element(0), {}}, {}}, {output, stride})
+MLVC_POINTWISE_INIT(
+    mlvc_cutlass_pointwise_m64n64_leaky_relu_swizzle_init_fp16,
+    SmallM64N64LeakyReluKernel, SmallM64N64LeakyReluCallbacks, 64, 64,
+    {{{}, {bias, Element(0), {}}, {}}, {}}, {output, stride})
+MLVC_POINTWISE_INIT(
+    mlvc_cutlass_pointwise_m64n64_residual_swizzle_init_fp16,
+    SmallM64N64ResidualKernel, SmallM64N64ResidualCallbacks, 64, 64,
+    {{{}, {bias, Element(0), {}}, {}},
+     {const_cast<Element*>(residual), Element(0), stride}, {}},
+    {output, stride})
+
+#define MLVC_POINTWISE_REGLU_INIT(ExportName, KernelType, CallbacksType,       \
+                                  TileRows, TileColumns)                       \
+extern "C" __global__ void ExportName(                                         \
+    void* params_storage, const Element* input, const Element* weight,         \
+    const Element* bias, Element* output, int out_channels, int spatial_count, \
+    int in_channels, float minimum, float maximum, int log_tile)               \
+{                                                                              \
+    const auto stride = cute::Stride<int64_t, cute::_1, int64_t>{              \
+        int64_t(spatial_count), cute::_1{},                                    \
+        int64_t(out_channels >> 1) * spatial_count};                           \
+    pointwise_init_body<KernelType>(                                           \
+        params_storage, input, weight, output, out_channels, spatial_count,    \
+        in_channels,                                                           \
+        typename CallbacksType::Params{                                        \
+            {{}, {bias, Element(0), {}}, {}},                                  \
+            {output, stride, minimum, maximum}},                               \
+        TileRows, TileColumns, log_tile);                                      \
+}
+
+MLVC_POINTWISE_MAIN(mlvc_cutlass_pointwise_reglu_fp16, ReGLUKernel)
+MLVC_POINTWISE_MAIN(mlvc_cutlass_pointwise_medium_reglu_fp16, MediumReGLUKernel)
+MLVC_POINTWISE_MAIN(mlvc_cutlass_pointwise_medium_stage4_reglu_fp16,
+                    MediumStage4ReGLUKernel)
+MLVC_POINTWISE_MAIN(mlvc_cutlass_pointwise_m64n64_reglu_fp16,
+                    SmallM64N64ReGLUKernel)
+
+MLVC_POINTWISE_REGLU_INIT(mlvc_cutlass_pointwise_reglu_init_fp16,
+                          ReGLUKernel, ReGLUCallbacks, 128, 64)
+MLVC_POINTWISE_REGLU_INIT(mlvc_cutlass_pointwise_medium_reglu_init_fp16,
+                          MediumReGLUKernel, MediumReGLUCallbacks, 128, 128)
+MLVC_POINTWISE_REGLU_INIT(mlvc_cutlass_pointwise_medium_stage4_reglu_init_fp16,
+                          MediumStage4ReGLUKernel, MediumReGLUCallbacks,
+                          128, 128)
+MLVC_POINTWISE_REGLU_INIT(mlvc_cutlass_pointwise_m64n64_reglu_init_fp16,
+                          SmallM64N64ReGLUKernel, SmallM64N64ReGLUCallbacks,
+                          64, 64)
+
+#undef MLVC_POINTWISE_REGLU_INIT
+#undef MLVC_POINTWISE_MAIN
+#undef MLVC_POINTWISE_BASE_INIT
 #undef MLVC_POINTWISE_INIT

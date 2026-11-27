@@ -11,84 +11,148 @@
 
 namespace mlvc::driver_cubin_backend {
 
-bool AotGraph::try_execute_y0_tail(const std::vector<Node>& nodes, std::size_t index)
+std::size_t AotGraph::try_execute_y0_tail(const std::vector<Node>& nodes, std::size_t index)
 {
     if (index + 18 >= nodes.size())
-        return false;
-    static constexpr std::array<Op, 19> operations{
-        Op::SLICE, Op::SLICE, Op::CLIP, Op::RECIPROCAL, Op::MUL, Op::SUB, Op::MUL,
-        Op::SLICE, Op::SLICE, Op::ADD, Op::ROUND, Op::SLICE, Op::SLICE, Op::ADD,
-        Op::MUL, Op::ADD, Op::MUL, Op::CONCAT, Op::CONCAT};
-    for (std::size_t offset = 0; offset < operations.size(); ++offset) {
-        if (nodes.at(index + offset).op != operations[offset])
-            return false;
-    }
+        return 0;
 
-    auto inputs = [&](std::size_t offset) {
-        return nodes.at(index + offset).inputs;
+    auto inputs = [&](std::size_t node_idx) {
+        return nodes.at(node_idx).inputs;
     };
-    auto output = [&](std::size_t offset) -> TensorId {
-        const auto names = nodes.at(index + offset).outputs;
+    auto output = [&](std::size_t node_idx) -> TensorId {
+        const auto names = nodes.at(node_idx).outputs;
         return names.size() == 1 ? names[0] : TensorId{};
     };
 
-    const auto slice0_inputs = inputs(0);
-    const auto slice1_inputs = inputs(1);
-    if (slice0_inputs.size() < 1 || slice1_inputs.size() < 1 ||
-        (slice0_inputs[0] == 0) || slice0_inputs[0] != slice1_inputs[0]) {
-        return false;
+    if (nodes.at(index).op != Op::SLICE ||
+        nodes.at(index + 1).op != Op::SLICE ||
+        nodes.at(index + 2).op != Op::CLIP ||
+        nodes.at(index + 3).op != Op::RECIPROCAL) {
+        return 0;
+    }
+
+    const auto slice0_inputs = inputs(index);
+    const auto slice1_inputs = inputs(index + 1);
+    if (slice0_inputs.empty() || slice1_inputs.empty() ||
+        slice0_inputs[0] == 0 || slice0_inputs[0] != slice1_inputs[0]) {
+        return 0;
     }
     const TensorId prior_name = slice0_inputs[0];
-    const TensorId slice0 = output(0);
-    const TensorId slice1 = output(1);
-    const TensorId clipped = output(2);
-    const TensorId reciprocal = output(3);
-    const TensorId normalized = output(4);
-    const TensorId difference = output(5);
-    const TensorId scaled = output(6);
-    const TensorId scaled0 = output(7);
-    const TensorId scaled1 = output(8);
-    const TensorId rounded_input = output(9);
-    const TensorId y_raw = output(10);
-    const TensorId prior0 = output(11);
-    const TensorId prior1 = output(12);
-    const TensorId updated_input0 = output(13);
-    const TensorId updated0 = output(14);
-    const TensorId updated_input1 = output(15);
-    const TensorId updated1 = output(16);
-    const TensorId concat2 = output(17);
-    const TensorId concat3 = output(18);
-    if ((slice0 == 0) || (slice1 == 0) || (clipped == 0) ||
-        (reciprocal == 0) || (normalized == 0) || (difference == 0) ||
-        (scaled == 0) || (scaled0 == 0) || (scaled1 == 0) ||
-        (rounded_input == 0) || (y_raw == 0) || (prior0 == 0) ||
-        (prior1 == 0) || (updated_input0 == 0) || (updated0 == 0) ||
-        (updated_input1 == 0) || (updated1 == 0) || (concat2 == 0) ||
-        (concat3 == 0) ||
-        inputs(2).size() != 2 || inputs(2)[0] != slice0 ||
-        (inputs(2)[1] == 0) || inputs(3) != std::vector<TensorId>{clipped} ||
-        inputs(4).size() != 2 || (inputs(4)[0] == 0) ||
-        inputs(4)[1] != reciprocal ||
-        inputs(5) != std::vector<TensorId>{normalized, slice1} ||
-        inputs(6).size() != 2 || inputs(6)[0] != difference ||
-        (inputs(6)[1] == 0) || inputs(7).size() < 1 ||
-        inputs(7)[0] != scaled || inputs(8).size() < 1 ||
-        inputs(8)[0] != scaled || inputs(9) !=
-            std::vector<TensorId>{scaled0, scaled1} ||
-        inputs(10) != std::vector<TensorId>{rounded_input} ||
-        inputs(11).size() < 1 || inputs(11)[0] != slice1 ||
-        inputs(12).size() < 1 || inputs(12)[0] != slice1 ||
-        inputs(13) != std::vector<TensorId>{y_raw, prior0} ||
-        inputs(14).size() != 2 || inputs(14)[0] != updated_input0 ||
-        (inputs(14)[1] == 0) || inputs(15) !=
-            std::vector<TensorId>{y_raw, prior1} ||
-        inputs(16).size() != 2 || inputs(16)[0] != updated_input1 ||
-        (inputs(16)[1] == 0) || inputs(17) !=
-            std::vector<TensorId>{updated0, updated1} ||
-        inputs(18) != std::vector<TensorId>{concat2, prior_name} ||
-        nodes.at(index + 17).axis_or_zero() != 1 ||
-        nodes.at(index + 18).axis_or_zero() != 1) {
-        return false;
+    const TensorId slice0 = output(index);
+    const TensorId slice1 = output(index + 1);
+    const TensorId clipped = output(index + 2);
+    const TensorId reciprocal_raw = output(index + 3);
+    if (slice0 == 0 || slice1 == 0 || clipped == 0 || reciprocal_raw == 0)
+        return 0;
+
+    const auto clip_inputs = inputs(index + 2);
+    if ((clip_inputs.size() != 2 && clip_inputs.size() != 3) ||
+        clip_inputs[0] != slice0 || clip_inputs[1] == 0 ||
+        inputs(index + 3) != std::vector<TensorId>{clipped}) {
+        return 0;
+    }
+    if (value(clip_inputs[1]).dtype != DataType::FP16 ||
+        value(clip_inputs[1]).shape != std::vector<int64_t>{1}) {
+        return 0;
+    }
+    float clip_max = 65504.0F;
+    if (clip_inputs.size() == 3 && clip_inputs[2] != 0) {
+        if (value(clip_inputs[2]).dtype != DataType::FP16 ||
+            value(clip_inputs[2]).shape != std::vector<int64_t>{1}) {
+            return 0;
+        }
+        clip_max = scalar_fp16(clip_inputs[2]);
+        if (clip_max < 65504.0F)
+            return 0;
+    }
+
+    // PyTorch AOT lowering emits an optional `* 1.0` Mul right after Reciprocal.
+    std::size_t cursor = index + 4;
+    TensorId reciprocal = reciprocal_raw;
+    if (cursor + 15 <= nodes.size() && nodes.at(cursor).op == Op::MUL &&
+        inputs(cursor).size() == 2 && output(cursor) != 0) {
+        TensorId other = 0;
+        if (inputs(cursor)[0] == reciprocal_raw)
+            other = inputs(cursor)[1];
+        else if (inputs(cursor)[1] == reciprocal_raw)
+            other = inputs(cursor)[0];
+        if (other != 0 && value(other).initializer &&
+            value(other).dtype == DataType::FP16 &&
+            value(other).shape == std::vector<int64_t>{1} &&
+            std::abs(scalar_fp16(other) - 1.0F) <= 1.0e-4F) {
+            if (tensor_consumer_count(reciprocal_raw) != 1)
+                return 0;
+            reciprocal = output(cursor);
+            ++cursor;
+        }
+    }
+    if (cursor + 15 > nodes.size())
+        return 0;
+
+    static constexpr std::array<Op, 15> tail_ops{
+        Op::MUL, Op::SUB, Op::MUL, Op::SLICE, Op::SLICE, Op::ADD, Op::ROUND,
+        Op::SLICE, Op::SLICE, Op::ADD, Op::MUL, Op::ADD, Op::MUL,
+        Op::CONCAT, Op::CONCAT};
+    for (std::size_t offset = 0; offset < tail_ops.size(); ++offset) {
+        if (nodes.at(cursor + offset).op != tail_ops[offset])
+            return 0;
+    }
+
+    const TensorId normalized = output(cursor + 0);
+    const TensorId difference = output(cursor + 1);
+    const TensorId scaled = output(cursor + 2);
+    const TensorId scaled0 = output(cursor + 3);
+    const TensorId scaled1 = output(cursor + 4);
+    const TensorId rounded_input = output(cursor + 5);
+    const TensorId y_raw = output(cursor + 6);
+    const TensorId prior0 = output(cursor + 7);
+    const TensorId prior1 = output(cursor + 8);
+    const TensorId updated_input0 = output(cursor + 9);
+    const TensorId updated0 = output(cursor + 10);
+    const TensorId updated_input1 = output(cursor + 11);
+    const TensorId updated1 = output(cursor + 12);
+    const TensorId concat2 = output(cursor + 13);
+    const TensorId concat3 = output(cursor + 14);
+    if (normalized == 0 || difference == 0 || scaled == 0 || scaled0 == 0 ||
+        scaled1 == 0 || rounded_input == 0 || y_raw == 0 || prior0 == 0 ||
+        prior1 == 0 || updated_input0 == 0 || updated0 == 0 ||
+        updated_input1 == 0 || updated1 == 0 || concat2 == 0 || concat3 == 0) {
+        return 0;
+    }
+
+    TensorId latent_name = 0;
+    if (inputs(cursor + 0).size() != 2)
+        return 0;
+    if (inputs(cursor + 0)[1] == reciprocal)
+        latent_name = inputs(cursor + 0)[0];
+    else if (inputs(cursor + 0)[0] == reciprocal)
+        latent_name = inputs(cursor + 0)[1];
+    else
+        return 0;
+
+    if (latent_name == 0 ||
+        inputs(cursor + 1) != std::vector<TensorId>{normalized, slice1} ||
+        inputs(cursor + 2).size() != 2 || inputs(cursor + 2)[0] != difference ||
+        inputs(cursor + 2)[1] == 0 || inputs(cursor + 3).empty() ||
+        inputs(cursor + 3)[0] != scaled || inputs(cursor + 4).empty() ||
+        inputs(cursor + 4)[0] != scaled ||
+        inputs(cursor + 5) != std::vector<TensorId>{scaled0, scaled1} ||
+        inputs(cursor + 6) != std::vector<TensorId>{rounded_input} ||
+        inputs(cursor + 7).empty() || inputs(cursor + 7)[0] != slice1 ||
+        inputs(cursor + 8).empty() || inputs(cursor + 8)[0] != slice1 ||
+        inputs(cursor + 9) != std::vector<TensorId>{y_raw, prior0} ||
+        inputs(cursor + 10).size() != 2 ||
+        inputs(cursor + 10)[0] != updated_input0 ||
+        inputs(cursor + 10)[1] == 0 ||
+        inputs(cursor + 11) != std::vector<TensorId>{y_raw, prior1} ||
+        inputs(cursor + 12).size() != 2 ||
+        inputs(cursor + 12)[0] != updated_input1 ||
+        inputs(cursor + 12)[1] == 0 ||
+        inputs(cursor + 13) != std::vector<TensorId>{updated0, updated1} ||
+        inputs(cursor + 14) != std::vector<TensorId>{concat2, prior_name} ||
+        nodes.at(cursor + 13).axis_or_zero() != 1 ||
+        nodes.at(cursor + 14).axis_or_zero() != 1) {
+        return 0;
     }
 
     const std::array<std::pair<const TensorId*, std::size_t>, 19>
@@ -102,14 +166,14 @@ bool AotGraph::try_execute_y0_tail(const std::vector<Node>& nodes, std::size_t i
             {&concat2, 2}}};
     for (const auto& [name, expected] : expected_consumers) {
         if (tensor_consumer_count(*name) != expected)
-            return false;
+            return 0;
     }
 
     const Value& prior_value = value(prior_name);
-    const Value& latent_value = value(inputs(4)[0]);
-    const Value& quant_scale = value(inputs(6)[1]);
-    const Value& update_scale0 = value(inputs(14)[1]);
-    const Value& update_scale1 = value(inputs(16)[1]);
+    const Value& latent_value = value(latent_name);
+    const Value& quant_scale = value(inputs(cursor + 2)[1]);
+    const Value& update_scale0 = value(inputs(cursor + 10)[1]);
+    const Value& update_scale1 = value(inputs(cursor + 12)[1]);
     const Value& normalized_value = value(normalized);
     const Value& clipped_value = value(clipped);
     const Value& raw_value = value(y_raw);
@@ -122,12 +186,12 @@ bool AotGraph::try_execute_y0_tail(const std::vector<Node>& nodes, std::size_t i
         concat2_value.dtype != DataType::FP16 || concat3_value.dtype != DataType::FP16 ||
         prior_value.shape.size() != 4 || latent_value.shape.size() != 4 ||
         raw_value.shape.size() != 4 || concat3_value.shape.size() != 4) {
-        return false;
+        return 0;
     }
 
     int quant_channels = static_cast<int>(raw_value.shape[1]);
     if (quant_channels < 16)
-        return false;
+        return 0;
     const std::vector<int64_t> raw_shape{
         raw_value.shape[0], raw_value.shape[1], raw_value.shape[2],
         raw_value.shape[3]};
@@ -154,27 +218,30 @@ bool AotGraph::try_execute_y0_tail(const std::vector<Node>& nodes, std::size_t i
         value(updated_input1).shape != raw_shape ||
         value(updated0).shape != raw_shape || value(updated1).shape != raw_shape ||
         concat2_value.shape != normalized_expected ||
-        concat3_value.shape != concat3_expected ||
-        value(inputs(2)[1]).dtype != DataType::FP16 ||
-        value(inputs(2)[1]).shape != std::vector<int64_t>{1}) {
-        return false;
+        concat3_value.shape != concat3_expected) {
+        return 0;
     }
     if (!is_channel_slice(nodes.at(index), 0, quant_channels * 2) ||
         !is_channel_slice(nodes.at(index + 1), quant_channels * 2,
                           quant_channels * 4) ||
-        !is_channel_slice(nodes.at(index + 7), 0, quant_channels) ||
-        !is_channel_slice(nodes.at(index + 8), quant_channels,
+        !is_channel_slice(nodes.at(cursor + 3), 0, quant_channels) ||
+        !is_channel_slice(nodes.at(cursor + 4), quant_channels,
                           quant_channels * 2) ||
-        !is_channel_slice(nodes.at(index + 11), 0, quant_channels) ||
-        !is_channel_slice(nodes.at(index + 12), quant_channels,
+        !is_channel_slice(nodes.at(cursor + 7), 0, quant_channels) ||
+        !is_channel_slice(nodes.at(cursor + 8), quant_channels,
                           quant_channels * 2)) {
-        return false;
+        return 0;
     }
 
+    const int batch_count = static_cast<int>(raw_shape[0]);
+    const bool raw_in_place_latent =
+        batch_count == 1 && raw_value.address == latent_value.address;
     if (ranges_overlap(concat3_value, prior_value) ||
         ranges_overlap(concat3_value, latent_value) ||
         ranges_overlap(concat3_value, normalized_value) ||
         ranges_overlap(concat3_value, clipped_value) ||
+        ranges_overlap(concat3_value, raw_value) ||
+        ranges_overlap(concat3_value, concat2_value) ||
         ranges_overlap(concat2_value, prior_value) ||
         ranges_overlap(concat2_value, normalized_value) ||
         ranges_overlap(concat2_value, clipped_value) ||
@@ -184,11 +251,18 @@ bool AotGraph::try_execute_y0_tail(const std::vector<Node>& nodes, std::size_t i
         ranges_overlap(raw_value, normalized_value) ||
         ranges_overlap(raw_value, clipped_value) ||
         ranges_overlap(raw_value, concat2_value) ||
-        (ranges_overlap(raw_value, latent_value) &&
-         raw_value.address != latent_value.address)) {
-        return false;
+        (ranges_overlap(raw_value, latent_value) && !raw_in_place_latent) ||
+        (ranges_overlap(normalized_value, latent_value) &&
+         normalized_value.address != latent_value.address) ||
+        ranges_overlap(normalized_value, prior_value) ||
+        ranges_overlap(normalized_value, clipped_value) ||
+        ranges_overlap(clipped_value, prior_value) ||
+        ranges_overlap(clipped_value, latent_value)) {
+        return 0;
     }
 
+    if (batch_initializing_cutlass_)
+        return (cursor + 15) - index;
     DeviceAddress latent = latent_value.address;
     DeviceAddress prior = prior_value.address;
     DeviceAddress quant = quant_scale.address;
@@ -199,17 +273,20 @@ bool AotGraph::try_execute_y0_tail(const std::vector<Node>& nodes, std::size_t i
     DeviceAddress raw = raw_value.address;
     DeviceAddress concat2_address = concat2_value.address;
     DeviceAddress concat3_address = concat3_value.address;
-    float clip_min = scalar_fp16(inputs(2)[1]);
-    int batch_count = static_cast<int>(raw_shape[0]);
+    float clip_min = scalar_fp16(clip_inputs[1]);
+    int batch_param = batch_count;
     int spatial_count = static_cast<int>(raw_shape[2] * raw_shape[3]);
     void* parameters[] = {
         &latent, &prior, &quant, &update0, &update1, &normalized_address,
         &clipped_address, &raw, &concat2_address, &concat3_address,
-        &clip_min, &batch_count, &quant_channels, &spatial_count};
-    const std::size_t work = static_cast<std::size_t>(batch_count) *
-        quant_channels * 4 * spatial_count;
-    launch_linear(y0_tail_, work, parameters);
-    return true;
+        &clip_min, &clip_max, &batch_param, &quant_channels, &spatial_count};
+    driver_.launch(
+        y0_tail_,
+        {divide_up(static_cast<std::size_t>(spatial_count), 128),
+         static_cast<unsigned int>(quant_channels),
+         static_cast<unsigned int>(batch_count)},
+        {128, 1, 1}, 0, parameters);
+    return (cursor + 15) - index;
 }
 
 bool AotGraph::try_execute_y1_tail(const std::vector<Node>& nodes, std::size_t index)
@@ -352,13 +429,18 @@ bool AotGraph::try_execute_y1_tail(const std::vector<Node>& nodes, std::size_t i
         ranges_overlap(raw_value, clipped_value) ||
         (ranges_overlap(result, concat2_value) &&
          result.address != concat2_value.address) ||
-        ranges_overlap(result, normalized_value) ||
-        ranges_overlap(result, prior_value) ||
-        ranges_overlap(result, clipped_value) ||
+        (ranges_overlap(result, normalized_value) &&
+         result.address != normalized_value.address) ||
+        (ranges_overlap(result, prior_value) &&
+         result.address != prior_value.address) ||
+        (ranges_overlap(result, clipped_value) &&
+         result.address != clipped_value.address) ||
         ranges_overlap(result, raw_value)) {
         return false;
     }
 
+    if (batch_initializing_cutlass_)
+        return true;
     DeviceAddress normalized = normalized_value.address;
     DeviceAddress prior = prior_value.address;
     DeviceAddress quant = quant_scale.address;
@@ -374,9 +456,346 @@ bool AotGraph::try_execute_y1_tail(const std::vector<Node>& nodes, std::size_t i
         &normalized, &prior, &quant, &update0, &update1, &concat2,
         &clipped, &raw, &result_address, &batch_count, &quant_channels,
         &spatial_count};
-    const std::size_t work = static_cast<std::size_t>(batch_count) *
-        quant_channels * spatial_count;
-    launch_linear(y1_tail_, work, parameters);
+    driver_.launch(
+        y1_tail_,
+        {divide_up(static_cast<std::size_t>(spatial_count), 128),
+         static_cast<unsigned int>(quant_channels),
+         static_cast<unsigned int>(batch_count)},
+        {128, 1, 1}, 0, parameters);
+    return true;
+}
+
+bool AotGraph::try_execute_dec_y0_tail(const std::vector<Node>& nodes, std::size_t index)
+{
+    if (index + 10 >= nodes.size())
+        return false;
+    static constexpr std::array<Op, 11> operations{
+        Op::SLICE, Op::SLICE, Op::CLIP, Op::SLICE, Op::SLICE,
+        Op::ADD, Op::MUL, Op::ADD, Op::MUL, Op::CONCAT, Op::CONCAT};
+    for (std::size_t offset = 0; offset < operations.size(); ++offset) {
+        if (nodes.at(index + offset).op != operations[offset])
+            return false;
+    }
+
+    auto inputs = [&](std::size_t offset) {
+        return nodes.at(index + offset).inputs;
+    };
+    auto output = [&](std::size_t offset) -> TensorId {
+        const auto names = nodes.at(index + offset).outputs;
+        return names.size() == 1 ? names[0] : TensorId{};
+    };
+
+    const auto slice0_inputs = inputs(0);
+    const auto slice1_inputs = inputs(1);
+    if (slice0_inputs.empty() || slice1_inputs.empty() ||
+        slice0_inputs[0] == 0 || slice0_inputs[0] != slice1_inputs[0]) {
+        return false;
+    }
+    const TensorId prior_name = slice0_inputs[0];
+    const TensorId slice0 = output(0);
+    const TensorId slice1 = output(1);
+    const TensorId clipped = output(2);
+    const TensorId prior0 = output(3);
+    const TensorId prior1 = output(4);
+    const TensorId updated_input0 = output(5);
+    const TensorId updated0 = output(6);
+    const TensorId updated_input1 = output(7);
+    const TensorId updated1 = output(8);
+    const TensorId concat2 = output(9);
+    const TensorId concat3 = output(10);
+    if (slice0 == 0 || slice1 == 0 || clipped == 0 || prior0 == 0 ||
+        prior1 == 0 || updated_input0 == 0 || updated0 == 0 ||
+        updated_input1 == 0 || updated1 == 0 || concat2 == 0 || concat3 == 0) {
+        return false;
+    }
+
+    const auto clip_inputs = inputs(2);
+    if ((clip_inputs.size() != 2 && clip_inputs.size() != 3) ||
+        clip_inputs[0] != slice0 || clip_inputs[1] == 0) {
+        return false;
+    }
+    if (value(clip_inputs[1]).dtype != DataType::FP16 ||
+        value(clip_inputs[1]).shape != std::vector<int64_t>{1}) {
+        return false;
+    }
+    float clip_max = 65504.0F;
+    if (clip_inputs.size() == 3 && clip_inputs[2] != 0) {
+        if (value(clip_inputs[2]).dtype != DataType::FP16 ||
+            value(clip_inputs[2]).shape != std::vector<int64_t>{1}) {
+            return false;
+        }
+        clip_max = scalar_fp16(clip_inputs[2]);
+    }
+
+    if (inputs(3).empty() || inputs(3)[0] != slice1 ||
+        inputs(4).empty() || inputs(4)[0] != slice1 ||
+        inputs(5).size() != 2 || inputs(7).size() != 2) {
+        return false;
+    }
+    TensorId y_raw_name = 0;
+    if (inputs(5)[1] == prior0)
+        y_raw_name = inputs(5)[0];
+    else if (inputs(5)[0] == prior0)
+        y_raw_name = inputs(5)[1];
+    else
+        return false;
+    if (y_raw_name == 0 ||
+        !((inputs(7)[0] == y_raw_name && inputs(7)[1] == prior1) ||
+          (inputs(7)[1] == y_raw_name && inputs(7)[0] == prior1))) {
+        return false;
+    }
+    if (inputs(6).size() != 2 || inputs(6)[0] != updated_input0 ||
+        inputs(6)[1] == 0 || inputs(8).size() != 2 ||
+        inputs(8)[0] != updated_input1 || inputs(8)[1] == 0 ||
+        inputs(9) != std::vector<TensorId>{updated0, updated1} ||
+        inputs(10) != std::vector<TensorId>{concat2, prior_name} ||
+        nodes.at(index + 9).axis_or_zero() != 1 ||
+        nodes.at(index + 10).axis_or_zero() != 1) {
+        return false;
+    }
+
+    const std::array<std::pair<const TensorId*, std::size_t>, 10>
+        expected_consumers{{
+            {&prior_name, 3}, {&slice0, 1}, {&slice1, 2},
+            {&clipped, 1}, {&prior0, 1}, {&prior1, 1},
+            {&updated_input0, 1}, {&updated0, 1},
+            {&updated_input1, 1}, {&updated1, 1}}};
+    for (const auto& [name, expected] : expected_consumers) {
+        if (tensor_consumer_count(*name) != expected)
+            return false;
+    }
+    if (tensor_consumer_count(concat2) != 2)
+        return false;
+
+    const Value& prior_value = value(prior_name);
+    const Value& raw_value = value(y_raw_name);
+    const Value& update_scale0 = value(inputs(6)[1]);
+    const Value& update_scale1 = value(inputs(8)[1]);
+    const Value& clipped_value = value(clipped);
+    const Value& concat2_value = value(concat2);
+    const Value& concat3_value = value(concat3);
+    if (prior_value.dtype != DataType::FP16 || raw_value.dtype != DataType::FP16 ||
+        update_scale0.dtype != DataType::FP16 || update_scale1.dtype != DataType::FP16 ||
+        clipped_value.dtype != DataType::FP16 || concat2_value.dtype != DataType::FP16 ||
+        concat3_value.dtype != DataType::FP16 || prior_value.shape.size() != 4 ||
+        raw_value.shape.size() != 4 || concat3_value.shape.size() != 4) {
+        return false;
+    }
+
+    int quant_channels = static_cast<int>(raw_value.shape[1]);
+    if (quant_channels < 16)
+        return false;
+    const std::vector<int64_t> raw_shape{
+        raw_value.shape[0], raw_value.shape[1], raw_value.shape[2],
+        raw_value.shape[3]};
+    const std::vector<int64_t> norm_shape{
+        raw_shape[0], raw_shape[1] * 2, raw_shape[2], raw_shape[3]};
+    const std::vector<int64_t> prior_shape{
+        raw_shape[0], raw_shape[1] * 4, raw_shape[2], raw_shape[3]};
+    const std::vector<int64_t> concat3_shape{
+        raw_shape[0], raw_shape[1] * 6, raw_shape[2], raw_shape[3]};
+    if (prior_value.shape != prior_shape || update_scale0.shape != raw_shape ||
+        update_scale1.shape != raw_shape || clipped_value.shape != norm_shape ||
+        concat2_value.shape != norm_shape || concat3_value.shape != concat3_shape ||
+        !is_channel_slice(nodes.at(index), 0, quant_channels * 2) ||
+        !is_channel_slice(nodes.at(index + 1), quant_channels * 2,
+                          quant_channels * 4) ||
+        !is_channel_slice(nodes.at(index + 3), 0, quant_channels) ||
+        !is_channel_slice(nodes.at(index + 4), quant_channels,
+                          quant_channels * 2)) {
+        return false;
+    }
+
+    if (ranges_overlap(concat3_value, prior_value) ||
+        ranges_overlap(concat3_value, raw_value) ||
+        ranges_overlap(concat3_value, clipped_value) ||
+        ranges_overlap(concat3_value, concat2_value) ||
+        ranges_overlap(concat2_value, prior_value) ||
+        ranges_overlap(concat2_value, raw_value) ||
+        ranges_overlap(concat2_value, clipped_value) ||
+        ranges_overlap(clipped_value, prior_value) ||
+        ranges_overlap(clipped_value, raw_value)) {
+        return false;
+    }
+
+    if (batch_initializing_cutlass_)
+        return true;
+    DeviceAddress prior = prior_value.address;
+    DeviceAddress raw = raw_value.address;
+    DeviceAddress update0 = update_scale0.address;
+    DeviceAddress update1 = update_scale1.address;
+    DeviceAddress clipped_address = clipped_value.address;
+    DeviceAddress concat2_address = concat2_value.address;
+    DeviceAddress concat3_address = concat3_value.address;
+    float clip_min = scalar_fp16(clip_inputs[1]);
+    int batch_count = static_cast<int>(raw_shape[0]);
+    int spatial_count = static_cast<int>(raw_shape[2] * raw_shape[3]);
+    void* parameters[] = {
+        &prior, &raw, &update0, &update1, &clipped_address,
+        &concat2_address, &concat3_address, &clip_min, &clip_max,
+        &batch_count, &quant_channels, &spatial_count};
+    driver_.launch(
+        dec_y0_tail_,
+        {divide_up(static_cast<std::size_t>(spatial_count), 128),
+         static_cast<unsigned int>(quant_channels),
+         static_cast<unsigned int>(batch_count)},
+        {128, 1, 1}, 0, parameters);
+    return true;
+}
+
+bool AotGraph::try_execute_dec_y1_tail(const std::vector<Node>& nodes, std::size_t index)
+{
+    if (index + 8 >= nodes.size())
+        return false;
+    static constexpr std::array<Op, 9> operations{
+        Op::SLICE, Op::SLICE, Op::ADD, Op::MUL, Op::ADD, Op::MUL,
+        Op::CONCAT, Op::ADD, Op::MUL};
+    for (std::size_t offset = 0; offset < operations.size(); ++offset) {
+        if (nodes.at(index + offset).op != operations[offset])
+            return false;
+    }
+
+    auto inputs = [&](std::size_t offset) {
+        return nodes.at(index + offset).inputs;
+    };
+    auto output = [&](std::size_t offset) -> TensorId {
+        const auto names = nodes.at(index + offset).outputs;
+        return names.size() == 1 ? names[0] : TensorId{};
+    };
+
+    if (inputs(0).empty() || inputs(1).empty() ||
+        inputs(0)[0] == 0 || inputs(0)[0] != inputs(1)[0]) {
+        return false;
+    }
+    const TensorId prior_name = inputs(0)[0];
+    const TensorId prior0 = output(0);
+    const TensorId prior1 = output(1);
+    const TensorId updated_input0 = output(2);
+    const TensorId updated0 = output(3);
+    const TensorId updated_input1 = output(4);
+    const TensorId updated1 = output(5);
+    const TensorId concat4 = output(6);
+    const TensorId added = output(7);
+    const TensorId result_name = output(8);
+    if (prior0 == 0 || prior1 == 0 || updated_input0 == 0 || updated0 == 0 ||
+        updated_input1 == 0 || updated1 == 0 || concat4 == 0 || added == 0 ||
+        result_name == 0 || inputs(2).size() != 2 || inputs(4).size() != 2) {
+        return false;
+    }
+
+    TensorId y_raw_name = 0;
+    if (inputs(2)[1] == prior0)
+        y_raw_name = inputs(2)[0];
+    else if (inputs(2)[0] == prior0)
+        y_raw_name = inputs(2)[1];
+    else
+        return false;
+    if (y_raw_name == 0 ||
+        !((inputs(4)[0] == y_raw_name && inputs(4)[1] == prior1) ||
+          (inputs(4)[1] == y_raw_name && inputs(4)[0] == prior1))) {
+        return false;
+    }
+    if (inputs(3).size() != 2 || inputs(3)[0] != updated_input0 ||
+        inputs(3)[1] == 0 || inputs(5).size() != 2 ||
+        inputs(5)[0] != updated_input1 || inputs(5)[1] == 0 ||
+        inputs(6) != std::vector<TensorId>{updated0, updated1} ||
+        nodes.at(index + 6).axis_or_zero() != 1 ||
+        inputs(7).size() != 2 || inputs(8).size() != 2) {
+        return false;
+    }
+
+    TensorId concat2_name = 0;
+    if (inputs(7)[1] == concat4)
+        concat2_name = inputs(7)[0];
+    else if (inputs(7)[0] == concat4)
+        concat2_name = inputs(7)[1];
+    else
+        return false;
+
+    TensorId clipped_name = 0;
+    if (inputs(8)[0] == added)
+        clipped_name = inputs(8)[1];
+    else if (inputs(8)[1] == added)
+        clipped_name = inputs(8)[0];
+    else
+        return false;
+    if (concat2_name == 0 || clipped_name == 0)
+        return false;
+
+    if (tensor_consumer_count(prior_name) != 2 ||
+        tensor_consumer_count(prior0) != 1 ||
+        tensor_consumer_count(prior1) != 1 ||
+        tensor_consumer_count(updated_input0) != 1 ||
+        tensor_consumer_count(updated0) != 1 ||
+        tensor_consumer_count(updated_input1) != 1 ||
+        tensor_consumer_count(updated1) != 1 ||
+        tensor_consumer_count(concat4) != 1 ||
+        tensor_consumer_count(added) != 1) {
+        return false;
+    }
+
+    const Value& prior_value = value(prior_name);
+    const Value& raw_value = value(y_raw_name);
+    const Value& update_scale0 = value(inputs(3)[1]);
+    const Value& update_scale1 = value(inputs(5)[1]);
+    const Value& concat2_value = value(concat2_name);
+    const Value& clipped_value = value(clipped_name);
+    const Value& result = value(result_name);
+    if (prior_value.dtype != DataType::FP16 || raw_value.dtype != DataType::FP16 ||
+        update_scale0.dtype != DataType::FP16 || update_scale1.dtype != DataType::FP16 ||
+        concat2_value.dtype != DataType::FP16 || clipped_value.dtype != DataType::FP16 ||
+        result.dtype != DataType::FP16 || prior_value.shape.size() != 4 ||
+        raw_value.shape.size() != 4 || result.shape.size() != 4) {
+        return false;
+    }
+
+    int quant_channels = static_cast<int>(raw_value.shape[1]);
+    if (quant_channels < 16)
+        return false;
+    const std::vector<int64_t> raw_shape{
+        raw_value.shape[0], raw_value.shape[1], raw_value.shape[2],
+        raw_value.shape[3]};
+    const std::vector<int64_t> norm_shape{
+        raw_shape[0], raw_shape[1] * 2, raw_shape[2], raw_shape[3]};
+    if (prior_value.shape != norm_shape || update_scale0.shape != raw_shape ||
+        update_scale1.shape != raw_shape || concat2_value.shape != norm_shape ||
+        clipped_value.shape != norm_shape || result.shape != norm_shape ||
+        !is_channel_slice(nodes.at(index), 0, quant_channels) ||
+        !is_channel_slice(nodes.at(index + 1), quant_channels,
+                          quant_channels * 2)) {
+        return false;
+    }
+
+    if (ranges_overlap(result, raw_value) ||
+        (ranges_overlap(result, prior_value) &&
+         result.address != prior_value.address) ||
+        (ranges_overlap(result, concat2_value) &&
+         result.address != concat2_value.address) ||
+        (ranges_overlap(result, clipped_value) &&
+         result.address != clipped_value.address)) {
+        return false;
+    }
+
+    if (batch_initializing_cutlass_)
+        return true;
+    DeviceAddress prior = prior_value.address;
+    DeviceAddress raw = raw_value.address;
+    DeviceAddress update0 = update_scale0.address;
+    DeviceAddress update1 = update_scale1.address;
+    DeviceAddress concat2 = concat2_value.address;
+    DeviceAddress clipped = clipped_value.address;
+    DeviceAddress result_address = result.address;
+    int batch_count = static_cast<int>(raw_shape[0]);
+    int spatial_count = static_cast<int>(raw_shape[2] * raw_shape[3]);
+    void* parameters[] = {
+        &prior, &raw, &update0, &update1, &concat2, &clipped,
+        &result_address, &batch_count, &quant_channels, &spatial_count};
+    driver_.launch(
+        dec_y1_tail_,
+        {divide_up(static_cast<std::size_t>(spatial_count), 128),
+         static_cast<unsigned int>(quant_channels),
+         static_cast<unsigned int>(batch_count)},
+        {128, 1, 1}, 0, parameters);
     return true;
 }
 
@@ -483,6 +902,8 @@ bool AotGraph::try_execute_feature_update(const std::vector<Node>& nodes, std::s
         return false;
     }
 
+    if (batch_initializing_cutlass_)
+        return true;
     DeviceAddress source_address = source.address;
     DeviceAddress history_address = history.address;
     DeviceAddress scale_address = scale.address;
@@ -650,6 +1071,8 @@ bool AotGraph::try_execute_feature_update_outputs(
         elided_schedule_nodes_.push_back(concat_index);
     }
 
+    if (batch_initializing_cutlass_)
+        return true;
     DeviceAddress source_address = source.address;
     DeviceAddress history_address = history.address;
     DeviceAddress scale_address = scale.address;
@@ -758,7 +1181,9 @@ bool AotGraph::try_execute_pointwise_epilogue(const std::vector<Node>& nodes, st
         batch_count, has_bias, in_channels, spatial_count, out_channels,
         epilogue, alpha, epilogue_input_address != 0);
     const bool mma_supported =
-        (in_channels % 16 == 0) && (out_channels % 128 == 0);
+        (in_channels % 16 == 0) &&
+        ((out_channels % 128 == 0) ||
+         (spatial_count < 920 && (out_channels % 16 == 0)));
     if (!cutlass_supported && !mma_supported)
         return false;
 
@@ -835,6 +1260,8 @@ bool AotGraph::try_execute_reglu(const std::vector<Node>& nodes, std::size_t ind
         direct_concat_values_.end()) {
         output.address = reglu_buffer_.address();
     }
+    if (batch_initializing_cutlass_)
+        return true;
     DeviceAddress output_address = output.address;
     int batch_count = static_cast<int>(output.shape[0]);
     int spatial_count = static_cast<int>(output.shape[2] * output.shape[3]);
@@ -932,7 +1359,24 @@ bool AotGraph::try_execute_pointwise_reglu(const std::vector<Node>& nodes, std::
 
     int gate_channels = static_cast<int>(output.shape[1]);
     int in_channels = static_cast<int>(input.shape[1]);
-    if (gate_channels % 64 != 0 || in_channels % 16 != 0 ||
+    int spatial_count = static_cast<int>(output.shape[2] * output.shape[3]);
+    int batch_count = static_cast<int>(output.shape[0]);
+    DeviceAddress bias_address = convolution_inputs.size() > 2 &&
+        !(convolution_inputs[2] == 0)
+        ? value(convolution_inputs[2]).address : 0;
+    const bool cutlass_reglu_eligible =
+        batch_count == 1 && bias_address != 0 && spatial_count >= 920 &&
+        (spatial_count % 8) == 0 && (in_channels % 8) == 0 &&
+        (gate_channels % 8) == 0 &&
+        tensor_consumer_count(convolution_outputs[0]) == 2 &&
+        tensor_consumer_count(first_outputs[0]) == 1 &&
+        tensor_consumer_count(second_outputs[0]) == 1 &&
+        tensor_consumer_count(clip_outputs[0]) == 1;
+    const bool mma_reglu_eligible =
+        (in_channels % 16 == 0) &&
+        ((spatial_count < 920 && (gate_channels % 16 == 0)) ||
+         (gate_channels % 64 == 0));
+    if ((!cutlass_reglu_eligible && !mma_reglu_eligible) ||
         !is_channel_slice(first_slice, 0, gate_channels) ||
         !is_channel_slice(second_slice, gate_channels, gate_channels * 2)) {
         return false;
@@ -946,22 +1390,26 @@ bool AotGraph::try_execute_pointwise_reglu(const std::vector<Node>& nodes, std::
         maximum = scalar_fp16(clip_inputs[2]);
     DeviceAddress input_address = input.address;
     DeviceAddress weight_address = weight.address;
-    DeviceAddress bias_address = convolution_inputs.size() > 2 &&
-        !(convolution_inputs[2] == 0)
-        ? value(convolution_inputs[2]).address : 0;
     if (std::find(direct_concat_values_.begin(),
                   direct_concat_values_.end(), multiply_outputs[0]) ==
         direct_concat_values_.end()) {
         output.address = reglu_buffer_.address();
     }
     DeviceAddress output_address = output.address;
-    int batch_count = static_cast<int>(output.shape[0]);
-    int spatial_count = static_cast<int>(output.shape[2] * output.shape[3]);
+    if (cutlass_reglu_eligible &&
+        launch_cutlass_pointwise_reglu(
+            convolution, input_address, weight_address, bias_address,
+            output_address, batch_count, in_channels, spatial_count,
+            gate_channels, minimum, maximum)) {
+        return true;
+    }
     DeviceAddress convolution_output_address = convolution_output.address;
     if (launch_cutlass_pointwise(
             convolution, input_address, weight_address, bias_address, 0,
             convolution_output_address, batch_count, in_channels,
             spatial_count, gate_channels * 2, 0, 0.0F)) {
+        if (batch_initializing_cutlass_)
+            return true;
         const int work_count = (spatial_count & 1) == 0
             ? spatial_count / 2 : spatial_count;
         void* reglu_parameters[] = {
@@ -985,10 +1433,20 @@ bool AotGraph::try_execute_pointwise_reglu(const std::vector<Node>& nodes, std::
         return true;
     }
 
+    if (batch_initializing_cutlass_)
+        return true;
     void* parameters[] = {
         &input_address, &weight_address, &bias_address, &output_address,
         &batch_count, &in_channels, &spatial_count, &gate_channels,
         &minimum, &maximum};
+    if (spatial_count < 920) {
+        driver_.launch(
+            pointwise_reglu_mma_tiny_,
+            {divide_up(spatial_count, 16), divide_up(gate_channels, 16),
+             static_cast<unsigned int>(batch_count)},
+            {32, 4, 1}, 0, parameters);
+        return true;
+    }
     const unsigned int large_tile_blocks =
         divide_up(spatial_count, 64) * divide_up(gate_channels, 64) *
         batch_count;

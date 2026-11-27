@@ -22,6 +22,7 @@ struct DeviceInfo {
     int compute_major = 0;
     int compute_minor = 0;
     int multiprocessor_count = 0;
+    int max_shared_memory_per_sm = 0;
     std::string name;
 };
 
@@ -180,11 +181,19 @@ public:
 
     void upload_async(const DeviceBuffer& destination,
                       const void* source, std::size_t bytes) const;
+    void upload_async_htod(const DeviceBuffer& destination,
+                           const void* source, std::size_t bytes) const;
     void zero_async(const DeviceBuffer& destination) const;
+    void copy_dto_d_async(abi::DeviceAddress destination,
+                          abi::DeviceAddress source, std::size_t bytes) const;
     void download_async(void* destination, const DeviceBuffer& source,
                         std::size_t bytes) const;
     void download_async(void* destination, abi::DeviceAddress source,
                         std::size_t bytes) const;
+    void download_async_dtoh(void* destination, const DeviceBuffer& source,
+                             std::size_t bytes) const;
+    void download_async_dtoh(void* destination, abi::DeviceAddress source,
+                             std::size_t bytes) const;
 
     void upload(const DeviceBuffer& destination,
                 const void* source, std::size_t bytes) const;
@@ -199,8 +208,13 @@ public:
     ExecutableGraph end_capture() const;
     void launch_graph(const ExecutableGraph& graph) const;
     void record(Event& event) const;
+    void record_htod(Event& event) const;
+    void record_dtoh(Event& event) const;
+    void wait_compute_on(const Event& event) const;
+    void wait_dtoh_on(const Event& event) const;
     void synchronize(const Event& event) const;
     void synchronize() const;
+    void synchronize_all() const;
 
 private:
     std::shared_ptr<DriverState> state_;

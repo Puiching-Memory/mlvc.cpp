@@ -46,3 +46,23 @@ extern "C" __global__ void mlvc_oihw_to_krsc_fp16(
          kernel_y) * kernel_width + kernel_x];
 }
 
+// Interleaves [gate(0..G-1), linear(0..G-1)] rows into 16-row MMA blocks
+// [gate(8b..8b+7), linear(8b..8b+7)] so CUTLASS epilogue steps (8 rows/step)
+// visit each gate block immediately before its matching linear block.
+extern "C" __global__ void mlvc_interleave_reglu_rows_fp16(
+    const __half* __restrict__ input, __half* __restrict__ output,
+    int gate_channels, int row_width)
+{
+    const int col = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
+    const int out_row = static_cast<int>(blockIdx.y);
+    if (col >= row_width || out_row >= gate_channels * 2)
+        return;
+    const int block = out_row >> 4;
+    const int in_block = out_row & 15;
+    const int src_row = in_block < 8
+        ? (block << 3) + in_block
+        : gate_channels + (block << 3) + (in_block - 8);
+    output[static_cast<std::size_t>(out_row) * row_width + col] =
+        input[static_cast<std::size_t>(src_row) * row_width + col];
+}
+

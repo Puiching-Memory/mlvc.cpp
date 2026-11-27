@@ -30,5 +30,7 @@ inline constexpr CUdevice_attribute kComputeCapabilityMinor =
     CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR;
 inline constexpr CUdevice_attribute kMultiprocessorCount =
     CU_DEVICE_ATTRIBUTE_MULTIPROCESSOR_COUNT;
+inline constexpr CUdevice_attribute kMaxSharedMemoryPerMultiprocessor =
+    CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_MULTIPROCESSOR;
 
 }  // namespace mlvc::driver_cubin::abi

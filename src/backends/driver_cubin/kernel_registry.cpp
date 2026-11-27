@@ -14,6 +14,8 @@ void AotGraph::register_kernels()
         module_.function("mlvc_feature_update_outputs_fp16");
     y0_tail_ = module_.function("mlvc_y0_tail_fp16");
     y1_tail_ = module_.function("mlvc_y1_tail_fp16");
+    dec_y0_tail_ = module_.function("mlvc_dec_y0_tail_fp16");
+    dec_y1_tail_ = module_.function("mlvc_dec_y1_tail_fp16");
     reglu_ = module_.function("mlvc_reglu_fp16");
     reglu_vec8_ = module_.function("mlvc_reglu_vec8_fp16");
     convolution_ = module_.function("mlvc_conv_fp16");
@@ -26,9 +28,13 @@ void AotGraph::register_kernels()
         module_.function("mlvc_pointwise_conv_mma_fp16");
     pointwise_convolution_mma_small_ =
         module_.function("mlvc_pointwise_conv_mma_small_fp16");
+    pointwise_convolution_mma_tiny_ =
+        module_.function("mlvc_pointwise_conv_mma_tiny_fp16");
     pointwise_reglu_mma_ = module_.function("mlvc_pointwise_reglu_mma_fp16");
     pointwise_reglu_mma_small_ =
         module_.function("mlvc_pointwise_reglu_mma_small_fp16");
+    pointwise_reglu_mma_tiny_ =
+        module_.function("mlvc_pointwise_reglu_mma_tiny_fp16");
     if (driver_.device_info().compute_major >= 8) {
         cutlass_pointwise_init_ =
             module_.function("mlvc_cutlass_pointwise_init_fp16");
@@ -66,6 +72,42 @@ void AotGraph::register_kernels()
             "mlvc_cutlass_pointwise_spatial_wide_residual_fp16");
         driver_.set_max_dynamic_shared_memory(
             cutlass_pointwise_spatial_wide_residual_, 61440U);
+        cutlass_pointwise_spatial_wide_init_ =
+            module_.function("mlvc_cutlass_pointwise_spatial_wide_init_fp16");
+        cutlass_pointwise_spatial_wide_ =
+            module_.function("mlvc_cutlass_pointwise_spatial_wide_fp16");
+        driver_.set_max_dynamic_shared_memory(
+            cutlass_pointwise_spatial_wide_, 61440U);
+        cutlass_pointwise_spatial_wide_leaky_relu_init_ = module_.function(
+            "mlvc_cutlass_pointwise_spatial_wide_leaky_relu_init_fp16");
+        cutlass_pointwise_spatial_wide_leaky_relu_ = module_.function(
+            "mlvc_cutlass_pointwise_spatial_wide_leaky_relu_fp16");
+        driver_.set_max_dynamic_shared_memory(
+            cutlass_pointwise_spatial_wide_leaky_relu_, 61440U);
+        cutlass_pointwise_m64n128_init_ =
+            module_.function("mlvc_cutlass_pointwise_m64n128_init_fp16");
+        cutlass_pointwise_m64n128_ =
+            module_.function("mlvc_cutlass_pointwise_m64n128_fp16");
+        cutlass_pointwise_m64n128_leaky_relu_init_ = module_.function(
+            "mlvc_cutlass_pointwise_m64n128_leaky_relu_init_fp16");
+        cutlass_pointwise_m64n128_leaky_relu_ = module_.function(
+            "mlvc_cutlass_pointwise_m64n128_leaky_relu_fp16");
+        cutlass_pointwise_m64n128_residual_init_ = module_.function(
+            "mlvc_cutlass_pointwise_m64n128_residual_init_fp16");
+        cutlass_pointwise_m64n128_residual_ = module_.function(
+            "mlvc_cutlass_pointwise_m64n128_residual_fp16");
+        cutlass_pointwise_m64n64_init_ =
+            module_.function("mlvc_cutlass_pointwise_m64n64_init_fp16");
+        cutlass_pointwise_m64n64_ =
+            module_.function("mlvc_cutlass_pointwise_m64n64_fp16");
+        cutlass_pointwise_m64n64_leaky_relu_init_ = module_.function(
+            "mlvc_cutlass_pointwise_m64n64_leaky_relu_init_fp16");
+        cutlass_pointwise_m64n64_leaky_relu_ = module_.function(
+            "mlvc_cutlass_pointwise_m64n64_leaky_relu_fp16");
+        cutlass_pointwise_m64n64_residual_init_ = module_.function(
+            "mlvc_cutlass_pointwise_m64n64_residual_init_fp16");
+        cutlass_pointwise_m64n64_residual_ = module_.function(
+            "mlvc_cutlass_pointwise_m64n64_residual_fp16");
         cutlass_pointwise_swizzle_init_ =
             module_.function("mlvc_cutlass_pointwise_swizzle_init_fp16");
         cutlass_pointwise_leaky_relu_swizzle_init_ = module_.function(
@@ -82,6 +124,42 @@ void AotGraph::register_kernels()
             module_.function(
                 "mlvc_cutlass_pointwise_spatial_wide_residual_swizzle_init_"
                 "fp16");
+        cutlass_pointwise_spatial_wide_swizzle_init_ = module_.function(
+            "mlvc_cutlass_pointwise_spatial_wide_swizzle_init_fp16");
+        cutlass_pointwise_spatial_wide_leaky_relu_swizzle_init_ =
+            module_.function(
+                "mlvc_cutlass_pointwise_spatial_wide_leaky_relu_swizzle_init_"
+                "fp16");
+        cutlass_pointwise_m64n128_swizzle_init_ = module_.function(
+            "mlvc_cutlass_pointwise_m64n128_swizzle_init_fp16");
+        cutlass_pointwise_m64n128_leaky_relu_swizzle_init_ = module_.function(
+            "mlvc_cutlass_pointwise_m64n128_leaky_relu_swizzle_init_fp16");
+        cutlass_pointwise_m64n128_residual_swizzle_init_ = module_.function(
+            "mlvc_cutlass_pointwise_m64n128_residual_swizzle_init_fp16");
+        cutlass_pointwise_m64n64_swizzle_init_ = module_.function(
+            "mlvc_cutlass_pointwise_m64n64_swizzle_init_fp16");
+        cutlass_pointwise_m64n64_leaky_relu_swizzle_init_ = module_.function(
+            "mlvc_cutlass_pointwise_m64n64_leaky_relu_swizzle_init_fp16");
+        cutlass_pointwise_m64n64_residual_swizzle_init_ = module_.function(
+            "mlvc_cutlass_pointwise_m64n64_residual_swizzle_init_fp16");
+        cutlass_pointwise_reglu_init_ =
+            module_.function("mlvc_cutlass_pointwise_reglu_init_fp16");
+        cutlass_pointwise_reglu_ =
+            module_.function("mlvc_cutlass_pointwise_reglu_fp16");
+        cutlass_pointwise_medium_reglu_init_ =
+            module_.function("mlvc_cutlass_pointwise_medium_reglu_init_fp16");
+        cutlass_pointwise_medium_reglu_ =
+            module_.function("mlvc_cutlass_pointwise_medium_reglu_fp16");
+        cutlass_pointwise_medium_stage4_reglu_init_ = module_.function(
+            "mlvc_cutlass_pointwise_medium_stage4_reglu_init_fp16");
+        cutlass_pointwise_medium_stage4_reglu_ = module_.function(
+            "mlvc_cutlass_pointwise_medium_stage4_reglu_fp16");
+        driver_.set_max_dynamic_shared_memory(
+            cutlass_pointwise_medium_stage4_reglu_, 65536U);
+        cutlass_pointwise_m64n64_reglu_init_ =
+            module_.function("mlvc_cutlass_pointwise_m64n64_reglu_init_fp16");
+        cutlass_pointwise_m64n64_reglu_ =
+            module_.function("mlvc_cutlass_pointwise_m64n64_reglu_fp16");
         cutlass_spatial_convolution_init_ =
             module_.function("mlvc_cutlass_spatial_conv_init_fp16");
         cutlass_spatial_convolution_ =
@@ -94,6 +172,8 @@ void AotGraph::register_kernels()
             module_.function("mlvc_cutlass_spatial_conv_small_fp16");
         transpose_ = module_.function("mlvc_transpose_fp16");
         oihw_to_krsc_ = module_.function("mlvc_oihw_to_krsc_fp16");
+        interleave_reglu_rows_ =
+            module_.function("mlvc_interleave_reglu_rows_fp16");
     }
     spatial_convolution_mma_ =
         module_.function("mlvc_spatial_conv_mma_fp16");
@@ -107,6 +187,10 @@ void AotGraph::register_kernels()
         module_.function("mlvc_depthwise_conv_quad_fp16");
     depthwise_convolution_oct_ =
         module_.function("mlvc_depthwise_conv_oct_fp16");
+    depthwise_convolution_oct2_ =
+        module_.function("mlvc_depthwise_conv_oct2_fp16");
+    depthwise_convolution_3x3_small_ =
+        module_.function("mlvc_depthwise_conv_3x3_small_fp16");
     gather_ = module_.function("mlvc_gather_axis0_fp16");
     slice_ = module_.function("mlvc_slice_fp16");
     concat_ = module_.function("mlvc_concat_copy_fp16");

@@ -74,6 +74,13 @@ private:
         std::vector<driver_cubin::PinnedHostBuffer> inputs;
         std::vector<driver_cubin::PinnedHostBuffer> outputs;
         driver_cubin::PinnedHostBuffer yuv;
+        driver_cubin::DeviceBuffer yuv_device;
+        driver_cubin::DeviceBuffer q_device;
+        std::vector<driver_cubin::DeviceBuffer> input_staging;
+        std::vector<driver_cubin::DeviceBuffer> output_staging;
+        driver_cubin::ExecutableGraph codec_graph;
+        driver_cubin::Event htod_done;
+        driver_cubin::Event compute_done;
         driver_cubin::Event completion;
         bool pending = false;
     };
@@ -83,6 +90,12 @@ private:
         TensorId id;
         DeviceAddress address;
         std::size_t bytes;
+    };
+
+    struct PendingCutlassInit {
+        std::size_t node_index;
+        std::size_t offset;
+        bool is_spatial;
     };
 
     void load_model(const ModelAssetReader& assets,
@@ -110,6 +123,9 @@ private:
     void enqueue_model();
     void enqueue_outputs(HostSlot& slot);
     void set_q_index(HostSlot& slot, int shifted_q);
+    void launch_yuv420_to_nchw(DeviceAddress yuv_device);
+    void launch_nchw_to_yuv420(DeviceAddress yuv_device);
+    void capture_codec_graph(HostSlot& slot);
     void finish_submit(HostSlot& slot);
     void wait_codec_slot_locked(std::size_t slot);
     bool can_use_cutlass_pointwise(
@@ -153,8 +169,10 @@ private:
     float scalar_fp16(TensorId name) const;
 
     void execute_schedule();
-    bool try_execute_y0_tail(const std::vector<Node>& nodes, std::size_t index);
+    std::size_t try_execute_y0_tail(const std::vector<Node>& nodes, std::size_t index);
     bool try_execute_y1_tail(const std::vector<Node>& nodes, std::size_t index);
+    bool try_execute_dec_y0_tail(const std::vector<Node>& nodes, std::size_t index);
+    bool try_execute_dec_y1_tail(const std::vector<Node>& nodes, std::size_t index);
     bool try_execute_feature_update_outputs(const std::vector<Node>& nodes,
                                             std::size_t index);
     bool try_execute_feature_update(const std::vector<Node>& nodes, std::size_t index);
@@ -174,6 +192,11 @@ private:
         DeviceAddress bias, DeviceAddress residual, DeviceAddress output,
         int batch_count, int in_channels, int spatial_count, int out_channels,
         int epilogue, float epilogue_alpha);
+    bool launch_cutlass_pointwise_reglu(
+        const Node& node, DeviceAddress input, DeviceAddress weight,
+        DeviceAddress bias, DeviceAddress output, int batch_count,
+        int in_channels, int spatial_count, int gate_channels, float minimum,
+        float maximum);
     void launch_linear(driver_cubin::abi::Function function, std::size_t count,
                        std::span<void*> parameters);
     void execute(const Node& node, const Value* output_override = nullptr,
@@ -191,7 +214,9 @@ private:
     driver_cubin::DeviceBuffer reglu_buffer_;
     driver_cubin::DeviceBuffer spatial_input_buffer_;
     driver_cubin::DeviceBuffer spatial_output_buffer_;
-    driver_cubin::DeviceBuffer codec_yuv_device_;
+    driver_cubin::DeviceBuffer cutlass_init_scratch_;
+    std::vector<PendingCutlassInit> pending_cutlass_inits_;
+    bool batch_initializing_cutlass_ = false;
     driver_cubin::DeviceBuffer codec_byte_lut_device_;
     std::vector<driver_cubin::DeviceBuffer> epilogue_buffers_;
     std::vector<driver_cubin::DeviceBuffer> concat_buffers_;
@@ -202,6 +227,10 @@ private:
         std::array<std::byte,
                    driver_cubin::kCutlassPointwiseParamsStorageBytes>>
         cutlass_host_parameters_;
+    std::unordered_map<std::size_t, driver_cubin::DeviceBuffer>
+        cutlass_reglu_weight_buffers_;
+    std::unordered_map<std::size_t, driver_cubin::DeviceBuffer>
+        cutlass_reglu_bias_buffers_;
     std::unordered_map<std::size_t, driver_cubin::DeviceBuffer>
         cutlass_spatial_weight_buffers_;
     std::unordered_map<
@@ -234,6 +263,8 @@ private:
     driver_cubin::abi::Function feature_update_outputs_ = nullptr;
     driver_cubin::abi::Function y0_tail_ = nullptr;
     driver_cubin::abi::Function y1_tail_ = nullptr;
+    driver_cubin::abi::Function dec_y0_tail_ = nullptr;
+    driver_cubin::abi::Function dec_y1_tail_ = nullptr;
     driver_cubin::abi::Function reglu_ = nullptr;
     driver_cubin::abi::Function reglu_vec8_ = nullptr;
     driver_cubin::abi::Function convolution_ = nullptr;
@@ -242,8 +273,10 @@ private:
     driver_cubin::abi::Function pointwise_convolution_balanced_ = nullptr;
     driver_cubin::abi::Function pointwise_convolution_mma_ = nullptr;
     driver_cubin::abi::Function pointwise_convolution_mma_small_ = nullptr;
+    driver_cubin::abi::Function pointwise_convolution_mma_tiny_ = nullptr;
     driver_cubin::abi::Function pointwise_reglu_mma_ = nullptr;
     driver_cubin::abi::Function pointwise_reglu_mma_small_ = nullptr;
+    driver_cubin::abi::Function pointwise_reglu_mma_tiny_ = nullptr;
     driver_cubin::abi::Function cutlass_pointwise_init_ = nullptr;
     driver_cubin::abi::Function cutlass_pointwise_ = nullptr;
     driver_cubin::abi::Function cutlass_pointwise_leaky_relu_init_ = nullptr;
@@ -264,6 +297,29 @@ private:
         cutlass_pointwise_spatial_wide_residual_init_ = nullptr;
     driver_cubin::abi::Function cutlass_pointwise_spatial_wide_residual_ =
         nullptr;
+    driver_cubin::abi::Function cutlass_pointwise_spatial_wide_init_ = nullptr;
+    driver_cubin::abi::Function cutlass_pointwise_spatial_wide_ = nullptr;
+    driver_cubin::abi::Function
+        cutlass_pointwise_spatial_wide_leaky_relu_init_ = nullptr;
+    driver_cubin::abi::Function cutlass_pointwise_spatial_wide_leaky_relu_ =
+        nullptr;
+    driver_cubin::abi::Function cutlass_pointwise_m64n128_init_ = nullptr;
+    driver_cubin::abi::Function cutlass_pointwise_m64n128_ = nullptr;
+    driver_cubin::abi::Function cutlass_pointwise_m64n128_leaky_relu_init_ =
+        nullptr;
+    driver_cubin::abi::Function cutlass_pointwise_m64n128_leaky_relu_ =
+        nullptr;
+    driver_cubin::abi::Function cutlass_pointwise_m64n128_residual_init_ =
+        nullptr;
+    driver_cubin::abi::Function cutlass_pointwise_m64n128_residual_ = nullptr;
+    driver_cubin::abi::Function cutlass_pointwise_m64n64_init_ = nullptr;
+    driver_cubin::abi::Function cutlass_pointwise_m64n64_ = nullptr;
+    driver_cubin::abi::Function cutlass_pointwise_m64n64_leaky_relu_init_ =
+        nullptr;
+    driver_cubin::abi::Function cutlass_pointwise_m64n64_leaky_relu_ = nullptr;
+    driver_cubin::abi::Function cutlass_pointwise_m64n64_residual_init_ =
+        nullptr;
+    driver_cubin::abi::Function cutlass_pointwise_m64n64_residual_ = nullptr;
     driver_cubin::abi::Function cutlass_pointwise_swizzle_init_ = nullptr;
     driver_cubin::abi::Function cutlass_pointwise_leaky_relu_swizzle_init_ =
         nullptr;
@@ -277,6 +333,32 @@ private:
         cutlass_pointwise_medium_residual_swizzle_init_ = nullptr;
     driver_cubin::abi::Function
         cutlass_pointwise_spatial_wide_residual_swizzle_init_ = nullptr;
+    driver_cubin::abi::Function
+        cutlass_pointwise_spatial_wide_swizzle_init_ = nullptr;
+    driver_cubin::abi::Function
+        cutlass_pointwise_spatial_wide_leaky_relu_swizzle_init_ = nullptr;
+    driver_cubin::abi::Function
+        cutlass_pointwise_m64n128_swizzle_init_ = nullptr;
+    driver_cubin::abi::Function
+        cutlass_pointwise_m64n128_leaky_relu_swizzle_init_ = nullptr;
+    driver_cubin::abi::Function
+        cutlass_pointwise_m64n128_residual_swizzle_init_ = nullptr;
+    driver_cubin::abi::Function
+        cutlass_pointwise_m64n64_swizzle_init_ = nullptr;
+    driver_cubin::abi::Function
+        cutlass_pointwise_m64n64_leaky_relu_swizzle_init_ = nullptr;
+    driver_cubin::abi::Function
+        cutlass_pointwise_m64n64_residual_swizzle_init_ = nullptr;
+    driver_cubin::abi::Function cutlass_pointwise_reglu_init_ = nullptr;
+    driver_cubin::abi::Function cutlass_pointwise_reglu_ = nullptr;
+    driver_cubin::abi::Function cutlass_pointwise_medium_reglu_init_ = nullptr;
+    driver_cubin::abi::Function cutlass_pointwise_medium_reglu_ = nullptr;
+    driver_cubin::abi::Function cutlass_pointwise_medium_stage4_reglu_init_ =
+        nullptr;
+    driver_cubin::abi::Function cutlass_pointwise_medium_stage4_reglu_ =
+        nullptr;
+    driver_cubin::abi::Function cutlass_pointwise_m64n64_reglu_init_ = nullptr;
+    driver_cubin::abi::Function cutlass_pointwise_m64n64_reglu_ = nullptr;
     int cutlass_log_tile_ = 0;
     driver_cubin::abi::Function cutlass_spatial_convolution_init_ = nullptr;
     driver_cubin::abi::Function cutlass_spatial_convolution_ = nullptr;
@@ -284,6 +366,7 @@ private:
     driver_cubin::abi::Function cutlass_spatial_convolution_small_ = nullptr;
     driver_cubin::abi::Function transpose_ = nullptr;
     driver_cubin::abi::Function oihw_to_krsc_ = nullptr;
+    driver_cubin::abi::Function interleave_reglu_rows_ = nullptr;
     driver_cubin::abi::Function spatial_convolution_mma_ = nullptr;
     driver_cubin::abi::Function spatial_convolution_mma_wide_ = nullptr;
     driver_cubin::abi::Function spatial_convolution_ = nullptr;
@@ -291,6 +374,8 @@ private:
     driver_cubin::abi::Function depthwise_convolution_pair_ = nullptr;
     driver_cubin::abi::Function depthwise_convolution_quad_ = nullptr;
     driver_cubin::abi::Function depthwise_convolution_oct_ = nullptr;
+    driver_cubin::abi::Function depthwise_convolution_oct2_ = nullptr;
+    driver_cubin::abi::Function depthwise_convolution_3x3_small_ = nullptr;
     driver_cubin::abi::Function gather_ = nullptr;
     driver_cubin::abi::Function slice_ = nullptr;
     driver_cubin::abi::Function concat_ = nullptr;

@@ -62,6 +62,13 @@ __device__ __forceinline__ void wait_for_async_copies()
 #endif
 }
 
+__device__ __forceinline__ void wait_for_async_copies_allow_one()
+{
+#if __CUDA_ARCH__ >= 800
+    asm volatile("cp.async.wait_group 1;" : : : "memory");
+#endif
+}
+
 __device__ __forceinline__ void load_pointwise_tile(
     PointwiseOperandTile& tile, const __half* input, const __half* weight,
     int batch, int block_channel_base, int channel, int in_channels,

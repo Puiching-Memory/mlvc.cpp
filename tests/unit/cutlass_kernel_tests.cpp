@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <span>
 #include <stdexcept>
 #include <string>
@@ -271,6 +272,286 @@ void spatial(Driver& driver, Module& module, int channels, int outputs,
     check(actual, expected, "spatial", 0.002F);
 }
 
+void check_tiny_pointwise(Driver& driver, Module& module, int m, int n, int k,
+                          int epilogue)
+{
+    auto input = values(std::size_t(k) * n, 11);
+    auto weight = values(std::size_t(m) * k, 12);
+    auto bias = values(std::size_t(m), 13);
+    auto residual = values(std::size_t(m) * n, 14);
+    auto di = upload(driver, input);
+    auto dw = upload(driver, weight);
+    auto db = upload(driver, bias);
+    auto dr = upload(driver, residual);
+    auto output = driver.allocate(std::size_t(m) * n * sizeof(Half));
+    auto pi = di.address(), pw = dw.address(), pb = db.address(),
+         pr = dr.address(), po = output.address();
+    int batch = 1;
+    float alpha = 0.01F;
+    void* args[] = {&pi, &pw, &pb, &po, &batch, &k, &n, &m, &pr, &epilogue,
+                    &alpha};
+    driver.launch(module.function("mlvc_pointwise_conv_mma_tiny_fp16"),
+                  {unsigned((n + 15) / 16), unsigned((m + 15) / 16), 1},
+                  {32, 4, 1}, 0, args);
+    std::vector<Half> actual(std::size_t(m) * n), expected(actual.size());
+    driver.download(actual.data(), po, output.size());
+    for (int r = 0; r < m; ++r) {
+        for (int c = 0; c < n; ++c) {
+            float sum = half_to_float(bias[r]);
+            for (int kk = 0; kk < k; ++kk)
+                sum += half_to_float(weight[std::size_t(r) * k + kk]) *
+                       half_to_float(input[std::size_t(kk) * n + c]);
+            Half h = float_to_half(sum);
+            if (epilogue == 1) {
+                float v = half_to_float(h);
+                h = float_to_half(v >= 0.0F ? v : v * alpha);
+            } else if (epilogue == 2) {
+                h = float_to_half(
+                    half_to_float(h) +
+                    half_to_float(residual[std::size_t(r) * n + c]));
+            }
+            expected[std::size_t(r) * n + c] = h;
+        }
+    }
+    check(actual, expected, "pointwise_tiny", 0.002F);
+}
+
+void check_tiny_reglu(Driver& driver, Module& module, int gate, int n, int k)
+{
+    auto input = values(std::size_t(k) * n, 21);
+    auto weight = values(std::size_t(gate * 2) * k, 22);
+    auto bias = values(std::size_t(gate * 2), 23);
+    auto di = upload(driver, input);
+    auto dw = upload(driver, weight);
+    auto db = upload(driver, bias);
+    auto output = driver.allocate(std::size_t(gate) * n * sizeof(Half));
+    auto pi = di.address(), pw = dw.address(), pb = db.address(),
+         po = output.address();
+    int batch = 1;
+    float minimum = 0.0F, maximum = 65504.0F;
+    void* args[] = {&pi, &pw, &pb, &po, &batch, &k, &n, &gate, &minimum,
+                    &maximum};
+    driver.launch(module.function("mlvc_pointwise_reglu_mma_tiny_fp16"),
+                  {unsigned((n + 15) / 16), unsigned((gate + 15) / 16), 1},
+                  {32, 4, 1}, 0, args);
+    std::vector<Half> actual(std::size_t(gate) * n), expected(actual.size());
+    driver.download(actual.data(), po, output.size());
+    for (int r = 0; r < gate; ++r) {
+        for (int c = 0; c < n; ++c) {
+            float g = half_to_float(bias[r]);
+            float l = half_to_float(bias[gate + r]);
+            for (int kk = 0; kk < k; ++kk) {
+                const float x = half_to_float(input[std::size_t(kk) * n + c]);
+                g += half_to_float(weight[std::size_t(r) * k + kk]) * x;
+                l += half_to_float(weight[std::size_t(gate + r) * k + kk]) * x;
+            }
+            const float gh = half_to_float(float_to_half(g));
+            const float lh = half_to_float(float_to_half(l));
+            const float clamped = std::min(std::max(gh, minimum), maximum);
+            expected[std::size_t(r) * n + c] = float_to_half(clamped * lh);
+        }
+    }
+    check(actual, expected, "reglu_tiny", 0.002F);
+}
+
+void check_dwconv_3x3(Driver& driver, Module& module, int c, int h, int w)
+{
+    auto input = values(std::size_t(c) * h * w, 31);
+    auto weight = values(std::size_t(c) * 9, 32);
+    auto bias = values(std::size_t(c), 33);
+    auto di = upload(driver, input);
+    auto dw = upload(driver, weight);
+    auto db = upload(driver, bias);
+    auto output = driver.allocate(input.size() * sizeof(Half));
+    auto pi = di.address(), pw = dw.address(), pb = db.address(),
+         po = output.address();
+    int batch = 1;
+    if (w % 8 == 0) {
+        void* args[] = {&pi, &pw, &pb, &po, &batch, &c, &h, &w, &h, &w};
+        const unsigned total_pairs = unsigned(((h + 1) / 2) * (w / 8));
+        const unsigned block = total_pairs <= 64 ? 64U : 128U;
+        driver.launch(module.function("mlvc_depthwise_conv_oct2_fp16"),
+                      {(total_pairs + block - 1) / block, unsigned(c), 1},
+                      {block, 1, 1}, 0, args);
+    } else {
+        void* args[] = {&pi, &pw, &pb, &po, &batch, &c, &h, &w};
+        driver.launch(module.function("mlvc_depthwise_conv_3x3_small_fp16"),
+                      {unsigned((c + 1) / 2), 1, 1},
+                      {32, 2, 1}, 0, args);
+    }
+    std::vector<Half> actual(input.size()), expected(input.size());
+    driver.download(actual.data(), po, output.size());
+    for (int ch = 0; ch < c; ++ch) {
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                float acc = half_to_float(bias[ch]);
+                for (int ky = 0; ky < 3; ++ky) {
+                    const int iy = y + ky - 1;
+                    if (iy < 0 || iy >= h) continue;
+                    for (int kx = 0; kx < 3; ++kx) {
+                        const int ix = x + kx - 1;
+                        if (ix < 0 || ix >= w) continue;
+                        acc += half_to_float(input[(ch * h + iy) * w + ix]) *
+                               half_to_float(weight[ch * 9 + ky * 3 + kx]);
+                    }
+                }
+                expected[(ch * h + y) * w + x] = float_to_half(acc);
+            }
+        }
+    }
+    check(actual, expected, "dwconv_3x3", 0.002F);
+}
+
+void check_cutlass_reglu(Driver& driver, Module& module, const char* base_name,
+                         int tile_m, int tile_n, int stages, int gate, int n,
+                         int k, int log_tile = 0)
+{
+    int out_channels = gate * 2;
+    auto input = values(std::size_t(k) * n, 41);
+    auto weight = values(std::size_t(out_channels) * k, 42);
+    auto bias = values(std::size_t(out_channels), 43);
+    auto di = upload(driver, input);
+    auto dw = upload(driver, weight);
+    auto db = upload(driver, bias);
+    auto dw_inter = driver.allocate(weight.size() * sizeof(Half));
+    auto db_inter = driver.allocate(bias.size() * sizeof(Half));
+    auto output = driver.allocate(std::size_t(gate) * n * sizeof(Half));
+    auto storage = driver.allocate(kCutlassPointwiseParamsStorageBytes);
+
+    auto pw = dw.address(), pwi = dw_inter.address();
+    void* wi_args[] = {&pw, &pwi, &gate, &k};
+    driver.launch(module.function("mlvc_interleave_reglu_rows_fp16"),
+                  {unsigned((k + 127) / 128), unsigned(out_channels), 1},
+                  {128, 1, 1}, 0, wi_args);
+    auto pb = db.address(), pbi = db_inter.address();
+    int bw = 1;
+    void* bi_args[] = {&pb, &pbi, &gate, &bw};
+    driver.launch(module.function("mlvc_interleave_reglu_rows_fp16"),
+                  {1, unsigned(out_channels), 1}, {32, 1, 1}, 0, bi_args);
+
+    auto pi = di.address(), po = output.address(), ps = storage.address();
+    float minimum = 0.0F, maximum = 6.0F;
+    void* init_args[] = {&ps, &pi, &pwi, &pbi, &po, &out_channels, &n, &k,
+                         &minimum, &maximum, &log_tile};
+    driver.launch(module.function(std::string(base_name) + "_init_fp16"),
+                  {1, 1, 1}, {1, 1, 1}, 0, init_args);
+    alignas(16) std::array<std::byte, kCutlassPointwiseParamsStorageBytes> params{};
+    driver.download(params.data(), ps, params.size());
+
+    auto fn = module.function(std::string(base_name) + "_fp16");
+    unsigned shared = unsigned((tile_m + tile_n) * 32 * stages * 2);
+    if (shared > 49152)
+        driver.set_max_dynamic_shared_memory(fn, shared);
+    unsigned gm = unsigned((out_channels + tile_m - 1) / tile_m);
+    unsigned gn = unsigned((n + tile_n - 1) / tile_n);
+    if (log_tile > 0) {
+        unsigned grp = 1U << log_tile;
+        gm *= grp;
+        gn = (gn + grp - 1) / grp;
+    }
+    void* args[] = {params.data()};
+    driver.launch(fn, {gm, gn, 1}, {128, 1, 1}, shared, args);
+
+    std::vector<Half> actual(std::size_t(gate) * n), expected(actual.size());
+    driver.download(actual.data(), po, output.size());
+    for (int r = 0; r < gate; ++r) {
+        for (int c = 0; c < n; ++c) {
+            float g = half_to_float(bias[r]);
+            float l = half_to_float(bias[gate + r]);
+            for (int kk = 0; kk < k; ++kk) {
+                const float x = half_to_float(input[std::size_t(kk) * n + c]);
+                g += half_to_float(weight[std::size_t(r) * k + kk]) * x;
+                l += half_to_float(weight[std::size_t(gate + r) * k + kk]) * x;
+            }
+            const float gh = half_to_float(float_to_half(g));
+            const float lh = half_to_float(float_to_half(l));
+            const float clamped = std::min(std::max(gh, minimum), maximum);
+            expected[std::size_t(r) * n + c] = float_to_half(clamped * lh);
+        }
+    }
+    check(actual, expected, base_name, 0.002F);
+}
+
+void bench_hot_tiles(Driver& driver, Module& module)
+{
+    std::puts("shape,tile,log_tile,min_us,p10_us,med_us,blocks");
+    const std::array<int, 4> shapes[] = {
+        {256, 3680, 256, 2}, {256, 3680, 256, 1},
+        {256, 3680, 512, 2}, {192, 3680, 192, 2},
+        {192, 3680, 192, 1}, {192, 3680, 384, 2},
+        {144, 3680, 288, 2}, {256, 920, 512, 2},
+        {384, 920, 256, 0},
+    };
+    const Variant tiles[] = {
+        {"mlvc_cutlass_pointwise_medium", 128, 128, 3, 0, 0},
+        {"mlvc_cutlass_pointwise_medium_stage4", 128, 128, 4, 0, 0},
+        {"mlvc_cutlass_pointwise_m64n128", 64, 128, 3, 0, 0},
+        {"mlvc_cutlass_pointwise", 128, 64, 3, 0, 0},
+        {"mlvc_cutlass_pointwise_spatial_wide", 64, 256, 3, 0, 0},
+        {"mlvc_cutlass_pointwise_m64n64", 64, 64, 3, 0, 0},
+        {"mlvc_cutlass_pointwise_medium_residual", 128, 128, 3, 2, 0},
+        {"mlvc_cutlass_pointwise_m64n128_residual", 64, 128, 3, 2, 0},
+        {"mlvc_cutlass_pointwise_residual", 128, 64, 3, 2, 0},
+        {"mlvc_cutlass_pointwise_spatial_wide_residual", 64, 256, 3, 2, 0},
+        {"mlvc_cutlass_pointwise_m64n64_residual", 64, 64, 3, 2, 0},
+        {"mlvc_cutlass_pointwise_medium_leaky_relu", 128, 128, 3, 1, 0},
+        {"mlvc_cutlass_pointwise_m64n128_leaky_relu", 64, 128, 3, 1, 0},
+        {"mlvc_cutlass_pointwise_leaky_relu", 128, 64, 3, 1, 0},
+        {"mlvc_cutlass_pointwise_spatial_wide_leaky_relu", 64, 256, 3, 1, 0},
+        {"mlvc_cutlass_pointwise_m64n64_leaky_relu", 64, 64, 3, 1, 0},
+    };
+    constexpr int kRounds = 60;
+    constexpr int kBatch = 5;
+    for (const auto& s : shapes) {
+        struct Cand {
+            const char* name;
+            int log_tile;
+            PointwiseCase st;
+            std::vector<double> samples;
+        };
+        std::vector<Cand> cands;
+        for (const auto& base : tiles) {
+            if (base.epilogue != s[3]) continue;
+            const bool is_s4 = std::string(base.name) ==
+                "mlvc_cutlass_pointwise_medium_stage4";
+            for (int lt : {0, 1}) {
+                if (is_s4 && lt > 0) continue;
+                Variant v = base;
+                v.log_tile = lt;
+                cands.push_back({base.name, lt,
+                                 prepare_pointwise(driver, module, v, s[0], s[1], s[2]),
+                                 std::vector<double>(kRounds)});
+            }
+        }
+        // Warmup all candidates
+        for (auto& c : cands) {
+            void* args[] = {c.st.params.data()};
+            for (int i = 0; i < 5; ++i)
+                driver.launch(c.st.function, c.st.grid, {128, 1, 1}, c.st.shared, args);
+        }
+        driver.synchronize();
+        // Round-robin interleaved rounds so all candidates see identical GPU windows
+        for (int r = 0; r < kRounds; ++r) {
+            for (auto& c : cands) {
+                void* args[] = {c.st.params.data()};
+                auto t0 = std::chrono::steady_clock::now();
+                for (int i = 0; i < kBatch; ++i)
+                    driver.launch(c.st.function, c.st.grid, {128, 1, 1}, c.st.shared, args);
+                driver.synchronize();
+                c.samples[r] = std::chrono::duration<double, std::micro>(
+                    std::chrono::steady_clock::now() - t0).count() / kBatch;
+            }
+        }
+        for (auto& c : cands) {
+            std::sort(c.samples.begin(), c.samples.end());
+            std::printf("%dx%dx%d_ep%d,%s,l%d,%.2f,%.2f,%.2f,%u\n",
+                        s[0], s[1], s[2], s[3], c.name, c.log_tile,
+                        c.samples[0], c.samples[kRounds / 10], c.samples[kRounds / 2],
+                        c.st.grid.x * c.st.grid.y);
+        }
+    }
+}
+
 void bench_pointwise(Driver& driver, Module& module, const Variant& v,
                      int m, int n, int k, int warmup, int iterations)
 {
@@ -312,7 +593,15 @@ int main(int argc, char** argv)
             {"mlvc_cutlass_pointwise_medium_stage4", 128, 128, 4, 0},
             {"mlvc_cutlass_pointwise_medium_leaky_relu", 128, 128, 3, 1},
             {"mlvc_cutlass_pointwise_medium_residual", 128, 128, 3, 2},
+            {"mlvc_cutlass_pointwise_spatial_wide", 64, 256, 3, 0},
+            {"mlvc_cutlass_pointwise_spatial_wide_leaky_relu", 64, 256, 3, 1},
             {"mlvc_cutlass_pointwise_spatial_wide_residual", 64, 256, 3, 2},
+            {"mlvc_cutlass_pointwise_m64n128", 64, 128, 3, 0},
+            {"mlvc_cutlass_pointwise_m64n128_leaky_relu", 64, 128, 3, 1},
+            {"mlvc_cutlass_pointwise_m64n128_residual", 64, 128, 3, 2},
+            {"mlvc_cutlass_pointwise_m64n64", 64, 64, 3, 0},
+            {"mlvc_cutlass_pointwise_m64n64_leaky_relu", 64, 64, 3, 1},
+            {"mlvc_cutlass_pointwise_m64n64_residual", 64, 64, 3, 2},
             {"mlvc_cutlass_pointwise", 128, 64, 3, 0, 3},
             {"mlvc_cutlass_pointwise_leaky_relu", 128, 64, 3, 1, 3},
             {"mlvc_cutlass_pointwise_residual", 128, 64, 3, 2, 3},
@@ -321,9 +610,22 @@ int main(int argc, char** argv)
              3},
             {"mlvc_cutlass_pointwise_medium_residual", 128, 128, 3, 2,
              3},
+            {"mlvc_cutlass_pointwise_spatial_wide", 64, 256, 3, 0, 3},
+            {"mlvc_cutlass_pointwise_spatial_wide_leaky_relu", 64, 256, 3, 1,
+             3},
             {"mlvc_cutlass_pointwise_spatial_wide_residual", 64, 256, 3, 2,
              3},
+            {"mlvc_cutlass_pointwise_m64n128", 64, 128, 3, 0, 3},
+            {"mlvc_cutlass_pointwise_m64n128_leaky_relu", 64, 128, 3, 1, 3},
+            {"mlvc_cutlass_pointwise_m64n128_residual", 64, 128, 3, 2, 3},
+            {"mlvc_cutlass_pointwise_m64n64", 64, 64, 3, 0, 3},
+            {"mlvc_cutlass_pointwise_m64n64_leaky_relu", 64, 64, 3, 1, 3},
+            {"mlvc_cutlass_pointwise_m64n64_residual", 64, 64, 3, 2, 3},
         };
+        if (argc > 1 && std::string(argv[1]) == "--bench-tiles") {
+            bench_hot_tiles(driver, module);
+            return 0;
+        }
         if (argc > 1 && std::string(argv[1]) == "--bench") {
             const std::array<int, 3> bench_shapes[] = {
                 {136, 920, 24},  {136, 920, 72},   {136, 920, 128},
@@ -365,6 +667,36 @@ int main(int argc, char** argv)
             spatial(driver, module, 40, 264, 2, 3, 1, small_tile);
             spatial(driver, module, 8, 8, 2, 2, 0, small_tile);
             spatial(driver, module, 128, 256, 2, 2, 0, small_tile);
+        }
+        for (int epilogue = 0; epilogue <= 2; ++epilogue) {
+            check_tiny_pointwise(driver, module, 128, 15, 128, epilogue);
+            check_tiny_pointwise(driver, module, 256, 60, 256, epilogue);
+            check_tiny_pointwise(driver, module, 768, 60, 48, epilogue);
+            check_tiny_pointwise(driver, module, 128, 240, 256, epilogue);
+            check_tiny_pointwise(driver, module, 16, 15, 32, epilogue);
+        }
+        check_tiny_reglu(driver, module, 256, 15, 128);
+        check_tiny_reglu(driver, module, 256, 60, 256);
+        check_tiny_reglu(driver, module, 192, 60, 48);
+        check_tiny_reglu(driver, module, 256, 240, 128);
+        check_dwconv_3x3(driver, module, 32, 46, 80);
+        check_dwconv_3x3(driver, module, 32, 23, 40);
+        check_dwconv_3x3(driver, module, 32, 24, 40);
+        check_dwconv_3x3(driver, module, 32, 12, 20);
+        check_dwconv_3x3(driver, module, 32, 6, 10);
+        check_dwconv_3x3(driver, module, 32, 3, 5);
+        for (const auto& rs : std::array<std::array<int, 3>, 4>{
+                 {{72, 920, 48}, {288, 920, 144}, {256, 960, 128}, {384, 256, 192}}}) {
+            check_cutlass_reglu(driver, module, "mlvc_cutlass_pointwise_reglu",
+                                128, 64, 3, rs[0], rs[1], rs[2]);
+            check_cutlass_reglu(driver, module, "mlvc_cutlass_pointwise_medium_reglu",
+                                128, 128, 3, rs[0], rs[1], rs[2]);
+            check_cutlass_reglu(driver, module, "mlvc_cutlass_pointwise_medium_stage4_reglu",
+                                128, 128, 4, rs[0], rs[1], rs[2]);
+            check_cutlass_reglu(driver, module, "mlvc_cutlass_pointwise_m64n64_reglu",
+                                64, 64, 3, rs[0], rs[1], rs[2]);
+            check_cutlass_reglu(driver, module, "mlvc_cutlass_pointwise_medium_reglu",
+                                128, 128, 3, rs[0], rs[1], rs[2], 2);
         }
         std::printf("CUTLASS kernels: %d GEMM and 8 convolution cases passed"
                     " (max abs error %.5f)\n",

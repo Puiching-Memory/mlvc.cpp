@@ -697,7 +697,7 @@ struct EncoderSession::Impl {
         : options(session_options),
           assets(resolve_model_asset_reader(
               session_options.model_dir, session_options.asset_reader)),
-          config(load_model_config(*assets)),
+          config(load_model_config(*assets, "MLVCEncoder")),
           entropy(assets, config)
     {
         validate_dimensions(options.width, options.height, config, &padding);
@@ -845,7 +845,7 @@ struct DecoderSession::Impl {
         : options(session_options),
           assets(resolve_model_asset_reader(
               session_options.model_dir, session_options.asset_reader)),
-          config(load_model_config(*assets)),
+          config(load_model_config(*assets, "MLVCDecoder")),
           entropy(assets, config)
     {
         validate_dimensions(options.width, options.height, config, &padding);

@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace mlvc {
@@ -42,7 +43,11 @@ struct ModelConfig {
 };
 
 ModelConfig load_model_config(const ModelAssetReader& assets);
+ModelConfig load_model_config(const ModelAssetReader& assets,
+                              std::string_view model_part);
 ModelConfig load_model_config(const std::filesystem::path& model_dir);
+ModelConfig load_model_config(const std::filesystem::path& model_dir,
+                              std::string_view model_part);
 std::vector<std::string> embedded_model_profiles();
 
 }  // namespace mlvc

@@ -24,6 +24,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -528,6 +529,136 @@ void test_execution_preference_and_concurrent_registry()
     reader.join();
 }
 
+class CountingAssetReader final : public ModelAssetReader {
+public:
+    explicit CountingAssetReader(std::shared_ptr<const ModelAssetReader> inner)
+        : inner_(std::move(inner))
+    {
+    }
+
+    std::string location_label() const override { return inner_->location_label(); }
+    bool exists(const std::filesystem::path& relative_path) const override
+    {
+        return inner_->exists(relative_path);
+    }
+    std::vector<std::byte> read_binary(
+        const std::filesystem::path& relative_path) const override
+    {
+        ++read_counts_[relative_path.generic_string()];
+        return inner_->read_binary(relative_path);
+    }
+    AssetView read_view(const std::filesystem::path& relative_path) const override
+    {
+        ++read_counts_[relative_path.generic_string()];
+        return inner_->read_view(relative_path);
+    }
+
+    int count(const std::string& path) const
+    {
+        const auto it = read_counts_.find(path);
+        return it == read_counts_.end() ? 0 : it->second;
+    }
+
+private:
+    std::shared_ptr<const ModelAssetReader> inner_;
+    mutable std::unordered_map<std::string, int> read_counts_;
+};
+
+std::shared_ptr<InMemoryAssetReader> make_synthetic_bundle_with_artifacts()
+{
+    auto reader = make_synthetic_bundle();
+    const AssetView bundle_bytes = reader->read_view("model_bundle.pb");
+    wire::ModelBundle bundle;
+    MLVC_REQUIRE(bundle.ParseFromArray(bundle_bytes.data(),
+                                       static_cast<int>(bundle_bytes.size())),
+                 "parse synthetic model_bundle.pb");
+    for (const char* path : {
+             "metadata.pb", "gaussian_pmf.pb", "bit_estimator_pmf.pb",
+             "aot/MLVCEncoder/graph.pb", "aot/MLVCEncoder/weights.bin",
+             "aot/MLVCDecoder/graph.pb", "aot/MLVCDecoder/weights.bin"}) {
+        const AssetView data = reader->read_view(path);
+        auto* art = bundle.add_artifacts();
+        art->set_path(path);
+        art->set_size_bytes(data.size());
+        art->set_sha256(sha256_bytes_str(data.span()));
+    }
+    reader->put("model_bundle.pb", serialize_message(bundle));
+    return reader;
+}
+
+void test_scoped_bundle_verification_avoids_duplicate_hashing()
+{
+    const auto base = make_synthetic_bundle_with_artifacts();
+
+    // 1. Scoped encoder load must skip decoder artifacts, read PMF files once,
+    //    and hash MLVCEncoder/weights.bin only once (inside load_aot_graph).
+    CountingAssetReader enc_counter(base);
+    const ModelConfig enc_cfg = load_model_config(enc_counter, "MLVCEncoder");
+    MLVC_REQUIRE(enc_cfg.name == "synthetic-v1", "scoped encoder config loaded");
+    MLVC_REQUIRE(enc_counter.count("aot/MLVCEncoder/weights.bin") == 0,
+                 "load_model_config(MLVCEncoder) must defer weights.bin scan");
+    MLVC_REQUIRE(enc_counter.count("aot/MLVCDecoder/weights.bin") == 0 &&
+                 enc_counter.count("aot/MLVCDecoder/graph.pb") == 0,
+                 "load_model_config(MLVCEncoder) must skip sibling decoder artifacts");
+    MLVC_REQUIRE(enc_counter.count("gaussian_pmf.pb") == 1 &&
+                 enc_counter.count("bit_estimator_pmf.pb") == 1,
+                 "PMF artifacts must be hashed only once");
+    const aot::LoadedGraph enc_graph = aot::load_aot_graph(enc_counter, "MLVCEncoder");
+    MLVC_REQUIRE(enc_graph.weights.size() == 4 &&
+                 enc_counter.count("aot/MLVCEncoder/weights.bin") == 1,
+                 "weights.bin must be read & hashed exactly once across config + graph load");
+
+    // 2. Full (unscoped) load_model_config must still verify every artifact while
+    //    avoiding duplicate PMF hashing.
+    CountingAssetReader full_counter(base);
+    static_cast<void>(load_model_config(full_counter));
+    MLVC_REQUIRE(full_counter.count("aot/MLVCEncoder/weights.bin") == 1 &&
+                 full_counter.count("aot/MLVCDecoder/weights.bin") == 1 &&
+                 full_counter.count("gaussian_pmf.pb") == 1 &&
+                 full_counter.count("bit_estimator_pmf.pb") == 1,
+                 "unscoped load_model_config must verify all artifacts once");
+
+    // 3. Tampering decoder weights does not break encoder scoped load, but
+    //    still fails unscoped load and decoder load.
+    auto dec_tampered = make_synthetic_bundle_with_artifacts();
+    dec_tampered->put("aot/MLVCDecoder/weights.bin", {std::byte{9}, std::byte{9}});
+    static_cast<void>(load_model_config(*dec_tampered, "MLVCEncoder"));
+    MLVC_REQUIRE_THROWS(static_cast<void>(load_model_config(*dec_tampered)),
+                        "unscoped load must catch tampered decoder weights");
+    MLVC_REQUIRE_THROWS(
+        static_cast<void>(aot::load_aot_graph(*dec_tampered, "MLVCDecoder")),
+        "decoder graph load must catch tampered decoder weights");
+
+    // 4. Tampering encoder weights must still fail aot::load_aot_graph.
+    auto enc_tampered = make_synthetic_bundle_with_artifacts();
+    enc_tampered->put("aot/MLVCEncoder/weights.bin",
+                      {std::byte{9}, std::byte{2}, std::byte{3}, std::byte{4}});
+    MLVC_REQUIRE_THROWS(
+        static_cast<void>(aot::load_aot_graph(*enc_tampered, "MLVCEncoder")),
+        "encoder graph load must catch tampered encoder weights");
+
+    // 5. Mismatch between model_bundle.pb weights SHA and graph.pb weights SHA
+    //    must fail load_model_config(MLVCEncoder) immediately.
+    auto bundle_mismatch = make_synthetic_bundle_with_artifacts();
+    wire::ModelBundle bad_bundle;
+    const AssetView bb = bundle_mismatch->read_view("model_bundle.pb");
+    MLVC_REQUIRE(bad_bundle.ParseFromArray(bb.data(), static_cast<int>(bb.size())),
+                 "parse bundle for mismatch test");
+    for (int i = 0; i < bad_bundle.artifacts_size(); ++i) {
+        if (bad_bundle.artifacts(i).path() == "aot/MLVCEncoder/weights.bin")
+            bad_bundle.mutable_artifacts(i)->set_sha256(std::string(32, 'z'));
+    }
+    bundle_mismatch->put("model_bundle.pb", serialize_message(bad_bundle));
+    MLVC_REQUIRE_THROWS(
+        static_cast<void>(load_model_config(*bundle_mismatch, "MLVCEncoder")),
+        "mismatched weights SHA between model_bundle.pb and graph.pb must throw");
+
+    // 6. Invalid model_part path traversal must throw.
+    MLVC_REQUIRE_THROWS(
+        static_cast<void>(load_model_config(*base, "../evil")),
+        "invalid model_part must throw");
+}
+
 }  // namespace
 
 int main()
@@ -536,6 +667,7 @@ int main()
         test_backend_registry_and_aot_assets();
         test_sessions_without_disk_io();
         test_execution_preference_and_concurrent_registry();
+        test_scoped_bundle_verification_avoids_duplicate_hashing();
         std::cout << "Runtime decoupling tests passed\n";
     } catch (const std::exception& error) {
         std::cerr << error.what() << '\n';

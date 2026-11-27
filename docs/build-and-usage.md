@@ -19,9 +19,9 @@ This guide covers prerequisites, CMake configuration across desktop and mobile t
 
 ### Additional Requirements for `driver-cubin` (Linux `x86_64` NVIDIA GPU)
 
-- **Build host**: CUDA Toolkit **`>= 12.0`** (CI/packaging pins `13.3` in [`tools/scripts/dependencies.env`](../tools/scripts/dependencies.env); verified on CUDA 12.4 and 13.3). On Ubuntu 26.04, run `./tools/scripts/bootstrap.sh --with-cuda`.
+- **Build host**: CUDA Toolkit **`>= 12.0`** (CI/packaging pins `12.6` in [`tools/scripts/dependencies.env`](../tools/scripts/dependencies.env) for broad CUDA 12.x/13.x driver compatibility; verified on CUDA 12.4 and 12.6). On Ubuntu 24.04, run `./tools/scripts/bootstrap.sh --with-cuda`.
 - **Model embedding (`MLVC_EMBED_MODELS=ON`)**: Python 3 interpreter with `protobuf==6.33.5` (from `build/model-venv` or `tools/python/requirements-proto.txt`) and canonical bundles under `models/canonical/`.
-- **Deployment host**: NVIDIA GPU (`sm_75` Turing or newer; PTX fallback for future architectures via `compute_89`) and a compatible NVIDIA display driver (`libcuda.so.1`). CUDA Toolkit is **not** required on deployment hosts.
+- **Deployment host**: NVIDIA GPU (`sm_75` Turing or newer; native SASS for `sm_75`/`sm_80`/`sm_86`/`sm_89`/`sm_90` plus `compute_80` PTX forward-compatibility for `sm_87`, Blackwell, and future architectures) and a compatible NVIDIA display driver (`libcuda.so.1`, Linux driver `>= 525` for native SASS / `>= 560` for PTX 8.5 JIT). CUDA Toolkit is **not** required on deployment hosts.
 
 ---
 

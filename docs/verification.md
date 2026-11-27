@@ -46,7 +46,7 @@ GitHub Actions runs on every push and PR to `main`:
 1. **`model-tools`**: Python 3.12 + PyTorch 2.10.0 CPU + `protobuf==6.33.5` running `aot_tests.py` and `model_package_tests.py`.
 2. **`cpu-matrix` (Linux GCC/Clang, macOS ARM64, Windows MSVC)**: Builds `MLVC_BACKEND=cpu` with warnings-as-errors, runs the complete host CTest suite (including `mlvc_cpu_backend`), installs the SDK, and verifies `tests/integration/cmake_consumer`.
 3. **`sanitizers` (Linux)**: Builds and executes the full CPU host test suite under both **ASan + UBSan** (`cpu-sanitize`) and **ThreadSanitizer** (`cpu-tsan`).
-4. **`package` (matrix: GCC and Clang)**: Installs CUDA Toolkit 13.3, runs `tools/scripts/package.sh --skip-gpu-tests --skip-models` with `-Werror`, audits ELF linkage, runs `driver-cubin-sanitize` across all host unit tests, and uploads compile-only `-ci.tar.gz` artifacts.
+4. **`package` (matrix: GCC and Clang)**: Installs CUDA Toolkit 12.6 on Ubuntu 24.04, runs `tools/scripts/package.sh --skip-gpu-tests --skip-models` with `-Werror`, audits ELF linkage, runs `driver-cubin-sanitize` across all host unit tests, and uploads compile-only `-ci.tar.gz` artifacts.
 
 ### Fuzzing (`tests/fuzz/`)
 

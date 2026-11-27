@@ -1,0 +1,179 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release version label (used for archive naming on manual runs)'
+        required: false
+        default: 'dev'
+
+permissions:
+  contents: write
+
+jobs:
+  build-cpu:
+    name: Build CPU release (${{ matrix.artifact }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - artifact: linux-x86_64-cpu
+            os: ubuntu-latest
+            archive: tar.gz
+          - artifact: macos-arm64-cpu
+            os: macos-15
+            archive: tar.gz
+          - artifact: windows-x86_64-cpu
+            os: windows-latest
+            archive: zip
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Resolve release label
+        id: meta
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.event.inputs.tag || 'dev' }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Ninja (Unix)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Install Ninja (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ninja
+
+      - name: Build, test, and package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          TAG="${{ steps.meta.outputs.tag }}"
+          PKG="mlvc_cpp-${TAG}-${{ matrix.artifact }}"
+          cmake -S . -B build/rel -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DMLVC_BACKEND=cpu \
+            -DMLVC_EMBED_MODELS=OFF \
+            -DMLVC_WARNINGS_AS_ERRORS=ON \
+            -DBUILD_TESTING=ON
+          cmake --build build/rel --parallel 4
+          ctest --test-dir build/rel --output-on-failure
+          cmake --install build/rel --prefix "$PWD/dist/$PKG"
+          cp LICENSE README.md README.zh-CN.md "$PWD/dist/$PKG/"
+          mkdir -p release-assets
+          tar -C "$PWD/dist" -czf "release-assets/${PKG}.tar.gz" "$PKG"
+
+      - name: Build, test, and package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.meta.outputs.tag }}"
+          $pkg = "mlvc_cpp-$tag-${{ matrix.artifact }}"
+          cmake -S . -B build/rel `
+            -DMLVC_BACKEND=cpu `
+            -DMLVC_EMBED_MODELS=OFF `
+            -DMLVC_WARNINGS_AS_ERRORS=ON `
+            -DBUILD_TESTING=ON
+          cmake --build build/rel --config Release --parallel 4
+          ctest --test-dir build/rel -C Release --output-on-failure
+          cmake --install build/rel --config Release --prefix "$PWD/dist/$pkg"
+          Copy-Item LICENSE, README.md, README.zh-CN.md "$PWD/dist/$pkg/"
+          New-Item -ItemType Directory -Force release-assets | Out-Null
+          Compress-Archive -Path "$PWD/dist/$pkg" -DestinationPath "release-assets/$pkg.zip"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.artifact }}
+          path: release-assets/*
+          if-no-files-found: error
+
+  build-linux-gpu-cpu:
+    name: Build Linux GPU+CPU release (driver-cubin + cpu)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Resolve release label
+        id: meta
+        run: |
+          if [[ "${GITHUB_REF_TYPE:-}" == "tag" ]]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=${{ github.event.inputs.tag || 'dev' }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install CUDA compiler toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl ninja-build
+          source tools/scripts/dependencies.env
+          cuda_pkg="cuda-toolkit-${MLVC_CUDA_VERSION//./-}"
+          curl --fail --location --retry 3 --output /tmp/cuda-keyring.deb \
+            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+          sudo dpkg -i /tmp/cuda-keyring.deb
+          sudo apt-get update
+          sudo apt-get install -y "$cuda_pkg"
+          echo "/usr/local/cuda-${MLVC_CUDA_VERSION}/bin" >> "$GITHUB_PATH"
+
+      - name: Build, verify host tests & ELF linkage, and package
+        run: |
+          TAG="${{ steps.meta.outputs.tag }}"
+          PKG="mlvc_cpp-${TAG}-linux-x86_64-cuda-cpu"
+          cmake -S . -B build/rel -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DMLVC_BACKEND=all \
+            -DMLVC_EMBED_MODELS=OFF \
+            -DMLVC_WARNINGS_AS_ERRORS=ON \
+            -DBUILD_TESTING=ON
+          cmake --build build/rel --parallel 4
+          ctest --test-dir build/rel --label-exclude gpu --output-on-failure
+          cmake --install build/rel --prefix "$PWD/dist/$PKG"
+          if readelf -d "$PWD/dist/$PKG/lib/libmlvc_codec.so" | grep -iE 'libcuda|libcudart|libcublas|libcudnn'; then
+            echo "error: forbidden direct CUDA DT_NEEDED found in libmlvc_codec.so" >&2
+            exit 1
+          fi
+          cp LICENSE README.md README.zh-CN.md "$PWD/dist/$PKG/"
+          mkdir -p release-assets
+          tar -C "$PWD/dist" -czf "release-assets/${PKG}.tar.gz" "$PKG"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-x86_64-cuda-cpu
+          path: release-assets/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: [build-cpu, build-linux-gpu-cpu]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: all-assets
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        run: |
+          cd all-assets
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: all-assets/*

@@ -19,15 +19,15 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-require_ubuntu_2604() {
+require_ubuntu_2404() {
     [[ "$(uname -s):$(uname -m)" == "Linux:x86_64" ]] || {
         echo "error: only Linux x86_64 is supported" >&2
         return 1
     }
     # shellcheck source=/dev/null
     source /etc/os-release
-    [[ "$ID:$VERSION_ID" == ubuntu:26.04 ]] || {
-        echo "error: the pinned NVIDIA stack requires Ubuntu 26.04" >&2
+    [[ "$ID:$VERSION_ID" == ubuntu:24.04 ]] || {
+        echo "error: the pinned NVIDIA stack requires Ubuntu 24.04" >&2
         return 1
     }
 }
@@ -49,7 +49,7 @@ install_host_tools() {
         command -v "$tool" >/dev/null || missing=1
     done
     [[ "$missing" -eq 0 ]] && return
-    require_ubuntu_2604
+    require_ubuntu_2404
     configure_privilege
     "${PRIVILEGE[@]}" apt-get update
     "${PRIVILEGE[@]}" apt-get install -y \
@@ -61,19 +61,21 @@ CURL_OPTIONS=(--fail --location --retry 3)
 
 fetch_cuda() {
     local cuda_root="/usr/local/cuda-$MLVC_CUDA_VERSION"
-    if [[ -x "$cuda_root/bin/nvcc" && -f "$cuda_root/lib64/libcudart.so.13" ]]; then
+    local cuda_major="${MLVC_CUDA_VERSION%%.*}"
+    local cuda_pkg="cuda-toolkit-${MLVC_CUDA_VERSION//./-}"
+    if [[ -x "$cuda_root/bin/nvcc" && -f "$cuda_root/lib64/libcudart.so.$cuda_major" ]]; then
         echo "Already present: $cuda_root"
     else
-        require_ubuntu_2604
+        require_ubuntu_2404
         configure_privilege
         local keyring
         keyring="$(mktemp --suffix=.deb)"
         curl "${CURL_OPTIONS[@]}" --output "$keyring" \
-            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2604/x86_64/cuda-keyring_1.1-1_all.deb
+            https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
         "${PRIVILEGE[@]}" dpkg -i "$keyring"
         rm -f -- "$keyring"
         "${PRIVILEGE[@]}" apt-get update
-        "${PRIVILEGE[@]}" apt-get install -y cuda-toolkit-13-3
+        "${PRIVILEGE[@]}" apt-get install -y "$cuda_pkg"
         [[ -x "$cuda_root/bin/nvcc" ]] || {
             echo "error: CUDA installation failed" >&2
             return 1

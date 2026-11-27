@@ -50,7 +50,8 @@ trap 'rm -f "$temporary"' EXIT
     -gencode arch=compute_80,code=sm_80 \
     -gencode arch=compute_86,code=sm_86 \
     -gencode arch=compute_89,code=sm_89 \
-    -gencode arch=compute_89,code=compute_89 \
+    -gencode arch=compute_90,code=sm_90 \
+    -gencode arch=compute_80,code=compute_80 \
     "$ROOT/src/backends/driver_cubin/kernels/module.cu" \
     -o "$temporary"
 

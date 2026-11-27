@@ -58,7 +58,7 @@ if [[ "$(uname -s)" != "Linux" ]]; then
     exit 1
 fi
 command -v cmake >/dev/null || { echo "error: cmake is required" >&2; exit 1; }
-command -v nvcc >/dev/null || { echo "error: CUDA 13.3 toolkit is required" >&2; exit 1; }
+command -v nvcc >/dev/null || { echo "error: CUDA $MLVC_CUDA_VERSION toolkit is required" >&2; exit 1; }
 for tool in ldd python3 sha256sum tar; do
     command -v "$tool" >/dev/null || { echo "error: $tool is required" >&2; exit 1; }
 done
@@ -256,9 +256,10 @@ package_driver_cubin() {
         printf 'floating_point=fp16-only\n'
         printf 'runtime_gpu_dependency=libcuda.so.1\n'
         printf 'cuda_toolkit_runtime_dependency=false\n'
+        printf 'cuda_toolkit=%s\n' "$CUDA_TOOLKIT_VERSION"
         printf 'build_driver=%s\n' "$DRIVER_VERSION"
         printf 'fatbin_sha256=%s\n' "$(sha256sum "$fatbin" | cut -d' ' -f1)"
-        printf 'fatbin_targets=sm_75,sm_80,sm_86,sm_89,compute_89\n'
+        printf 'fatbin_targets=sm_75,sm_80,sm_86,sm_89,sm_90,compute_80\n'
         if [[ "$SKIP_MODELS" -eq 0 ]]; then
             printf 'model_storage=embedded:lib/libmlvc_codec.so\n'
         else
